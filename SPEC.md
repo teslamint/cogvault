@@ -143,8 +143,9 @@ Exists(path) → (bool, error)
 ### 5.2 경로 규칙
 
 - vault root 기준 **상대경로**.
-- 정규화 후 `..` → `ErrTraversal`.
-- 심볼릭 링크 → `ErrSymlink`.
+- 빈 경로 `""` → `ErrNotFound`.
+- 절대경로 또는 raw path의 `..` 컴포넌트 → `ErrTraversal`.
+- 경로 컴포넌트 중 심볼릭 링크 → `ErrSymlink`.
 
 ### 5.3 Read
 
@@ -162,6 +163,7 @@ Exists(path) → (bool, error)
 ### 5.5 List
 
 - `prefix`는 **디렉토리**여야 함. 파일 경로 → `ErrNotFound`.
+- `exclude_read` 디렉토리 자체 접근 → `ErrPermission`.
 - 직계 자식만 (비재귀). 디렉토리는 `/`로 끝남.
 - `exclude`, `exclude_read` 제외. 빈 디렉토리면 빈 배열.
 

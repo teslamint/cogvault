@@ -73,8 +73,13 @@ type FSStorage struct {
 경로 파이프라인:
 
 ```
-relPath → filepath.Clean → ".." 체크 → abs 생성 → Lstat 심볼릭 체크 → 메서드별 검증
+relPath → raw ".." 체크 → filepath.Clean → abs 생성 → 경로 컴포넌트별 Lstat 심볼릭 체크 → 메서드별 검증
 ```
+
+메서드 의미:
+- `Read`: `exclude_read` → `ErrPermission`
+- `List`: `exclude_read` 디렉토리 자체 접근 → `ErrPermission`, child는 `exclude` + `exclude_read` 필터링
+- `Exists`: `exclude_read` → `false, nil`
 
 List 반환: `ListEntry{Path, Name, IsDir}`. title/type은 MCP 핸들러가 `Index.GetMeta`로 보강.
 
