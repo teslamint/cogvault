@@ -1,5 +1,33 @@
 {
   "version": 1,
-  "checkpoints": {},
-  "sessions": {}
+  "checkpoints": {
+    "a079b360-ae42-4d87-a04e-83f4d715fd21": {
+      "session_id": "9690acfc-a59b-48a6-be42-89b596009f00",
+      "commit_hash": "803779b108914ad33ee0c06d4a341b96166c8651",
+      "created_at": "2026-04-06 04:26:15"
+    },
+    "ca1a31ee-b669-4d3a-937d-bbf851c6afd7": {
+      "session_id": "9690acfc-a59b-48a6-be42-89b596009f00",
+      "commit_hash": "461f7481928a750402df96c6c633d73941d03086",
+      "created_at": "2026-04-06 04:26:23"
+    },
+    "0a89ace0-f6aa-44e8-98ce-afa0e0ac17bb": {
+      "session_id": "9690acfc-a59b-48a6-be42-89b596009f00",
+      "commit_hash": "432ff4a99534837f2e2d0d587d63a11979f8686d",
+      "created_at": "2026-04-06 04:26:29"
+    },
+    "7843c622-eb64-4f1d-ba1b-947f48a99184": {
+      "session_id": "9690acfc-a59b-48a6-be42-89b596009f00",
+      "commit_hash": "fa5a60819d4fb0f81e0badfb44fab5ae17f92437",
+      "created_at": "2026-04-06 04:34:34"
+    }
+  },
+  "sessions": {
+    "9690acfc-a59b-48a6-be42-89b596009f00": {
+      "session_type": "claude",
+      "started_at": "2026-04-06T02:48:18.135135+00:00",
+      "total_turns": 23
+    }
+  },
+  "updated_at": "2026-04-06T04:34:34.070097+00:00"
 }

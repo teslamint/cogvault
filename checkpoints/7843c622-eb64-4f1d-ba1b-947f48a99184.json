@@ -1,0 +1,12 @@
+{
+  "id": "7843c622-eb64-4f1d-ba1b-947f48a99184",
+  "session_id": "9690acfc-a59b-48a6-be42-89b596009f00",
+  "git_commit_hash": "fa5a60819d4fb0f81e0badfb44fab5ae17f92437",
+  "git_branch": "entirecontext/checkpoints/v1",
+  "parent_checkpoint_id": null,
+  "files_snapshot": null,
+  "diff_summary": ".gitignore                                  |   2 -\n CLAUDE.md                                   | 264 ------------\n DESIGN.md                                   | 396 ------------------\n SPEC.md                                     | 610 ----------------------------\n docs/decisions/0001-config-validation.md    |  51 ---\n docs/decisions/0002-step1-deferred-items.md |  54 ---\n docs/decisions/README.md                    |  42 --\n docs/research/index.md                      |  13 -\n docs/research/step1-review-notes.md         |  35 --\n go.mod                                      |   5 -\n go.sum                                      |   4 -\n internal/config/config.go                   | 140 -------\n internal/config/config_test.go              | 423 -------------------\n internal/errors/errors.go                   |  11 -\n internal/errors/errors_test.go              |  37 --\n manifest.json                               |   5 +\n 16 files changed, 5 insertions(+), 2087 deletions(-)",
+  "agent_state": null,
+  "created_at": "2026-04-06 04:34:34",
+  "metadata": "{\"source\": \"post_commit\"}"
+}
