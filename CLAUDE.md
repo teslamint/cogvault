@@ -176,6 +176,10 @@ SPEC/DESIGN에는 MVP만 정의되어 있다. 향후 방향의 맥락:
 - **테스트**: `go test -race ./...`. 인터페이스 mock + testdata/fixtures.
 - **의존성**: `go.mod`에 정확한 버전 명시. `go.sum` 커밋. `mcp-go`는 v0.46.0 참조(sage-wiki 기준). 실제 버전은 구현 시점에 확정.
 - **config 검증 원칙**: `docs/decisions/0001-config-validation.md` 참조. config/storage 책임 경계, 경로 검증 순서, 에러 형식, KnownFields, AllExcluded 등.
+- **storage write 직렬화**: `docs/decisions/0006-storage-write-serialization.md` 참조. MVP는 단일 global mutex.
+- **storage 에러 매핑 원칙**: `docs/decisions/0007-storage-error-mapping.md` 참조. sentinel과 raw fs error 경계 정의.
+- **adapter 구현 결정**: `docs/decisions/0008-step3-adapter-decisions.md` 참조. 보안 함수 공유, file-level exclude, markdown image 분리, TOCTOU 범위.
+- **Step 3 미해결 항목**: `docs/decisions/0009-step3-deferred-items.md` 참조. Step 4 exclude 테스트, Step 5 root 팩토리, pathutil 통합.
 
 ---
 
@@ -193,6 +197,7 @@ SPEC/DESIGN에는 MVP만 정의되어 있다. 향후 방향의 맥락:
 | validation 에러에 config 파일 경로 미포함 | 다중 vault/로그 집계 시 원인 파악 어려움 | `docs/decisions/0002-step1-deferred-items.md` 참조. |
 | `internal/errors` 패키지명이 stdlib `errors`와 충돌 | 소비자마다 alias import 필요 | `docs/decisions/0002-step1-deferred-items.md` 참조. |
 | `Storage.List()`가 child symlink entry를 노출 | list에 보인 경로가 이후 access에서 `ErrSymlink`로 실패할 수 있음 | `docs/decisions/0005-step2-deferred-items.md` 참조. |
+| 단일 global write mutex | 병렬 write throughput이 제한될 수 있음 | `docs/decisions/0006-storage-write-serialization.md` 참조. |
 
 ---
 
