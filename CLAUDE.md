@@ -18,6 +18,8 @@
 - 리뷰 초안, 옵션 비교, 조사 메모는 `docs/research/`에 기록하고, 최종 판단은 `docs/decisions/`로 승격한다.
 - `CLAUDE.md`에만 있는 결정은 정본으로 간주하지 않는다.
 
+이 구조의 근거와 유지 원칙은 `docs/decisions/0003-canonical-context-locations.md` 참조.
+
 ---
 
 ## 1. 프로젝트 기원
