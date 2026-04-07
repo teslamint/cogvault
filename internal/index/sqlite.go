@@ -355,7 +355,7 @@ func (s *SQLiteIndex) CheckConsistency(store storage.Storage, adpt adapter.Adapt
 	indexed, err := s.loadIndexedHashes()
 	s.mu.RUnlock()
 	if err != nil {
-		return 0, 0, 0, fmt.Errorf("index.CheckConsistency: %w", err)
+		return 0, 0, 0, fmt.Errorf("index.CheckConsistency: %w: %w", ErrConsistencySystemic, err)
 	}
 
 	var (
@@ -399,7 +399,7 @@ func (s *SQLiteIndex) CheckConsistency(store storage.Storage, adpt adapter.Adapt
 	})
 
 	if scanErr != nil {
-		return 0, 0, 0, fmt.Errorf("index.CheckConsistency: scan: %w", scanErr)
+		return 0, 0, 0, fmt.Errorf("index.CheckConsistency: scan: %w: %w", ErrConsistencySystemic, scanErr)
 	}
 
 	// Remaining in indexed = deleted/excluded
@@ -415,31 +415,31 @@ func (s *SQLiteIndex) CheckConsistency(store storage.Storage, adpt adapter.Adapt
 
 	tx, txErr := s.db.Begin()
 	if txErr != nil {
-		return 0, 0, 0, fmt.Errorf("index.CheckConsistency: begin tx: %w", txErr)
+		return 0, 0, 0, fmt.Errorf("index.CheckConsistency: begin tx: %w: %w", ErrConsistencySystemic, txErr)
 	}
 	defer tx.Rollback()
 
 	for _, p := range toRemove {
 		if err := s.removeTx(tx, p); err != nil {
-			return 0, 0, 0, fmt.Errorf("index.CheckConsistency: apply: %w", err)
+			return 0, 0, 0, fmt.Errorf("index.CheckConsistency: apply: %w: %w", ErrConsistencySystemic, err)
 		}
 		removed++
 	}
 	for _, e := range toUpdate {
 		if err := s.addTx(tx, e.path, e.content, e.meta); err != nil {
-			return 0, 0, 0, fmt.Errorf("index.CheckConsistency: apply: %w", err)
+			return 0, 0, 0, fmt.Errorf("index.CheckConsistency: apply: %w: %w", ErrConsistencySystemic, err)
 		}
 		updated++
 	}
 	for _, e := range toAdd {
 		if err := s.addTx(tx, e.path, e.content, e.meta); err != nil {
-			return 0, 0, 0, fmt.Errorf("index.CheckConsistency: apply: %w", err)
+			return 0, 0, 0, fmt.Errorf("index.CheckConsistency: apply: %w: %w", ErrConsistencySystemic, err)
 		}
 		added++
 	}
 
 	if err := tx.Commit(); err != nil {
-		return 0, 0, 0, fmt.Errorf("index.CheckConsistency: commit: %w", err)
+		return 0, 0, 0, fmt.Errorf("index.CheckConsistency: commit: %w: %w", ErrConsistencySystemic, err)
 	}
 
 	s.lastConsistency.Store(time.Now().UnixNano())

@@ -1,9 +1,13 @@
 package index
 
 import (
+	"errors"
+
 	"github.com/teslamint/cogvault/internal/adapter"
 	"github.com/teslamint/cogvault/internal/storage"
 )
+
+var ErrConsistencySystemic = errors.New("systemic consistency error")
 
 type Index interface {
 	Add(path, content string, meta map[string]string) error
