@@ -1,7 +1,10 @@
 package adapter
 
+// Adapter parses and scans markdown files in a vault.
 type Adapter interface {
 	Name() string
+	// Scan walks root for .md files, excluding paths in exclude, calling fn for each.
+	// fn is called sequentially from a single goroutine (not concurrent).
 	Scan(root string, exclude []string, fn func(path string) error) error
 	Parse(root, relPath string, includeContent bool) (*Source, error)
 }
