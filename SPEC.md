@@ -190,7 +190,7 @@ Exists(path) → (bool, error)
 Add(path, content string, meta map[string]string) → error
 Search(query string, limit int, scope string) → ([]Result, error)
 Remove(path) → error
-Rebuild() → error
+Rebuild(storage, adapter) → error
 CheckConsistency(storage, adapter, force bool) → (added, removed, updated int, error)
 GetMeta(path) → (*FileMeta, error)
 ```
@@ -208,14 +208,14 @@ Result { Path, Title, Type, Snippet string; Score float64 }
 ### 6.3 FileMeta
 
 ```
-FileMeta { Path, Title, Type, ContentHash, ModTime, IndexedAt string }
+FileMeta { Path, Title, Type, ContentHash, IndexedAt string }
 ```
 
 ### 6.4 데이터 테이블
 
 ```
 wiki_fts(path, title, content, tags)
-file_meta(path PK, title, type, content_hash, mod_time, indexed_at)
+file_meta(path PK, title, type, content_hash, indexed_at)
 ```
 
 ### 6.5 인덱싱 범위

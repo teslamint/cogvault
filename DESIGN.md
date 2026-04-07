@@ -141,8 +141,11 @@ Aliases: frontmatter["aliases"]
 type SQLiteIndex struct {
     db              *sql.DB
     cfg             *config.Config
-    lastConsistency time.Time
-    mu              sync.Mutex
+    root            string           // adapter 전달용 only
+    lastConsistency atomic.Int64     // UnixNano
+    mu              sync.RWMutex    // DB read/write
+    ccMu            sync.Mutex      // CheckConsistency 직렬화
+    useTrigram      bool
 }
 ```
 
@@ -153,7 +156,7 @@ PRAGMA journal_mode=WAL;
 
 CREATE VIRTUAL TABLE IF NOT EXISTS wiki_fts USING fts5(
     path, title, content, tags,
-    tokenize='trigram'
+    tokenize='trigram'  -- 미지원 시 unicode61 fallback
 );
 
 CREATE TABLE IF NOT EXISTS file_meta (
@@ -161,33 +164,45 @@ CREATE TABLE IF NOT EXISTS file_meta (
     title TEXT DEFAULT '',
     type TEXT DEFAULT '',
     content_hash TEXT NOT NULL,
-    mod_time TEXT NOT NULL,
     indexed_at TEXT NOT NULL
 );
 ```
 
-**Add**: 단일 SQL 트랜잭션으로 FTS + file_meta 동시 갱신.
+기존 DB 열기 시 `sqlite_master`로 tokenizer 감지, `PRAGMA table_info`로 스키마 불일치(mod_time 컬럼) 감지 → 불일치 시 wiki_fts + file_meta 모두 DROP 후 재생성.
+
+**Add**: 순수 인덱싱 API. 주어진 content를 hash + FTS에 저장. 디스크 접근 안 함. 단일 TX.
 
 **Search**:
-- query 길이 ≥ 3 → FTS5 MATCH
-- query 길이 ≤ 2 → `content LIKE '%query%'`
-- scope: `WHERE path LIKE '{wikiDir}/%'` 또는 `NOT LIKE`. `wikiDir`은 `cfg.WikiDir`.
-- `snippet`: 첫 일치 지점 주변 텍스트를 잘라 생성. 추출 불가 시 빈 문자열.
-- `score`: 정렬용 opaque 값. FTS5 MATCH와 LIKE fallback은 서로 다른 계산식을 쓸 수 있으며, 같은 응답 안에서 내림차순 정렬만 보장.
+- query 길이 ≥ 3 + useTrigram → FTS5 MATCH
+- query 길이 ≤ 2 또는 !useTrigram → `content LIKE '%query%'` + Go 기반 snippet 생성
+- scope: `escapeLike(normalizePath(wikiDir)) + "/%"` LIKE 패턴
+- `snippet`: FTS5 → `snippet()` 함수, LIKE → rune 기반 전후 32 rune 잘라 생성
+- `score`: FTS5 → -rank, LIKE → 0
 
 **CheckConsistency(storage, adapter, force)**:
 
 ```
-force=false AND now-lastConsistency < interval → skip
-  │
-  ▼
-1. file_meta 전체 (path, mod_time) 로드
-2. 각 path: os.Stat → 삭제/변경 → Remove 또는 재인덱싱
-3. adapter.Scan → file_meta에 없는 신규 → adapter.Parse + Add
-4. lastConsistency = now
+1. Lock-free interval check (atomic.Int64)
+2. ccMu.Lock + double-check interval
+3. RLock → indexed map (path → content_hash) 로드 → RUnlock
+4. Scan 기반 단일 패스:
+   - 기존 파일: store.Read → content_hash 비교 → 변경 시 Parse(false) → meta 추출
+   - 신규 파일: store.Read + Parse(false) → Add
+   - Parse/Read 에러: skip, errs 누적
+   - Scan 에러: toRemove skip, 즉시 에러 반환 (lastConsistency 미갱신)
+5. indexed 잔여 = 삭제/exclude → Remove
+6. Lock → 단일 TX apply (all-or-nothing) → lastConsistency 갱신 (per-file 에러 시에도) → Unlock
 ```
 
+**Rebuild(storage, adapter)**: clear + CheckConsistency(force=true).
+
 **GetMeta**: `SELECT ... FROM file_meta WHERE path = ?`. 미존재 → `ErrNotFound`.
+
+**BuildMeta(src)**: Source → meta map. `frontmatter["type"]` → 페이지 타입 (SourceType 아님).
+
+**경로 정규화**: 모든 public method 입력을 `normalizePath` (filepath.Clean + `\` → `/`)로 통일.
+
+**CheckConsistency 에러 처리**: per-file 에러 → `(counts, errors.Join(errs...))` 반환. error가 non-nil이어도 Search/GetMeta 정상 호출 가능. 상위 레이어(mcp)의 에러 처리 정책은 Step 5에서 결정.
 
 ### 2.6 mcp/
 
@@ -362,13 +377,15 @@ var defaultSchema string
 ```
 Storage.Read     — 잠금 없음
 Storage.Write    — Storage.mu
-Index.Search     — SQLite WAL 읽기
-Index.Add        — Index.mu
-Index.GetMeta    — SQLite WAL 읽기
-CheckConsistency — Index.mu
+Index.Search     — Index.mu.RLock (WAL 읽기)
+Index.Add        — Index.mu.Lock
+Index.GetMeta    — Index.mu.RLock (WAL 읽기)
+Index.Remove     — Index.mu.Lock
+Index.Rebuild    — Index.mu.Lock → CheckConsistency
+CheckConsistency — ccMu.Lock (직렬화) + mu.RLock (읽기) + mu.Lock (적용)
 ```
 
-Storage.mu ↔ Index.mu 동시 미획득. 데드락 없음.
+Storage.mu ↔ Index.mu 동시 미획득. ccMu는 CheckConsistency 전용. 데드락 없음.
 
 ---
 
