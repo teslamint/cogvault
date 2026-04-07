@@ -58,6 +58,20 @@ go test -race ./...
 - [ ] Step 8: integration tests
 - [ ] Step 9: 1-week real-world validation
 
+### v0.2+ candidate ideas
+
+- [ ] Taxonomy/status tools: add a lightweight `wiki_status` or `wiki_taxonomy` view so agents can inspect the vault structure before broad search.
+- [ ] Duplicate-aware write workflow: add a pre-write duplicate/similarity check to reduce parallel pages with overlapping meaning.
+- [ ] Wake-up summary: generate a small always-loadable vault summary separate from `_schema.md` for low-token agent bootstrapping.
+- [ ] Stronger wiki navigation model: formalize `_wiki/` subtrees as a first-class browsing taxonomy rather than relying only on path conventions.
+
+Out of scope for MVP and not planned as direct adoptions:
+
+- AAAK-style custom compression dialect
+- vector/semantic search as a standalone replacement for SQLite FTS (hybrid complement planned for v0.3+)
+- temporal knowledge graph as a required core abstraction
+- conversation-mining as a primary product mode
+
 ## Project docs
 
 - [SPEC.md](SPEC.md) — MVP specification (behavior contract)
