@@ -412,6 +412,26 @@ func hasEntry(entries []ListEntry, path string) bool {
 	return false
 }
 
+func TestWriteExcludeReadBlocked(t *testing.T) {
+	root := t.TempDir()
+	store := newTestStorage(t, root, &config.Config{
+		WikiDir:     "_wiki",
+		Exclude:     []string{},
+		ExcludeRead: []string{"_wiki/private"},
+	})
+
+	err := store.Write("_wiki/private/secret.md", []byte("should fail"))
+	if !errors.Is(err, cverr.ErrPermission) {
+		t.Fatalf("Write to exclude_read dir: expected ErrPermission, got %v", err)
+	}
+
+	// Verify non-excluded write still works
+	err = store.Write("_wiki/notes/ok.md", []byte("should succeed"))
+	if err != nil {
+		t.Fatalf("Write to non-excluded dir: %v", err)
+	}
+}
+
 func containsString(items []string, want string) bool {
 	for _, item := range items {
 		if item == want {

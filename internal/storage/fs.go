@@ -53,6 +53,10 @@ func (fs *FSStorage) Write(path string, data []byte) error {
 		return err
 	}
 
+	if fs.isExcludeRead(cleaned) {
+		return fmt.Errorf("storage.Write %s: %w", path, cverr.ErrPermission)
+	}
+
 	cleanedWikiDir := filepath.Clean(fs.cfg.WikiDir)
 	wikiPrefix := cleanedWikiDir + string(os.PathSeparator)
 	if !strings.HasPrefix(cleaned, wikiPrefix) {
