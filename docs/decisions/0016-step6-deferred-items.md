@@ -11,7 +11,7 @@ Step 6 implementation and review surfaced items that are known, understood, and 
 
 The following items are deferred:
 
-1. **Schema content as `const` in `cmd/cogvault/init.go`**. Step 7 replaces this with `//go:embed schema/default_schema.md`. When migrating, the embedded file should live in an `internal/` package (not `cmd/`) so that future entry points (test harness, HTTP handler) can reuse it without importing from `cmd/`.
+1. ~~**Schema content as `const` in `cmd/cogvault/init.go`**~~. Resolved in Step 7: migrated to `//go:embed` in `internal/schema/` package.
 
 2. **`serve` per-file error warning has no CLI-level test**. The `serve` command's per-file error → warning path mirrors `init` (tested in `TestInitPerFileErrorContinues`), but `serve` itself blocks on `ServeStdio`, making it difficult to test the warning output in a CLI test. A unit test of the error classification logic (shared helper extraction) would close this gap. Candidate for Step 8 integration tests.
 

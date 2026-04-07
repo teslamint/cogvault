@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/teslamint/cogvault/internal/schema"
 )
 
 func executeCommand(args ...string) (stdout, stderr string, err error) {
@@ -39,6 +41,19 @@ func TestInitCreatesFiles(t *testing.T) {
 		if _, err := os.Stat(p); err != nil {
 			t.Errorf("expected %s to exist: %v", rel, err)
 		}
+	}
+}
+
+func TestInitSchemaMatchesEmbed(t *testing.T) {
+	dir := t.TempDir()
+	_, _, err := executeCommand("init", "--vault", dir)
+	if err != nil {
+		t.Fatalf("init failed: %v", err)
+	}
+
+	got := readFile(t, filepath.Join(dir, "_wiki", "_schema.md"))
+	if got != schema.DefaultContent {
+		t.Errorf("schema file content does not match embedded asset:\ngot length:  %d\nwant length: %d", len(got), len(schema.DefaultContent))
 	}
 }
 
