@@ -13,9 +13,9 @@ Step 3 구현 및 리뷰에서 확인된 후속 단계 의무사항과 미해결
 
 `adapter.Scan`의 exclude 파라미터는 타입으로 강제되지 않고 호출자 규약에 의존. CheckConsistency가 `cfg.AllExcluded()`를 전달하는지 테스트로 잠가야 함.
 
-### Step 5 의무: root 팩토리 단일화
+### ~~Step 5 의무: root 팩토리 단일화~~ → Resolved in 0013 D1
 
-`root` (절대 경로)는 trusted input으로 설계됨. 현재는 문서 전제에 불과하며, Step 5 MCP 서버 생성 시 root 경로 생성을 단일 팩토리로 통합하여 코드로 강제해야 함.
+`root` (절대 경로)는 trusted input으로 설계됨. `internal/mcp/root.go`의 `ResolveRoot`로 해결. See `docs/decisions/0013-step5-mcp-decisions.md` D1.
 
 ### storage와 adapter의 path 유틸 통합
 
@@ -29,9 +29,9 @@ Step 3 구현 및 리뷰에서 확인된 후속 단계 의무사항과 미해결
 
 현재 Markdown adapter의 외부 링크 판정 규칙(scheme, 절대경로, protocol-relative, heading-only, Windows 절대)은 코드와 계획 문서에만 존재. Markdown adapter가 fallback 이상이 되면 SPEC.md에 승격 필요.
 
-### Step 5 의무: wiki_list prefix 기본값 변환
+### ~~Step 5 의무: wiki_list prefix 기본값 변환~~ → Resolved in 0013 D2
 
-SPEC 8.4는 `prefix` 기본값을 `""`로 정의하지만, 사용 예시(SPEC 9.1)는 `wiki_dir/` 기준 탐색을 전제. `storage.List("")`는 빈 경로를 `ErrNotFound`로 처리하므로, MCP 핸들러에서 빈 prefix → `cfg.WikiDir + "/"` 변환이 필요한지 결정 필요.
+Empty prefix → `"."` (vault root). See `docs/decisions/0013-step5-mcp-decisions.md` D2.
 
 ## Revisit Triggers
 
