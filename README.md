@@ -52,7 +52,7 @@ go test -race ./...
 - [x] Step 2: storage (interface + fs + security tests)
 - [x] Step 3: adapter (interface + obsidian scanner/parser)
 - [x] Step 4: index (interface + sqlite + consistency)
-- [ ] Step 5: mcp (server + tools + round-trip tests)
+- [x] Step 5: mcp (server + tools + round-trip tests)
 - [ ] Step 6: cmd (cobra: init/search/serve)
 - [ ] Step 7: schema (default_schema.md + go:embed)
 - [ ] Step 8: integration tests
