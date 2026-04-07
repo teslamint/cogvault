@@ -2,7 +2,7 @@
 
 MCP tool server for building LLM-curated wikis in Obsidian vaults.
 
-**Status:** MVP in progress — Step 7/9 complete
+**Status:** MVP in progress — Step 8/9 complete
 
 ## MVP capabilities (planned)
 
@@ -15,7 +15,7 @@ MCP tool server for building LLM-curated wikis in Obsidian vaults.
 
 ### Current state
 
-Steps 1–7 complete: sentinel error types (`internal/errors`), YAML config loading with strict validation (`internal/config`), storage interface with fs security (`internal/storage`), adapter interface with obsidian/markdown parsers (`internal/adapter`), index interface with SQLite FTS5 + consistency (`internal/index`), MCP server with 6 tools (`internal/mcp`), Cobra CLI (`cmd/cogvault`), and embedded default schema via `go:embed` (`internal/schema`).
+Steps 1–8 complete: sentinel error types (`internal/errors`), YAML config loading with strict validation (`internal/config`), storage interface with fs security (`internal/storage`), adapter interface with obsidian/markdown parsers (`internal/adapter`), index interface with SQLite FTS5 + consistency (`internal/index`), MCP server with 6 tools (`internal/mcp`), Cobra CLI (`cmd/cogvault`), embedded default schema via `go:embed` (`internal/schema`), and integration tests with fixture data (`testdata/fixtures/`).
 
 ## CLI
 
@@ -54,7 +54,7 @@ go test -race ./...
 - [x] Step 5: mcp (server + tools + round-trip tests)
 - [x] Step 6: cmd (cobra: init/search/serve)
 - [x] Step 7: schema (default_schema.md + go:embed)
-- [ ] Step 8: integration tests
+- [x] Step 8: integration tests
 - [ ] Step 9: 1-week real-world validation
 
 ### v0.2+ candidate ideas

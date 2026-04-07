@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -67,11 +66,8 @@ func runInit(cmd *cobra.Command, args []string) error {
 
 	if dbExisted {
 		_, _, _, ccErr := idx.CheckConsistency(fsStore, adpt, true)
-		if ccErr != nil {
-			if errors.Is(ccErr, index.ErrConsistencySystemic) {
-				return fmt.Errorf("init consistency check: %w", ccErr)
-			}
-			cmd.PrintErrln("warning: some files had errors during consistency check:", ccErr)
+		if err := handleConsistencyResult(cmd, ccErr); err != nil {
+			return fmt.Errorf("init consistency check: %w", err)
 		}
 	} else {
 		if err := idx.Rebuild(fsStore, adpt); err != nil {
