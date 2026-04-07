@@ -13,13 +13,19 @@ Step 4 implements the index layer (internal/index/) with SQLite FTS5. Several de
 
 Index never calls `os.Stat` or `os.ReadFile`. File content is read via `store.Read()` (respecting Storage's exclude_read policy). File enumeration uses `adpt.Scan()`. The `root` field is only passed to adapter methods.
 
+→ Background: `docs/research/step4-index-review-notes.md`
+
 ### D2: Change detection via content_hash
 
 Instead of mod_time comparison (DESIGN original), CheckConsistency uses SHA-256 content hash from `store.Read` raw bytes. This detects sub-second changes and avoids the precision issue of RFC3339 truncation. mod_time column is removed from file_meta.
 
+→ Background: `docs/research/step4-index-review-notes.md`
+
 ### D3: FileMeta.ModTime removed (SPEC 6.3 deviation)
 
 Without `os.Stat`, actual file modification time cannot be obtained. `IndexedAt` answers "when was this indexed" and `ContentHash` answers "has it changed". SPEC 6.3 and 6.4 updated accordingly.
+
+→ Background: `docs/research/step4-index-review-notes.md`
 
 ### D4: Rebuild signature changed (SPEC 6.1 deviation)
 
@@ -29,13 +35,19 @@ Without `os.Stat`, actual file modification time cannot be obtained. `IndexedAt`
 
 All paths (Add and CheckConsistency) store raw file content in FTS, including frontmatter YAML. This ensures hash consistency — the same bytes go to both hash and FTS. Frontmatter noise in search results is a known trade-off accepted for MVP. v0.2 may introduce body-only FTS normalization.
 
+→ Background: `docs/research/step4-index-review-notes.md`
+
 ### D6: Lock scope minimization
 
 CheckConsistency uses a 2-phase approach: lock-free IO-bound scan, then brief lock for DB apply. `atomic.Int64` for lock-free interval check. `ccMu` serializes CheckConsistency calls. `mu` (RWMutex) protects DB access. Search/GetMeta use RLock and are not blocked during the scan phase.
 
+→ Background: `docs/research/step4-index-review-notes.md`
+
 ### D7: Failure semantics
 
 Two failure phases with different semantics:
+
+→ Background: `docs/research/step4-index-review-notes.md`
 
 **Scan phase (collect)**: Per-file Parse/Read errors during scanning skip the file and accumulate errors in `errs`. The file's existing index state is preserved (not removed, not updated). These errors are returned alongside counts.
 
@@ -44,6 +56,7 @@ Two failure phases with different semantics:
 - Scan errors (systemic): skip toRemove, return error, lastConsistency NOT updated (retry on next call).
 - Per-file scan errors: lastConsistency IS updated (prevents retry storm).
 - Apply errors: transaction rolled back, lastConsistency NOT updated.
+- Scan + apply errors simultaneously: apply failure takes precedence — TX rolled back, lastConsistency NOT updated, scan-phase errs discarded.
 - CheckConsistency error is transparent — caller decides how to handle.
 
 ### D8: SPEC 6.9 unchanged
@@ -58,9 +71,13 @@ Added interface comment to `adapter.Adapter.Scan`: "fn is called sequentially fr
 
 If FTS5 trigram tokenizer is unavailable, falls back to unicode61. In this mode, all searches use LIKE fallback (no FTS5 MATCH). LIKE `%query%` satisfies SPEC 6.8 Korean support for all query lengths. Performance trade-off: O(rows × content_size) vs indexed lookup.
 
+→ Background: `docs/research/step4-index-review-notes.md`
+
 ### D11: Path normalization
 
 All paths stored and queried with forward slash (`/`) via `normalizePath()` = `filepath.Clean` + `\` → `/`. Applied to all public method inputs and CheckConsistency's Scan callback paths.
+
+→ Background: `docs/research/step4-index-review-notes.md`
 
 ### D12: Tokenizer detection on existing DB
 
@@ -69,6 +86,8 @@ All paths stored and queried with forward slash (`/`) via `normalizePath()` = `f
 ### D13: BuildMeta uses frontmatter type
 
 `meta["type"]` = `src.Frontmatter["type"].(string)` (page type like "source"), NOT `src.SourceType` (adapter name like "obsidian"). Both CheckConsistency and write-then-index (Step 5) must use `BuildMeta()` for consistency.
+
+→ Background: `docs/research/step4-index-review-notes.md`
 
 ## Specification Changes
 

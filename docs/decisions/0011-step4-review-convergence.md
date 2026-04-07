@@ -19,12 +19,7 @@ These points repeatedly surfaced in review because they were reconstruction know
 
 ### D1: `CheckConsistency` has asymmetric failure semantics by design
 
-`CheckConsistency` intentionally uses different semantics for its two phases:
-
-- **Scan/collect phase**: best-effort. Per-file `Read`/`Parse` failures are accumulated and returned alongside counts. Existing index state for those files is preserved.
-- **Apply phase**: single transaction, all-or-nothing. If any `removeTx` or `addTx` operation fails, the whole apply transaction is rolled back.
-
-This asymmetry is intentional, not incidental.
+CheckConsistency uses best-effort scan + all-or-nothing apply. See `docs/decisions/0010-step4-index-decisions.md` D7 for details.
 
 ### D2: Plan files are working notes, not canonical behavior
 
@@ -46,14 +41,7 @@ For Step 4, rollback guarantees belong to `CheckConsistency`, not to SQLite tran
 
 ### Why best-effort scan + atomic apply
 
-If scan failures were also fail-fast, a single unreadable or unparsable file would prevent the system from reconciling unrelated changes. That would turn one bad file into a vault-wide retry storm.
-
-If apply were best-effort, the index could commit partially reconciled state after `CheckConsistency`. That is worse for callers because it destroys the "last-known-good" property at the exact point where reconciliation is supposed to make state more trustworthy.
-
-The chosen split preserves both goals:
-
-- bounded staleness and retry control during scanning,
-- crisp post-apply semantics when the DB is actually mutated.
+See 0010 D7 and `docs/research/step4-index-review-notes.md` 'Why all-or-nothing TX'.
 
 ### Why plan drift matters
 

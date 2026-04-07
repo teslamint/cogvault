@@ -20,6 +20,11 @@
 
 이 구조의 근거와 유지 원칙은 `docs/decisions/0003-canonical-context-locations.md` 참조.
 
+유지 원칙:
+- 계획 파일(`~/.claude/plans/`)과 정본의 관계: `docs/decisions/0011-step4-review-convergence.md` D2 참조. 계획 파일은 작업 메모이며, 구현 후 정본과 다르면 계획이 stale.
+- `AGENTS.md`는 `CLAUDE.md`의 포인터 문서. 본문 복제 금지. 에이전트별 차이점만 기술.
+- Step 완료 후 반드시 갱신: README 진행 상태, 코딩 컨벤션 결정 참조 목록.
+
 ---
 
 ## 1. 프로젝트 기원

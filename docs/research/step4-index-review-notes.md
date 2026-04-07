@@ -10,14 +10,14 @@ This document captures context from the Step 4 planning and review process (8 se
 
 **Original DESIGN**: `os.Stat` mod_time comparison.
 
-**Problem chain** (discovered during Codex R1):
+**Problem chain** (discovered during Codex R1 — os.Stat trust boundary):
 1. Using `os.Stat` in Index makes it a "second filesystem authority," bypassing Storage's trust boundary.
 2. Without `os.Stat`, there's no cheap way to get file modification time.
-3. `time.RFC3339` truncates to seconds — sub-second changes are missed (Codex R1 medium).
-4. Storing `time.Now()` as mod_time confuses "file modification time" with "indexing time" (Codex R2 medium).
+3. `time.RFC3339` truncates to seconds — sub-second changes are missed (Codex R1 — os.Stat trust boundary, medium).
+4. Storing `time.Now()` as mod_time confuses "file modification time" with "indexing time" (Codex R2 — content hash basis mismatch, medium).
 
 **Rejected alternatives**:
-- `meta["mod_time"]` as hidden side channel in Add → rejected because SPEC 6.10 only defines title/type/tags; adding undocumented keys creates layer drift (Codex R2 medium).
+- `meta["mod_time"]` as hidden side channel in Add → rejected because SPEC 6.10 only defines title/type/tags; adding undocumented keys creates layer drift (Codex R2 — content hash basis mismatch, medium).
 - `Storage.Stat()` method → would require changing Storage interface (Step 2 change), rejected for scope.
 - `adapter.Source.ModTime` field → adapter doesn't stat files, only reads them.
 
@@ -29,7 +29,7 @@ This document captures context from the Step 4 planning and review process (8 se
 
 ## Why raw bytes for FTS content (not body-only)
 
-**Problem** (discovered during Codex R2 HIGH):
+**Problem** (discovered during Codex R2 — content hash basis mismatch, HIGH):
 - CheckConsistency reads files via `store.Read` (raw bytes including frontmatter).
 - `adapter.Parse.Content` strips frontmatter and returns body only.
 - If hash basis differs between paths (raw vs body), every frontmatter file triggers unnecessary re-indexing on every consistency check.
@@ -49,7 +49,7 @@ This document captures context from the Step 4 planning and review process (8 se
 1. Original plan: "단일 TX apply" (single TX)
 2. First implementation: per-item TX (each addLocked/removeLocked had own TX)
 3. Review found phantom transaction bug — removed outer TX, left per-item
-4. Codex R11 caught 3-way drift: plan said per-item, DESIGN said single TX, code was per-item
+4. Codex R11 (— SourceType vs frontmatter type) caught 3-way drift: plan said per-item, DESIGN said single TX, code was per-item
 
 **Why all-or-nothing won**:
 - Per-item TX allows partial state: 3 out of 5 files committed, then crash → index is inconsistent in a way that's hard to diagnose.
@@ -64,7 +64,7 @@ This document captures context from the Step 4 planning and review process (8 se
 
 **Original proposal**: `ccMu.TryLock()` — if another CheckConsistency is running, skip (return 0,0,0,nil).
 
-**Problem** (Codex R4 HIGH): `force=true` callers expect immediate execution (SPEC 6.9). TryLock would silently skip a forced consistency check if another one is in progress. This breaks the "즉시 실행" contract.
+**Problem** (Codex R4 — TryLock breaks force=true contract, HIGH): `force=true` callers expect immediate execution (SPEC 6.9). TryLock would silently skip a forced consistency check if another one is in progress. This breaks the "즉시 실행" contract.
 
 **Resolution**: `ccMu.Lock()` (blocking wait). Concurrent callers wait for the running check to finish. The lock-free interval check (`atomic.Int64`) before `ccMu.Lock` ensures most calls return immediately without touching ccMu at all.
 
@@ -72,7 +72,7 @@ This document captures context from the Step 4 planning and review process (8 se
 
 ## Why Index doesn't store root as a "filesystem authority"
 
-**Codex R1 HIGH** flagged that `root` in SQLiteIndex makes Index a second filesystem authority alongside Storage.
+**Codex R1 (— os.Stat trust boundary) HIGH** flagged that `root` in SQLiteIndex makes Index a second filesystem authority alongside Storage.
 
 **Resolution**: `root` is stored but its usage is restricted to two call sites:
 - `adpt.Scan(s.root, ...)` — adapter enumerates files
@@ -99,7 +99,7 @@ Multiple Codex rounds debated whether to change "반환 전 정합성 보장" to
 
 ## Tokenizer detection — why not just CREATE IF NOT EXISTS
 
-**Problem** (Codex R11): `CREATE VIRTUAL TABLE IF NOT EXISTS ... tokenize='trigram'` succeeds even if the table already exists with `unicode61`. The `IF NOT EXISTS` clause skips creation entirely, so `useTrigram` would be set to `true` based on the DDL attempt succeeding, not the actual tokenizer in use.
+**Problem** (Codex R11 — tokenizer detection / SourceType confusion): `CREATE VIRTUAL TABLE IF NOT EXISTS ... tokenize='trigram'` succeeds even if the table already exists with `unicode61`. The `IF NOT EXISTS` clause skips creation entirely, so `useTrigram` would be set to `true` based on the DDL attempt succeeding, not the actual tokenizer in use.
 
 **Resolution**: Query `sqlite_master` for the actual CREATE statement and check for 'trigram'. This is authoritative — it reads what SQLite actually created, not what we tried to create.
 
@@ -109,7 +109,7 @@ Multiple Codex rounds debated whether to change "반환 전 정합성 보장" to
 
 ## SourceType vs frontmatter type — a near-miss bug
 
-**Codex R11 HIGH**: The plan mapped `src.SourceType` to `meta["type"]`. But `Source.SourceType` is the adapter name (`"obsidian"` / `"markdown"`), while SPEC expects page type from frontmatter (`"source"`, `"entity"`, etc.).
+**Codex R11 (— SourceType vs frontmatter type) HIGH**: The plan mapped `src.SourceType` to `meta["type"]`. But `Source.SourceType` is the adapter name (`"obsidian"` / `"markdown"`), while SPEC expects page type from frontmatter (`"source"`, `"entity"`, etc.).
 
 This was caught in review, not by tests. If shipped, `wiki_list` and `wiki_search` would show `type: "obsidian"` for every file instead of `type: "source"`.
 
@@ -119,7 +119,7 @@ This was caught in review, not by tests. If shipped, `wiki_list` and `wiki_searc
 
 ## Path normalization scope
 
-**Problem** (Codex R13): Stored paths use `/` (forward slash) after normalization, but `adapter.Scan` returns paths with OS separator (`filepath.Rel` result). On Windows, `a\b.md` in Scan vs `a/b.md` in DB would cause every file to appear as "new" on every consistency check.
+**Problem** (Codex R13 — path separator divergence): Stored paths use `/` (forward slash) after normalization, but `adapter.Scan` returns paths with OS separator (`filepath.Rel` result). On Windows, `a\b.md` in Scan vs `a/b.md` in DB would cause every file to appear as "new" on every consistency check.
 
 **Scope of normalization**: Applied at every boundary:
 - Public methods (Add, Remove, GetMeta): normalize input path

@@ -29,10 +29,15 @@ Step 3 구현 및 리뷰에서 확인된 후속 단계 의무사항과 미해결
 
 현재 Markdown adapter의 외부 링크 판정 규칙(scheme, 절대경로, protocol-relative, heading-only, Windows 절대)은 코드와 계획 문서에만 존재. Markdown adapter가 fallback 이상이 되면 SPEC.md에 승격 필요.
 
+### Step 5 의무: wiki_list prefix 기본값 변환
+
+SPEC 8.4는 `prefix` 기본값을 `""`로 정의하지만, 사용 예시(SPEC 9.1)는 `wiki_dir/` 기준 탐색을 전제. `storage.List("")`는 빈 경로를 `ErrNotFound`로 처리하므로, MCP 핸들러에서 빈 prefix → `cfg.WikiDir + "/"` 변환이 필요한지 결정 필요.
+
 ## Revisit Triggers
 
 - Step 4 구현 시작 시 (exclude 테스트)
 - Step 5 구현 시작 시 (root 팩토리)
+- Step 5 구현 시작 시 (wiki_list prefix)
 - v0.2 계획 시 (pathutil 통합)
 
 ## Related Files
