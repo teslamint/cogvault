@@ -683,6 +683,77 @@ func TestIntegration_RealVault_CrossLanguageLinks(t *testing.T) {
 	}
 }
 
+func TestIntegration_ArrayResultToolsOmitStructuredContent(t *testing.T) {
+	root, s := setupIntegration(t)
+
+	noteContent := "---\ntitle: Structured Test\n---\n# Structured Test\n\nunique-array-check"
+	if err := os.WriteFile(filepath.Join(root, "notes.md"), []byte(noteContent), 0o644); err != nil {
+		t.Fatalf("write note: %v", err)
+	}
+
+	scanResult := callTool(t, s, "wiki_scan", map[string]any{})
+	if scanResult.IsError {
+		t.Fatalf("wiki_scan error: %s", extractText(t, scanResult))
+	}
+	if scanResult.StructuredContent != nil {
+		t.Fatalf("wiki_scan should not expose structuredContent for array payload, got %T", scanResult.StructuredContent)
+	}
+
+	listResult := callTool(t, s, "wiki_list", map[string]any{"prefix": "."})
+	if listResult.IsError {
+		t.Fatalf("wiki_list error: %s", extractText(t, listResult))
+	}
+	if listResult.StructuredContent != nil {
+		t.Fatalf("wiki_list should not expose structuredContent for array payload, got %T", listResult.StructuredContent)
+	}
+
+	searchResult := callTool(t, s, "wiki_search", map[string]any{"query": "unique-array-check"})
+	if searchResult.IsError {
+		t.Fatalf("wiki_search error: %s", extractText(t, searchResult))
+	}
+	if searchResult.StructuredContent != nil {
+		t.Fatalf("wiki_search should not expose structuredContent for array payload, got %T", searchResult.StructuredContent)
+	}
+}
+
+func TestIntegration_WikiParseLargeContentPreserved(t *testing.T) {
+	root, s := setupIntegration(t)
+
+	body := "# Large Note\n\n" + strings.Repeat("0123456789abcdef", 7000)
+	content := "---\ntitle: Large Note\n---\n" + body
+	if err := os.WriteFile(filepath.Join(root, "large.md"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write large note: %v", err)
+	}
+
+	result := callTool(t, s, "wiki_parse", map[string]any{
+		"path":            "large.md",
+		"include_content": true,
+	})
+	if result.IsError {
+		t.Fatalf("wiki_parse error: %s", extractText(t, result))
+	}
+
+	text := extractText(t, result)
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(text), &parsed); err != nil {
+		t.Fatalf("unmarshal parse text: %v", err)
+	}
+
+	gotContent, _ := parsed["content"].(string)
+	if gotContent != body {
+		t.Fatalf("parsed content length = %d, want %d", len(gotContent), len(body))
+	}
+
+	structured, ok := result.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("expected structured content map for wiki_parse, got %T", result.StructuredContent)
+	}
+	structuredContent, _ := structured["content"].(string)
+	if structuredContent != body {
+		t.Fatalf("structured content length = %d, want %d", len(structuredContent), len(body))
+	}
+}
+
 // --- 3e. Race Detection ---
 
 func TestIntegration_Race_ConcurrentWriteAndSearch(t *testing.T) {

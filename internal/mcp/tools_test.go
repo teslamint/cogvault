@@ -303,6 +303,9 @@ func TestHandleWikiList(t *testing.T) {
 		if len(entries) != 2 {
 			t.Fatalf("expected 2 entries, got %d", len(entries))
 		}
+		if result.StructuredContent != nil {
+			t.Fatalf("expected nil structured content for list array result, got %T", result.StructuredContent)
+		}
 		if entries[0]["title"] != "Test Page" {
 			t.Errorf("title = %v", entries[0]["title"])
 		}
@@ -385,6 +388,9 @@ func TestHandleWikiSearch(t *testing.T) {
 		if result.IsError {
 			t.Fatal("unexpected tool error")
 		}
+		if result.StructuredContent != nil {
+			t.Fatalf("expected nil structured content for search array result, got %T", result.StructuredContent)
+		}
 	})
 
 	t.Run("systemic consistency error propagates", func(t *testing.T) {
@@ -458,6 +464,9 @@ func TestHandleWikiScan(t *testing.T) {
 		json.Unmarshal(raw, &paths)
 		if len(paths) != 2 {
 			t.Errorf("expected 2 paths, got %d", len(paths))
+		}
+		if result.StructuredContent != nil {
+			t.Fatalf("expected nil structured content for scan array result, got %T", result.StructuredContent)
 		}
 	})
 
