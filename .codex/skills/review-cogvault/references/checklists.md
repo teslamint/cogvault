@@ -27,10 +27,13 @@ Read these together:
 - target tests
 - related fixtures
 - relevant canon
+- implementation plan, if one exists
 
 Check these first:
 - Does the code implement the planned contract exactly?
+- If a plan exists, do plan, canon, and code all still agree?
 - Do tests lock the intended behavior and edge cases?
+- Do tests hit the contract-owning path, not just helper behavior?
 - Are exclusions applied to both directories and files when required?
 - Are security checks applied before file access?
 - Are normalized values emitted consistently?
@@ -39,6 +42,8 @@ Check these first:
 
 Common failure modes:
 - Tests pass but miss contract-violating edge cases
+- Plan, code, and canon each describe slightly different behavior
+- A regression test proves the database or helper primitive, but not the public invariant
 - Security checks exist in one adapter but not another
 - External links or attachments pollute internal link fields
 - File-system filtering differs between scanner and parser paths

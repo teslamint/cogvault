@@ -32,7 +32,7 @@ Choose one mode before doing deeper work.
 
 - `implementation-review`
   - Use when the target is code already written from a plan.
-  - Goal: compare implementation against plan and canon, then check whether tests actually lock the intended behavior.
+  - Goal: compare implementation against plan and canon, then check whether tests actually lock the intended behavior at the level that owns the contract.
 
 If the user does not specify a target, identify it from the request first.
 
@@ -40,16 +40,20 @@ If the user does not specify a target, identify it from the request first.
 
 1. Identify the review target and mode.
 2. Narrow the relevant canon in `SPEC.md`, `DESIGN.md`, and `docs/decisions/`.
-3. For implementation review, inspect changed files, tests, and fixture data together.
-4. Review through these additional lenses when relevant:
+3. For implementation review, inspect changed files, tests, fixture data, and the implementation plan together when a plan exists.
+4. In implementation review, explicitly check for 3-way drift:
+   - plan vs code
+   - canon vs code
+   - plan vs canon
+5. Review through these additional lenses when relevant:
    - performance and operational behavior
    - schema and data migration risk
    - scenario-level regression coverage
    - failure recovery and retry semantics
    - API surface and misuse resistance
-5. Prefer contract and security findings over style commentary.
-6. Run tests when the review depends on behavior claims.
-7. Report only concrete findings. If no findings remain, say so explicitly.
+6. Prefer contract and security findings over style commentary.
+7. Run tests when the review depends on behavior claims.
+8. Report only concrete findings. If no findings remain, say so explicitly.
 
 ## Review Priorities
 
@@ -58,6 +62,7 @@ Always prioritize these checks:
 - Architecture mismatch with `DESIGN.md`
 - Security boundary drift: traversal, symlink, excluded paths, permission semantics
 - Missing or misleading tests
+- Tests that only prove helper behavior while missing the real contract-owning path
 - Hidden coupling between layers
 - Data-shape drift: path normalization, source type, links, attachments, tags
 - Performance and operational regressions: fallback cost, scan latency, query-time consistency overhead
@@ -65,12 +70,14 @@ Always prioritize these checks:
 - Scenario-level regressions: write-now vs reindex-later parity, user-visible flows, end-to-end contract locking
 - Failure recovery semantics: partial failure handling, retry behavior, stale-data policy, eventual healing
 - API usability: public methods that invite misuse, responsibilities exposed too early, unclear ownership
+- Review drift: stale plan documents, outdated ADR assumptions, canon updated without matching tests
 
 ## Evidence Rules
 
 - Cite file references for every material finding.
 - Treat passing tests as supporting evidence, not proof of correctness.
 - If behavior is only partially verified, say exactly what remains unproven.
+- For implementation review, prefer citing the plan file when it materially differs from code or canon.
 
 ## Checklists
 
@@ -79,6 +86,9 @@ Read [references/checklists.md](references/checklists.md) and use the relevant s
 - `Implementation Review Checklist`
 
 Additionally inspect these angles when the target touches them:
+- `Plan Convergence`
+  - If an implementation plan exists, does it still match the final code and canon?
+  - If not, is the plan stale, or did code drift from the intended design?
 - `Performance & Ops`
   - Is the steady-state cost acceptable for the expected vault size?
   - Does any fallback path change complexity enough to affect user-visible latency?
@@ -92,6 +102,9 @@ Additionally inspect these angles when the target touches them:
 - `Failure Recovery`
   - After partial failure, is the next recovery path explicit and testable?
   - Is stale data policy intentional, bounded, and observable to callers where needed?
+- `Contract-Locking Tests`
+  - Do tests exercise the highest-level path that owns the invariant, rather than only a helper or storage primitive?
+  - If a review-established invariant exists, is there a regression test that would fail if the public behavior drifted?
 - `API Usability`
   - Does the exposed interface make misuse easy?
   - Could a narrower surface or clearer ownership reduce future drift?
