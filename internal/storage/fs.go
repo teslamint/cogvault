@@ -80,6 +80,37 @@ func (fs *FSStorage) Write(path string, data []byte) error {
 	return nil
 }
 
+// WriteSchema writes data to the configured schema path for init bootstrap.
+// Idempotent: returns nil if the file already exists.
+// Reuses resolvePath for symlink/traversal security.
+func (fs *FSStorage) WriteSchema(data []byte) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	absPath, _, err := fs.resolvePath(fs.cfg.SchemaPath())
+	if err != nil {
+		return err
+	}
+
+	if info, err := os.Stat(absPath); err == nil {
+		if info.IsDir() {
+			return fmt.Errorf("storage.WriteSchema: schema path is a directory")
+		}
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("storage.WriteSchema: %w", err)
+	}
+
+	parentDir := filepath.Dir(absPath)
+	if err := os.MkdirAll(parentDir, 0o755); err != nil {
+		return fmt.Errorf("storage.WriteSchema: %w", err)
+	}
+	if err := os.WriteFile(absPath, data, 0o644); err != nil {
+		return fmt.Errorf("storage.WriteSchema: %w", err)
+	}
+	return nil
+}
+
 func (fs *FSStorage) List(prefix string) ([]ListEntry, error) {
 	absPath, cleaned, err := fs.resolvePath(prefix)
 	if err != nil {

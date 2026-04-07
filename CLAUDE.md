@@ -185,6 +185,8 @@ SPEC/DESIGN에는 MVP만 정의되어 있다. 향후 방향의 맥락:
 - **storage 에러 매핑 원칙**: `docs/decisions/0007-storage-error-mapping.md` 참조. sentinel과 raw fs error 경계 정의.
 - **adapter 구현 결정**: `docs/decisions/0008-step3-adapter-decisions.md` 참조. 보안 함수 공유, file-level exclude, markdown image 분리, TOCTOU 범위.
 - **Step 3 미해결 항목**: `docs/decisions/0009-step3-deferred-items.md` 참조. Step 4 exclude 테스트, Step 5 root 팩토리, pathutil 통합.
+- **CLI 구현 결정**: `docs/decisions/0015-step6-cmd-decisions.md` 참조. WriteSchema concrete 메서드, bootstrap 반환 타입, search bounded-staleness 실행, consistency 에러 정책, Save explicit default YAML, 경로 relative 유지.
+- **Step 6 미해결 항목**: `docs/decisions/0016-step6-deferred-items.md` 참조. schema const→embed 이전, serve per-file 테스트, --json 플래그, bootstrap cleanup.
 
 ---
 

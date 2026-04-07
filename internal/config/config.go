@@ -49,6 +49,26 @@ func Load(vaultRoot string) (*Config, error) {
 	return &cfg, nil
 }
 
+func DefaultConfig() *Config {
+	var cfg Config
+	cfg.applyDefaults()
+	return &cfg
+}
+
+func Save(vaultRoot string) error {
+	configPath := filepath.Join(vaultRoot, configFileName)
+	if _, err := os.Stat(configPath); err == nil {
+		return nil
+	}
+
+	cfg := DefaultConfig()
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("save config: %w", err)
+	}
+	return os.WriteFile(configPath, data, 0o644)
+}
+
 func (c *Config) applyDefaults() {
 	if c.WikiDir == "" {
 		c.WikiDir = "_wiki"
