@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -631,7 +632,7 @@ func TestSchemaInstructions(t *testing.T) {
 		if len(runes) <= maxSchemaLen {
 			t.Error("expected truncation message appended")
 		}
-		if !containsSubstring(result, "wiki_read") {
+		if !strings.Contains(result, "wiki_read") {
 			t.Error("truncated result should reference wiki_read")
 		}
 	})
@@ -646,7 +647,7 @@ func TestSchemaInstructions(t *testing.T) {
 		if result == "" {
 			t.Error("fallback should not be empty")
 		}
-		if !containsSubstring(result, "_wiki") {
+		if !strings.Contains(result, "_wiki") {
 			t.Error("fallback should reference wiki_dir")
 		}
 	})
@@ -664,21 +665,9 @@ func TestSchemaInstructions(t *testing.T) {
 			},
 		}
 		result := schemaInstructions(cfg, store)
-		if !containsSubstring(result, "my_wiki") {
+		if !strings.Contains(result, "my_wiki") {
 			t.Error("fallback should use configured wiki_dir")
 		}
 	})
 }
 
-func containsSubstring(s, sub string) bool {
-	return len(s) >= len(sub) && (s == sub || len(s) > 0 && containsCheck(s, sub))
-}
-
-func containsCheck(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
-}

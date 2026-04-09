@@ -73,7 +73,7 @@ func handleWikiWrite(root string, cfg *config.Config, store storage.Storage, idx
 			return mapError(err, path), nil
 		}
 
-		if strings.HasSuffix(path, ".md") {
+		if strings.HasSuffix(strings.ToLower(path), ".md") {
 			src, parseErr := adpt.Parse(root, path, false)
 			if parseErr == nil {
 				_ = idx.Add(path, content, index.BuildMeta(src))

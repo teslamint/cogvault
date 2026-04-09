@@ -786,6 +786,33 @@ func TestIntegration_Race_ConcurrentWriteAndSearch(t *testing.T) {
 	}
 
 	wg.Wait()
+
+	// Post-race correctness: verify all writes landed
+	listResult := callTool(t, s, "wiki_list", map[string]any{"prefix": "_wiki"})
+	listText := extractText(t, listResult)
+	var wsEntries []map[string]any
+	if err := json.Unmarshal([]byte(listText), &wsEntries); err != nil {
+		t.Fatalf("unmarshal list: %v", err)
+	}
+	wsCount := 0
+	for _, e := range wsEntries {
+		if name, _ := e["name"].(string); strings.HasPrefix(name, "race-ws-") {
+			wsCount++
+		}
+	}
+	if wsCount != n {
+		t.Errorf("expected %d race-ws files, got %d", n, wsCount)
+	}
+
+	searchResult := callTool(t, s, "wiki_search", map[string]any{"query": "Race content"})
+	searchText := extractText(t, searchResult)
+	var wsResults []map[string]any
+	if err := json.Unmarshal([]byte(searchText), &wsResults); err != nil {
+		t.Fatalf("unmarshal search: %v", err)
+	}
+	if len(wsResults) == 0 {
+		t.Error("expected search results for 'Race content' after concurrent writes")
+	}
 }
 
 func TestIntegration_Race_ConcurrentListAndWrite(t *testing.T) {
@@ -816,4 +843,21 @@ func TestIntegration_Race_ConcurrentListAndWrite(t *testing.T) {
 	}
 
 	wg.Wait()
+
+	// Post-race correctness: verify all writes landed
+	lwResult := callTool(t, s, "wiki_list", map[string]any{"prefix": "_wiki"})
+	lwText := extractText(t, lwResult)
+	var lwEntries []map[string]any
+	if err := json.Unmarshal([]byte(lwText), &lwEntries); err != nil {
+		t.Fatalf("unmarshal list: %v", err)
+	}
+	lwCount := 0
+	for _, e := range lwEntries {
+		if name, _ := e["name"].(string); strings.HasPrefix(name, "race-lw-") {
+			lwCount++
+		}
+	}
+	if lwCount != n {
+		t.Errorf("expected %d race-lw files, got %d", n, lwCount)
+	}
 }
