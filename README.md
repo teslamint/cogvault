@@ -2,7 +2,7 @@
 
 MCP tool server for building LLM-curated wikis in Obsidian vaults.
 
-**Status:** MVP in progress — Step 8/9 complete
+**Status:** Step 9 validation complete — CLI shortcut pivot planned
 
 ## MVP capabilities (planned)
 
@@ -55,7 +55,7 @@ go test -race ./...
 - [x] Step 6: cmd (cobra: init/search/serve)
 - [x] Step 7: schema (default_schema.md + go:embed)
 - [x] Step 8: integration tests
-- [ ] Step 9: 1-week real-world validation
+- [x] Step 9: 1-week real-world validation (5-day; partial success)
 
 ### v0.2+ candidate ideas
 

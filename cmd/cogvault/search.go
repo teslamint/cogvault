@@ -1,12 +1,10 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/teslamint/cogvault/internal/index"
 )
 
 func newSearchCmd() *cobra.Command {
@@ -35,11 +33,8 @@ func runSearch(cmd *cobra.Command, args []string) error {
 
 	// Bounded staleness — same policy as MCP handlers (0015-D3)
 	_, _, _, ccErr := idx.CheckConsistency(store, adpt, false)
-	if ccErr != nil {
-		if errors.Is(ccErr, index.ErrConsistencySystemic) {
-			return fmt.Errorf("consistency check: %w", ccErr)
-		}
-		cmd.PrintErrln("warning: some files had errors during consistency check:", ccErr)
+	if err := handleConsistencyResult(cmd, ccErr); err != nil {
+		return fmt.Errorf("consistency check: %w", err)
 	}
 
 	query := strings.Join(args, " ")

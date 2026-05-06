@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -35,6 +36,14 @@ func mapError(err error, path string) *mcp.CallToolResult {
 	}
 }
 
+func newToolResultJSONText(data any) (*mcp.CallToolResult, error) {
+	b, err := json.Marshal(data)
+	if err != nil {
+		return nil, fmt.Errorf("unable to marshal JSON: %w", err)
+	}
+	return mcp.NewToolResultText(string(b)), nil
+}
+
 func handleWikiRead(store storage.Storage) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		path, err := req.RequireString("path")
@@ -64,7 +73,7 @@ func handleWikiWrite(root string, cfg *config.Config, store storage.Storage, idx
 			return mapError(err, path), nil
 		}
 
-		if strings.HasSuffix(path, ".md") {
+		if strings.HasSuffix(strings.ToLower(path), ".md") {
 			src, parseErr := adpt.Parse(root, path, false)
 			if parseErr == nil {
 				_ = idx.Add(path, content, index.BuildMeta(src))
@@ -117,7 +126,7 @@ func handleWikiList(cfg *config.Config, store storage.Storage, idx index.Index, 
 			}
 			results[i] = r
 		}
-		return mcp.NewToolResultJSON(results)
+		return newToolResultJSONText(results)
 	}
 }
 
@@ -147,7 +156,7 @@ func handleWikiSearch(cfg *config.Config, store storage.Storage, idx index.Index
 		if err != nil {
 			return mapError(err, ""), nil
 		}
-		return mcp.NewToolResultJSON(results)
+		return newToolResultJSONText(results)
 	}
 }
 
@@ -186,7 +195,7 @@ func handleWikiScan(root string, cfg *config.Config, adpt adapter.Adapter) serve
 		if scanErr != nil {
 			return mapError(scanErr, dir), nil
 		}
-		return mcp.NewToolResultJSON(paths)
+		return newToolResultJSONText(paths)
 	}
 }
 
