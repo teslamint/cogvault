@@ -2,7 +2,7 @@
 
 MCP tool server for building LLM-curated wikis in Obsidian vaults.
 
-**Status:** Step 9 validation complete — CLI shortcut pivot planned
+**Status:** Step 9 validation ended early — partial success, CLI shortcut pivot planned
 
 ## MVP capabilities (planned)
 
