@@ -10,6 +10,7 @@
 - **아키텍처/구현 정본**: `DESIGN.md`
 - **결정 기록 정본**: `docs/decisions/`
 - **리뷰/조사 기록**: `docs/research/`
+- **해결된 문제/교훈**: `docs/solutions/` (카테고리별 해결 기록), 용어 정본은 `CONCEPTS.md`
 - **v2 설계 정본 (approved design)**: `docs/specs/2026-07-22-refound-capture-pipeline-design.md`
 - **v2 리파운딩 결정 (refounding decision)**: `docs/decisions/0021-v2-refounding.md` — supersedes 0020; capture→digest→consume pipeline, vault mode removed.
 
