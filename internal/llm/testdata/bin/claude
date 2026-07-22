@@ -30,10 +30,10 @@ fi
 
 case "$mode" in
 ok)
-	printf '%s' '[{"type":"system","subtype":"init"},{"type":"result","subtype":"success","is_error":false,"result":"---\ntitle: Test Page\ntype: source\noriginal: notes/x.pdf\n---\n\n# Test Page\n\nBody text."}]'
+	printf '%s' '[{"type":"system","subtype":"init"},{"type":"result","subtype":"success","is_error":false,"result":"---\ntitle: Test Page\ntype: source\nsource_path: notes/x.pdf\ningested_at: 2024-01-15\n---\n\n# Test Page\n\nBody text."}]'
 	;;
 okfenced)
-	printf '%s' '[{"type":"result","subtype":"success","is_error":false,"result":"```markdown\n---\ntitle: Test Page\ntype: source\noriginal: notes/x.pdf\n---\n\n# Test Page\n\nBody text.\n```"}]'
+	printf '%s' '[{"type":"result","subtype":"success","is_error":false,"result":"```markdown\n---\ntitle: Test Page\ntype: source\nsource_path: notes/x.pdf\ningested_at: 2024-01-15\n---\n\n# Test Page\n\nBody text.\n```"}]'
 	;;
 execerr)
 	# Observed real-world failure: error_during_execution with exit code 0.

@@ -132,8 +132,8 @@ func buildPrompt(req DigestRequest) string {
 	b.WriteString(req.SourcePath)
 	b.WriteString("\n\nDigest it into the wiki page slug: ")
 	b.WriteString(req.PageSlug)
-	b.WriteString("\n\nOutput ONLY a markdown wiki page (no preamble). Begin with YAML frontmatter carrying the fields title, type: source, and original: ")
+	b.WriteString("\n\nOutput ONLY a markdown wiki page (no preamble). Begin with YAML frontmatter carrying the fields title, type: source, source_path: ")
 	b.WriteString(req.SourcePath)
-	b.WriteString("\n")
+	b.WriteString(", and ingested_at set to today's date in ISO 8601 (YYYY-MM-DD).\n")
 	return b.String()
 }
