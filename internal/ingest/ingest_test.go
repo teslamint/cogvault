@@ -414,6 +414,107 @@ func TestRunAlreadyRunningLock(t *testing.T) {
 	}
 }
 
+// failWriteStorage wraps a Storage and forces Write to fail, exercising the
+// infrastructure-failure class (attempts must not be consumed).
+type failWriteStorage struct {
+	storage.Storage
+	err error
+}
+
+func (f failWriteStorage) Write(string, []byte) error { return f.err }
+
+func TestRunInfraWriteFailureSparesAttempts(t *testing.T) {
+	h := newHarness(t, []string{"md"}, okLLM())
+	writeErr := errors.New("disk full")
+	h.runner.store = failWriteStorage{Storage: h.store, err: writeErr}
+	src := h.write(t, "a.md", "one")
+	hash := contentHash([]byte("one"))
+
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "scheduled"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Failed != 1 || rep.Digested != 0 {
+		t.Fatalf("counts = %+v, want failed=1 digested=0", rep)
+	}
+	row, found, _ := h.runner.ledger.lookup(src, hash)
+	if !found || row.status != "failed" || row.attempts != 0 {
+		t.Fatalf("row = %+v found=%v, want failed attempts=0 (infra failure spares attempts)", row, found)
+	}
+	if !strings.Contains(row.lastError, "write:") {
+		t.Fatalf("lastError = %q, want write: prefix", row.lastError)
+	}
+
+	// Repair the store: the file must retry (attempts were not consumed) and succeed.
+	h.runner.store = h.store
+	rep2, err := h.runner.Run(context.Background(), RunOptions{Origin: "scheduled"})
+	if err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+	if rep2.Digested != 1 {
+		t.Fatalf("second run digested = %d, want 1 (file retried after infra failure)", rep2.Digested)
+	}
+	row2, _, _ := h.runner.ledger.lookup(src, hash)
+	if row2.status != "success" {
+		t.Fatalf("row after repair = %+v, want success", row2)
+	}
+}
+
+func TestRunCancelAfterFirstFile(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var calls int
+	m := &mockLLM{fn: func(req llm.DigestRequest) (*llm.DigestResult, error) {
+		calls++
+		res := &llm.DigestResult{PageContent: validPage(req.PageSlug)}
+		if calls == 1 {
+			cancel() // cancel the shared ctx after completing the first file's digest
+		}
+		return res, nil
+	}}
+	h := newHarness(t, []string{"md"}, m)
+	// sorted by absPath: a-first before b-second
+	a := h.write(t, "a-first.md", "content one")
+	b := h.write(t, "b-second.md", "content two")
+
+	rep, err := h.runner.Run(ctx, RunOptions{Origin: "scheduled"})
+	if err == nil {
+		t.Fatal("expected wrapped context error after mid-run cancel")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want wrapped context.Canceled", err)
+	}
+	if rep.Digested != 1 {
+		t.Fatalf("Digested = %d, want 1 (only first file digested)", rep.Digested)
+	}
+	if calls != 1 {
+		t.Fatalf("llm calls = %d, want 1 (second file never digested)", calls)
+	}
+
+	// First file: success ledger row.
+	rowA, foundA, _ := h.runner.ledger.lookup(a, contentHash([]byte("content one")))
+	if !foundA || rowA.status != "success" {
+		t.Fatalf("first file row = %+v found=%v, want success", rowA, foundA)
+	}
+	// Second file: no ledger row at all.
+	if _, foundB, _ := h.runner.ledger.lookup(b, contentHash([]byte("content two"))); foundB {
+		t.Fatal("second file must have no ledger row")
+	}
+
+	// Lock released on abort: a subsequent Run acquires cleanly and finishes the backlog.
+	m.mu.Lock()
+	m.fn = func(req llm.DigestRequest) (*llm.DigestResult, error) {
+		return &llm.DigestResult{PageContent: validPage(req.PageSlug)}, nil
+	}
+	m.mu.Unlock()
+	rep2, err := h.runner.Run(context.Background(), RunOptions{Origin: "scheduled"})
+	if err != nil {
+		t.Fatalf("subsequent Run: %v (lock not released on abort?)", err)
+	}
+	if rep2.Digested != 1 || rep2.Unchanged != 1 {
+		t.Fatalf("second run counts = %+v, want digested=1 unchanged=1", rep2)
+	}
+}
+
 func TestRunContextCanceled(t *testing.T) {
 	h := newHarness(t, []string{"md"}, okLLM())
 	h.write(t, "a.md", "one")

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -31,6 +32,18 @@ const (
 
 // ErrAlreadyRunning is returned by Run when another ingest holds the flock.
 var ErrAlreadyRunning = errors.New("ingest already running")
+
+// failureClass adjudicates whether a digest failure consumes a retry attempt.
+// Only permanent (digest-output) problems increment attempts; transient LLM
+// errors and infrastructure errors (write/index/ledger) are recorded as failed
+// without consuming an attempt, so the file retries on the next run.
+type failureClass int
+
+const (
+	classPermanent failureClass = iota // unparsable frontmatter / missing title
+	classTransient                     // llm.ErrTransient
+	classInfra                         // store.Write / idx.Add / ledger writes
+)
 
 type RunOptions struct {
 	DryRun bool
@@ -100,7 +113,7 @@ func (r *Runner) Run(ctx context.Context, opts RunOptions) (*Report, error) {
 			break
 		}
 
-		hash := contentHash(entry.data)
+		hash := entry.hash
 		prev, found, err := r.ledger.lookup(entry.absPath, hash)
 		if err != nil {
 			return report, fmt.Errorf("ingest.Run: %w", err)
@@ -136,7 +149,9 @@ func (r *Runner) Run(ctx context.Context, opts RunOptions) (*Report, error) {
 type scanEntry struct {
 	absPath   string
 	sourceDir string
-	data      []byte
+	hash      string
+	size      int64
+	mtime     time.Time
 }
 
 func (r *Runner) scan(report *Report) []scanEntry {
@@ -175,13 +190,13 @@ func (r *Runner) scan(report *Report) []scanEntry {
 				report.PerFile = append(report.PerFile, FileResult{Path: abs, Action: actionDeferred, Error: "within settle window"})
 				continue
 			}
-			data, err := os.ReadFile(abs)
+			hash, err := hashFile(abs)
 			if err != nil {
 				report.Skipped++
 				report.PerFile = append(report.PerFile, FileResult{Path: abs, Action: actionSkipped, Error: "read: " + err.Error()})
 				continue
 			}
-			entries = append(entries, scanEntry{absPath: abs, sourceDir: dir, data: data})
+			entries = append(entries, scanEntry{absPath: abs, sourceDir: dir, hash: hash, size: info.Size(), mtime: info.ModTime()})
 		}
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].absPath < entries[j].absPath })
@@ -196,34 +211,38 @@ func (r *Runner) digestOne(ctx context.Context, entry scanEntry, hash, schemaTex
 		PageSlug:   slug,
 	})
 	if err != nil {
-		r.recordFailure(entry, hash, origin, prev, report, "digest: "+err.Error(), errors.Is(err, llm.ErrTransient))
+		class := classPermanent
+		if errors.Is(err, llm.ErrTransient) {
+			class = classTransient
+		}
+		r.recordFailure(entry, hash, origin, prev, report, "digest: "+err.Error(), class)
 		return
 	}
 
 	fm, title, ok := parsePage(res.PageContent)
 	if !ok {
-		r.recordFailure(entry, hash, origin, prev, report, "validate: page missing frontmatter or title", false)
+		r.recordFailure(entry, hash, origin, prev, report, "validate: page missing frontmatter or title", classPermanent)
 		return
 	}
 
 	page, err := r.pagePath(slug, entry.absPath)
 	if err != nil {
-		r.recordFailure(entry, hash, origin, prev, report, "ledger: "+err.Error(), false)
+		r.recordFailure(entry, hash, origin, prev, report, "ledger: "+err.Error(), classInfra)
 		return
 	}
 
 	if err := r.store.Write(page, []byte(res.PageContent)); err != nil {
-		r.recordFailure(entry, hash, origin, prev, report, "write: "+err.Error(), false)
+		r.recordFailure(entry, hash, origin, prev, report, "write: "+err.Error(), classInfra)
 		return
 	}
 
 	if err := r.idx.Add(page, res.PageContent, buildMeta(fm, title)); err != nil {
-		r.recordFailure(entry, hash, origin, prev, report, "index: "+err.Error(), false)
+		r.recordFailure(entry, hash, origin, prev, report, "index: "+err.Error(), classInfra)
 		return
 	}
 
 	if err := r.ledger.supersedePrevSuccess(entry.absPath); err != nil {
-		r.recordFailure(entry, hash, origin, prev, report, "ledger: "+err.Error(), false)
+		r.recordFailure(entry, hash, origin, prev, report, "ledger: "+err.Error(), classInfra)
 		return
 	}
 	err = r.ledger.upsert(ledgerRow{
@@ -238,7 +257,7 @@ func (r *Runner) digestOne(ctx context.Context, entry scanEntry, hash, schemaTex
 		runOrigin:   origin,
 	})
 	if err != nil {
-		r.recordFailure(entry, hash, origin, prev, report, "ledger: "+err.Error(), false)
+		r.recordFailure(entry, hash, origin, prev, report, "ledger: "+err.Error(), classInfra)
 		return
 	}
 
@@ -246,9 +265,9 @@ func (r *Runner) digestOne(ctx context.Context, entry scanEntry, hash, schemaTex
 	report.PerFile = append(report.PerFile, FileResult{Path: entry.absPath, Action: actionDigested})
 }
 
-func (r *Runner) recordFailure(entry scanEntry, hash, origin string, prev *ledgerRow, report *Report, msg string, transient bool) {
+func (r *Runner) recordFailure(entry scanEntry, hash, origin string, prev *ledgerRow, report *Report, msg string, class failureClass) {
 	attempts := attemptsOf(prev)
-	if !transient {
+	if class == classPermanent {
 		attempts++
 	}
 	_ = r.ledger.upsert(ledgerRow{
@@ -299,6 +318,21 @@ func attemptsOf(prev *ledgerRow) int {
 func contentHash(data []byte) string {
 	h := sha256.Sum256(data)
 	return fmt.Sprintf("%x", h)
+}
+
+// hashFile streams the file into a sha256 hasher so full contents are never
+// retained in memory. Only the hex digest is kept per scan entry.
+func hashFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 
 func hash8(data []byte) string {
