@@ -7,11 +7,13 @@ schema: spec/v1
 
 # cogvault v2 Refounding — Capture→Digest→Consume Pipeline Design
 
-_Created 2026-07-22. Independent review round 1 applied (C1, C1a, M1-M3, m1-m5)._
+_Created 2026-07-22. Revision 2: independent review round 1 (C1, C1a, M1-M3, m1-m5), user YAGNI pass, user KISS/DRY pass (single-mode unification) applied._
 
 ## Overview
 
-Refound cogvault from "an MCP wiki server hosted inside an Obsidian vault" into a standalone personal knowledge pipeline: watch real source folders the user already fills, digest new material automatically with an LLM, and serve the digested wiki through MCP, CLI search, and a phone-readable synced folder. This supersedes decision 0020's narrow CLI-shortcut pivot. Basis of supersession: 0020's literal revisit trigger (CLI shortcut fails after 1 week) never ran — the shortcut was not built. The supersession is by extrapolation from Step 9 evidence plus explicit user decision (2026-07-22): any per-item manual instruction kills the habit, and a per-item CLI call is still a per-item instruction, so digestion must require zero per-item user action.
+Refound cogvault from "an MCP wiki server hosted inside an Obsidian vault" into a standalone personal knowledge pipeline: watch real source folders the user already fills, digest new material automatically with an LLM, and serve the digested wiki through MCP, CLI search, and a phone-readable synced folder. The vault concept is removed entirely (user decision, 2026-07-22): cogvault has one mode, in which `wiki_dir` is the writable root and any other directory — including an Obsidian vault — is just a read-only entry in `sources`.
+
+This supersedes decision 0020's narrow CLI-shortcut pivot. Basis of supersession: 0020's literal revisit trigger (CLI shortcut fails after 1 week) never ran — the shortcut was not built. The supersession is by extrapolation from Step 9 evidence plus explicit user decision (2026-07-22): any per-item manual instruction kills the habit, and a per-item CLI call is still a per-item instruction, so digestion must require zero per-item user action.
 
 ## User Scenarios
 
@@ -38,13 +40,14 @@ From the phone share sheet, the user saves an article URL as a small file into a
 ### In (Phase 1)
 - `cogvault ingest` command: scan configured source directories, detect unprocessed files by content hash, digest each via the LLM adapter, write wiki pages, index them (FTS5), record the outcome in a processing ledger, print a per-run report.
 - `internal/llm` adapter interface with one Phase 1 backend: Claude Code CLI subprocess (`claude --print`, stdin pipe, JSON output). The interface must allow a local-LLM backend to be added later without changing the ingest pipeline (durability requirement, user decision 2026-07-22).
-- **Standalone mode in config and storage (this is a code change, not reuse).** Review round 1 verified the current code cannot boot standalone: config rejects absolute `wiki_dir` (`internal/config/config.go:138-140`) and forces `db_path` under the root; storage only permits writes under the `wiki_dir/` prefix relative to a vault root (`internal/storage/fs.go:60-64`). Phase 1 therefore includes: config gains a standalone mode with absolute `wiki_dir`, absolute out-of-tree `db_path`, and `sources` (read-only external dirs with allowed file types); storage gains a root-is-wiki mode where the whole root is writable. Vault mode remains supported unchanged; dual-mode maintenance is an accepted Phase 1 cost.
-- Standalone config discovery: standalone commands take `--config <path>` with default `~/.config/cogvault/config.yaml`; launchd invokes `cogvault ingest --config <path>` explicitly (launchd jobs have no meaningful cwd). Vault-mode discovery (cwd / `--vault` → `<root>/.cogvault.yaml`) is untouched.
+- **Single-mode refactor (this is a code change, not reuse).** Review round 1 verified the current code cannot run standalone: config rejects absolute `wiki_dir` (`internal/config/config.go:138-140`) and forces `db_path` under the root; storage only permits writes under the `wiki_dir/` prefix relative to a vault root (`internal/storage/fs.go:60-64`). Rather than adding a second mode, the vault concept is removed (KISS/DRY, user decision 2026-07-22): config becomes `wiki_dir` (absolute, the writable root) + `sources[]` (read-only external dirs with allowed file types) + `db_path` (absolute, outside the synced folder); storage's write boundary becomes "everything under `wiki_dir`"; read access covers `wiki_dir` plus `sources`. Existing `init`/`serve`/`search` commands move to this model. An Obsidian vault, if still wanted, is listed as a source.
+- One-time migration, user-performed and documented in README: copy existing `_wiki` pages into the new wiki dir; re-index rebuilds the rest.
+- Config discovery: every command takes `--config <path>`, default `~/.config/cogvault/config.yaml`; launchd invokes `cogvault ingest --config <path>` explicitly (launchd jobs have no meaningful cwd).
 - Source originals are never moved or deleted; processed state lives in the SQLite ledger.
 - Per-file failure isolation: a failed file is recorded (`status=failed`, error text) and retried on later runs up to a bounded attempt count; the run continues past failures.
 - Ingest concurrency safety: single-instance lock (lockfile) so scheduled and manual runs never overlap; DB opened with a busy timeout so an ingest run and a live `serve` process can write concurrently without "database is locked" failures.
 - launchd automation: repo ships a plist template plus README setup instructions (one-time `launchctl` load by the user).
-- Canonical docs: decision record `docs/decisions/0021` superseding 0020; README/SPEC/DESIGN updated to the v2 direction.
+- Canonical docs: decision record `docs/decisions/0021` superseding 0020 and recording vault-mode removal; README/SPEC/DESIGN updated to the v2 direction (including the `wiki_search` scope-parameter removal below).
 
 ### Out (Phase 1)
 - Phone capture paths (share sheet, synced inbox) — S5, later phase.
@@ -62,7 +65,7 @@ From the phone share sheet, the user saves an article URL as a small file into a
 | Real seed corpus exists: `~/Downloads/_Articles` holds 66 files (65 pdf, 1 webp), 159MB total | `ls ~/Downloads/_Articles \| wc -l; ls \| sed 's/.*\.//' \| sort \| uniq -c; du -sh` | 2026-07-22T11:41Z (reconfirmed by review 2026-07-22) | 66 files; 65 pdf, 1 webp; 159M | Live filesystem inspection |
 | Claude Code CLI is installed and invocable | `which claude && claude --version` | 2026-07-22T11:49:13Z (reconfirmed by review) | `/Users/teslamint/.local/bin/claude`, version 2.1.217 | Live filesystem inspection |
 | SQLite (Pure Go) and mcp-go dependencies are pinned | `grep "modernc.org/sqlite\|mcp-go" go.mod` | 2026-07-22T11:49:13Z (reconfirmed by review) | `mcp-go v0.47.0`, `modernc.org/sqlite v1.48.1` | Working tree `go.mod` |
-| Current config/storage cannot boot standalone without changes | reviewer code inspection | 2026-07-22 | absolute `wiki_dir` rejected (config.go:138-140); write prefix check vault-relative (fs.go:60-64); `serve` startup force-scans entire root (serve.go:29, sqlite.go:368) | Working tree, review round 1 |
+| Current config/storage cannot run standalone without changes | reviewer code inspection | 2026-07-22 | absolute `wiki_dir` rejected (config.go:138-140); write prefix check vault-relative (fs.go:60-64); `serve` startup force-scans entire root (serve.go:29, sqlite.go:368) | Working tree, review round 1 |
 | Claude Code headless mode can read a PDF given its path | _not yet verified_ | — | — | Must be verified as the first implementation task (see Open Decisions O1) |
 
 ## Architecture
@@ -70,17 +73,18 @@ From the phone share sheet, the user saves an article URL as a small file into a
 Three layers; Phase 1 builds the middle one.
 
 - **Capture** — nothing to build in Phase 1: the capture surface is "directories the user already fills" (`~/Downloads/_Articles`). Later phases add synced inbox folders fed from phones.
-- **Digest** — new `internal/ingest` package orchestrates: enumerate sources → stability gate → content-hash → ledger lookup (skip processed) → LLM adapter digests the file → wiki page written through `internal/storage` (standalone mode, rooted at `wiki_dir`) → indexed through `internal/index` → ledger updated. New `internal/llm` package holds the `Adapter` interface and the `claudecode` backend. The digestion prompt embeds the `_schema.md` page rules so output pages conform to the existing schema.
-- **Consume** — existing `internal/mcp` server and `cogvault search` operate on the standalone `wiki_dir` once standalone config lands. Phone viewing is a property of the wiki's location (iCloud Drive), not a feature.
+- **Digest** — new `internal/ingest` package orchestrates: enumerate sources → stability gate → content-hash → ledger lookup (skip processed) → LLM adapter digests the file → wiki page written through `internal/storage` (rooted at `wiki_dir`) → indexed through `internal/index` → ledger updated. New `internal/llm` package holds the `Adapter` interface and the `claudecode` backend. The digestion prompt embeds the `_schema.md` page rules so output pages conform to the existing schema.
+- **Consume** — existing `internal/mcp` server and `cogvault search` operate on the single-mode wiki root. Phone viewing is a property of the wiki's location (iCloud Drive), not a feature.
 
-Package reuse after the standalone-mode change: `internal/index` (FTS5 trigram — Korean search already validated; accepts any db path), `internal/mcp`, `internal/schema` largely as-is; `internal/config` and `internal/storage` gain standalone mode; `internal/adapter` remains for parsing wiki pages and markdown sources. Obsidian is demoted to an optional viewer.
+Package impact of the single-mode refactor: `internal/config` and `internal/storage` are reshaped (simpler than today — one root, no vault/wiki split); `internal/index` reused (FTS5 trigram — Korean search already validated; accepts any db path); `internal/mcp` loses the `scope` parameter (below); `internal/schema` as-is; `internal/adapter` remains for parsing wiki pages and markdown sources. Obsidian is demoted to an optional viewer.
 
-Design policies (review round 1):
+Design policies:
 
 - **Page identity**: one source file path → one wiki page, deterministically derived from the source path (collisions across different paths get a deterministic disambiguating suffix; exact naming scheme is planning's job). Re-digestion of a changed file overwrites its page; search never returns two pages for one source.
 - **Source mutation**: ledger keys on (source path, content hash). Same path with a new hash → re-digest, overwrite the page, mark the old row `superseded`. A stability gate skips files modified within a settle window (guards against hashing mid-download/mid-sync partial files).
-- **Search scope in standalone mode**: everything indexed is wiki, so `scope=wiki` and `scope=all` return identical results and `scope=vault` returns an empty result set; the MCP tool contract (enum shape) is unchanged. Documented in the tool description.
+- **Search scope**: the v2 index contains wiki pages only (sources are mostly binary PDFs; their digested pages carry the searchable text). The `wiki_search` MCP tool and `cogvault search` drop the `scope` parameter — a contract simplification recorded in 0021 and SPEC.md.
 - **DB location**: `db_path` is absolute and lives outside the synced wiki folder (e.g. `~/.local/state/cogvault/`), so iCloud never syncs or evicts the DB.
+- **Behavior knobs are code constants, not config** (KISS: no speculative configurability): LLM timeout 5m, max attempts 3, max file size 32MB, settle window 2m. Each is promoted to a config key only on demonstrated need.
 
 Data flow (Phase 1):
 
@@ -104,32 +108,27 @@ cogvault ingest [--config <path>] [--dry-run] [--limit N]
 
 `--dry-run` lists what would be digested; `--limit` bounds a run (backlog batching / quota control). A `--source` filter is deliberately omitted (YAGNI: Phase 1 has one source; add it with the phone-capture phase). Exit code is nonzero only on run-level failure, not per-file failures (those are in the report and ledger).
 
-Config (v2 standalone mode, exact key names finalized in planning):
+Config (v2, exact key names finalized in planning):
 
 ```yaml
-wiki_dir: /Users/…/Mobile Documents/com~apple~CloudDocs/cogvault-wiki  # absolute root
+wiki_dir: /Users/…/Mobile Documents/com~apple~CloudDocs/cogvault-wiki  # absolute, writable root
 db_path: ~/.local/state/cogvault/cogvault.db                           # absolute, outside synced folder
 sources:
   - path: ~/Downloads/_Articles
     types: [pdf]        # Phase 1 digests PDFs only (the real corpus); the filter itself is needed to skip e.g. .webp
 llm:
-  backend: claudecode          # interface admits future: local
-  timeout: 300s
-ingest:
-  max_attempts: 3
-  max_file_size: 32MB
-  settle_window: 2m
+  backend: claudecode   # interface admits future: local
 ```
 
 ## Data Model
 
-New SQLite table `ingest_ledger`: source path, content hash, source directory, digested-at timestamp, resulting wiki page path, status (`success | failed | skipped | superseded`), attempt count, last error text, run origin (`scheduled | interactive` — Success Criterion 4 reads this). Keyed on (source path, content hash). FTS5 tables unchanged.
+New SQLite table `ingest_ledger`: source path, content hash, source directory, digested-at timestamp, resulting wiki page path, status (`success | failed | superseded`), attempt count, last error text, run origin (`scheduled | interactive` — Success Criterion 4 reads this). Keyed on (source path, content hash). Type-excluded files (e.g. `.webp`) are reported per run, not persisted. FTS5 tables unchanged.
 
 ## Testing
 
 - Unit: `internal/ingest` with a mock `llm.Adapter`; ledger state transitions (new / already-processed / failed-retry / attempts-exhausted / superseded-on-rehash); stability-gate skip; hash-based dedup including renamed files.
 - Unit: `internal/llm/claudecode` against a fake `claude` executable in `testdata/bin` (records argv/stdin, returns canned JSON) — success, timeout, malformed output, nonzero exit.
-- Unit: config standalone mode (absolute paths accepted, vault mode unaffected); storage root-is-wiki mode write boundaries.
+- Unit: single-mode config (absolute `wiki_dir`/`db_path` accepted, sources validated); storage write boundary = wiki root, read boundary includes sources.
 - Integration: end-to-end ingest over `testdata/fixtures` sources with the fake CLI, asserting pages exist, index hits, ledger rows; concurrent ingest+serve write smoke test (busy timeout effective).
 - Validation (manual, not CI): real run over the 66-file corpus; results feed Success Criteria 1.
 - All: `go test -race ./...`.
@@ -137,11 +136,12 @@ New SQLite table `ingest_ledger`: source path, content hash, source directory, d
 ## Risks
 
 - **Claude Code CLI interface or policy changes** — the standing risk from CLAUDE.md §8, now load-bearing. Mitigation: everything behind `llm.Adapter`; JSON output mode; local backend is the designed escape hatch.
-- **PDF exceeds model context or headless PDF reading fails** — mitigation: `max_file_size` cap, failures isolated per file, O1 verified before the pipeline is built.
+- **PDF exceeds model context or headless PDF reading fails** — mitigation: max-file-size cap, failures isolated per file, O1 verified before the pipeline is built.
 - **Quota exhaustion during the 66-file backlog** — mitigation: `--limit` batching; failed files resume on later runs.
 - **Multi-process SQLite contention (scheduled ingest vs live serve)** — mitigation: single-instance ingest lock + busy timeout (in scope); WAL already enabled.
 - **iCloud Drive quirks on the wiki dir** — writes: plain local file I/O; DB kept outside the synced folder (absolute `db_path`). Reads: consistency checks and search read wiki files, and iCloud may have evicted them (dataless files) — mitigation: treat dataless-read errors as per-file consistency warnings, not fatal; keep consistency-check cadence bounded (existing bounded-staleness design).
 - **Schema non-compliance by the digestion LLM** — mitigation: prompt embeds `_schema.md`; page frontmatter is parsed after generation and a parse failure marks the file `failed`, not silently indexed.
+- **Single-mode refactor breaks existing tests/contract** — accepted deliberately: v2 is a breaking release; SPEC.md is rewritten, and the migration is a one-time copy (in scope). The sole user is the project owner.
 
 ## Success Criteria
 
@@ -163,4 +163,4 @@ New SQLite table `ingest_ledger`: source path, content hash, source directory, d
 - **O3 — Local LLM backend choice** (ollama vs llama.cpp vs other): owner: user, at the later phase that implements it.
 - **O4 — Exact iCloud wiki folder path**: owner: user, at setup.
 - **O5 — Consume-and-archive for dedicated phone inbox dirs** (vs leave-in-place used for `_Articles`): owner: `planning`, at the phone-capture phase.
-- **O6 — Long-term fate of Obsidian-vault mode** (kept vs deprecated): owner: user, after Phase 1 validation.
+- **O6 — resolved 2026-07-22**: vault mode is removed, not maintained (single-mode unification, user decision). Kept here for ID stability.
