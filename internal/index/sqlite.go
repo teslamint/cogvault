@@ -32,7 +32,7 @@ type SQLiteIndex struct {
 }
 
 func NewSQLiteIndex(root, dbPath string, cfg *config.Config) (*SQLiteIndex, error) {
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", dsnWithPragmas(dbPath))
 	if err != nil {
 		return nil, fmt.Errorf("index: open db: %w", err)
 	}
@@ -51,12 +51,42 @@ func NewSQLiteIndex(root, dbPath string, cfg *config.Config) (*SQLiteIndex, erro
 	return s, nil
 }
 
+const schemaVersion = 2
+
+// dsnWithPragmas appends _pragma DSN parameters so every pooled connection —
+// not just the first one — is opened with busy_timeout and WAL. Setting these
+// via db.Exec only configures a single pooled connection; the DSN applies to all.
+func dsnWithPragmas(dbPath string) string {
+	sep := "?"
+	if strings.Contains(dbPath, "?") {
+		sep = "&"
+	}
+	return dbPath + sep + "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
+}
+
 func (s *SQLiteIndex) initSchema() error {
-	if _, err := s.db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
-		return fmt.Errorf("index: set WAL: %w", err)
+	var userVersion int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&userVersion); err != nil {
+		return fmt.Errorf("index: read user_version: %w", err)
 	}
 
-	// Detect existing tokenizer or create new FTS table
+	var tableCount int
+	if err := s.db.QueryRow(
+		`SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('wiki_fts', 'file_meta')`,
+	).Scan(&tableCount); err != nil {
+		return fmt.Errorf("index: inspect schema: %w", err)
+	}
+
+	if tableCount > 0 && userVersion < schemaVersion {
+		slog.Info("index: recreating outdated schema", "from", userVersion, "to", schemaVersion)
+		if _, err := s.db.Exec(`DROP TABLE IF EXISTS wiki_fts`); err != nil {
+			return fmt.Errorf("index: drop wiki_fts: %w", err)
+		}
+		if _, err := s.db.Exec(`DROP TABLE IF EXISTS file_meta`); err != nil {
+			return fmt.Errorf("index: drop file_meta: %w", err)
+		}
+	}
+
 	var existingSQL sql.NullString
 	s.db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='wiki_fts'`).Scan(&existingSQL)
 
@@ -76,62 +106,20 @@ func (s *SQLiteIndex) initSchema() error {
 		}
 	}
 
-	// Check file_meta schema and migrate if needed
-	needsRecreate := false
-	rows, err := s.db.Query(`PRAGMA table_info(file_meta)`)
-	if err == nil {
-		defer rows.Close()
-		var hasModTime bool
-		var colCount int
-		for rows.Next() {
-			var cid int
-			var name, typ string
-			var notNull int
-			var dfltValue sql.NullString
-			var pk int
-			if err := rows.Scan(&cid, &name, &typ, &notNull, &dfltValue, &pk); err != nil {
-				break
-			}
-			colCount++
-			if name == "mod_time" {
-				hasModTime = true
-			}
-		}
-		if err := rows.Err(); err != nil {
-			slog.Warn("index: error reading table_info", "error", err)
-		}
-		if colCount > 0 && hasModTime {
-			needsRecreate = true
-		}
-	}
-
-	if needsRecreate {
-		slog.Info("index: migrating old schema (dropping wiki_fts + file_meta)")
-		s.db.Exec(`DROP TABLE IF EXISTS wiki_fts`)
-		s.db.Exec(`DROP TABLE IF EXISTS file_meta`)
-
-		_, err := s.db.Exec(`CREATE VIRTUAL TABLE wiki_fts USING fts5(path, title, content, tags, tokenize='trigram')`)
-		if err != nil {
-			slog.Warn("FTS5 trigram not supported after migration, falling back to unicode61", "error", err)
-			_, err = s.db.Exec(`CREATE VIRTUAL TABLE wiki_fts USING fts5(path, title, content, tags, tokenize='unicode61')`)
-			if err != nil {
-				return fmt.Errorf("index: create FTS table after migration: %w", err)
-			}
-			s.useTrigram = false
-		} else {
-			s.useTrigram = true
-		}
-	}
-
-	_, err = s.db.Exec(`CREATE TABLE IF NOT EXISTS file_meta (
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS file_meta (
 		path TEXT PRIMARY KEY,
 		title TEXT DEFAULT '',
 		type TEXT DEFAULT '',
 		content_hash TEXT NOT NULL,
+		size INTEGER NOT NULL DEFAULT 0,
+		mtime TEXT NOT NULL DEFAULT '',
 		indexed_at TEXT NOT NULL
-	)`)
-	if err != nil {
+	)`); err != nil {
 		return fmt.Errorf("index: create file_meta table: %w", err)
+	}
+
+	if _, err := s.db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
+		return fmt.Errorf("index: set user_version: %w", err)
 	}
 
 	return nil
@@ -151,13 +139,13 @@ func (s *SQLiteIndex) Add(path, content string, meta map[string]string) error {
 	}
 	defer tx.Rollback()
 
-	if err := s.addTx(tx, normalizePath(path), []byte(content), meta); err != nil {
+	if err := s.addTx(tx, normalizePath(path), []byte(content), meta, 0, ""); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
-func (s *SQLiteIndex) addTx(tx *sql.Tx, path string, content []byte, meta map[string]string) error {
+func (s *SQLiteIndex) addTx(tx *sql.Tx, path string, content []byte, meta map[string]string, size int64, mtime string) error {
 	hash := contentHash(content)
 	title := meta["title"]
 	typ := meta["type"]
@@ -171,8 +159,8 @@ func (s *SQLiteIndex) addTx(tx *sql.Tx, path string, content []byte, meta map[st
 		path, title, string(content), tags); err != nil {
 		return fmt.Errorf("index.Add %s: %w", path, err)
 	}
-	if _, err := tx.Exec(`INSERT OR REPLACE INTO file_meta(path, title, type, content_hash, indexed_at) VALUES (?, ?, ?, ?, ?)`,
-		path, title, typ, hash, indexedAt); err != nil {
+	if _, err := tx.Exec(`INSERT OR REPLACE INTO file_meta(path, title, type, content_hash, size, mtime, indexed_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		path, title, typ, hash, size, mtime, indexedAt); err != nil {
 		return fmt.Errorf("index.Add %s: %w", path, err)
 	}
 	return nil
@@ -238,7 +226,7 @@ func (s *SQLiteIndex) Rebuild(store storage.Storage, adpt adapter.Adapter) error
 	return err
 }
 
-func (s *SQLiteIndex) Search(query string, limit int, scope string) ([]Result, error) {
+func (s *SQLiteIndex) Search(query string, limit int) ([]Result, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -252,19 +240,16 @@ func (s *SQLiteIndex) Search(query string, limit int, scope string) ([]Result, e
 	if limit > 100 {
 		limit = 100
 	}
-	if scope == "" {
-		scope = "all"
-	}
 
 	runeCount := utf8.RuneCountInString(query)
 
 	if runeCount >= 3 && s.useTrigram {
-		return s.searchFTS(query, limit, scope)
+		return s.searchFTS(query, limit)
 	}
-	return s.searchLIKE(query, limit, scope)
+	return s.searchLIKE(query, limit)
 }
 
-func (s *SQLiteIndex) searchFTS(query string, limit int, scope string) ([]Result, error) {
+func (s *SQLiteIndex) searchFTS(query string, limit int) ([]Result, error) {
 	escaped := escapeMatch(query)
 
 	q := `SELECT f.path, f.title, f.type, snippet(wiki_fts, 2, '', '', '...', 32), rank
@@ -272,7 +257,6 @@ func (s *SQLiteIndex) searchFTS(query string, limit int, scope string) ([]Result
 		WHERE wiki_fts MATCH ?`
 	args := []any{escaped}
 
-	q, args = appendScopeFilter(q, args, scope, s.cfg.WikiDir)
 	q += ` ORDER BY rank LIMIT ?`
 	args = append(args, limit)
 
@@ -298,7 +282,7 @@ func (s *SQLiteIndex) searchFTS(query string, limit int, scope string) ([]Result
 	return results, rows.Err()
 }
 
-func (s *SQLiteIndex) searchLIKE(query string, limit int, scope string) ([]Result, error) {
+func (s *SQLiteIndex) searchLIKE(query string, limit int) ([]Result, error) {
 	pattern := "%" + escapeLike(query) + "%"
 
 	q := `SELECT f.path, f.title, f.type, wiki_fts.content
@@ -306,7 +290,6 @@ func (s *SQLiteIndex) searchLIKE(query string, limit int, scope string) ([]Resul
 		WHERE wiki_fts.content LIKE ? ESCAPE '\'`
 	args := []any{pattern}
 
-	q, args = appendScopeFilter(q, args, scope, s.cfg.WikiDir)
 	q += ` LIMIT ?`
 	args = append(args, limit)
 
@@ -368,32 +351,39 @@ func (s *SQLiteIndex) CheckConsistency(store storage.Storage, adpt adapter.Adapt
 	scanErr := adpt.Scan(s.root, s.cfg.AllExcluded(), func(path string) error {
 		p := normalizePath(path)
 
-		data, err := store.Read(path)
+		size, mtime, err := store.Stat(path)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("read %s: %w", p, err))
+			errs = append(errs, fmt.Errorf("stat %s: %w", p, err))
 			delete(indexed, p)
 			return nil
 		}
+		mtimeStr := mtime.Format(time.RFC3339Nano)
 
-		hash := contentHash(data)
-
-		if storedHash, ok := indexed[p]; ok {
+		st, indexedAlready := indexed[p]
+		if indexedAlready {
 			delete(indexed, p)
-			if hash != storedHash {
-				src, err := adpt.Parse(s.root, path, false)
-				if err != nil {
-					errs = append(errs, fmt.Errorf("parse %s: %w", p, err))
-					return nil
-				}
-				toUpdate = append(toUpdate, changeEntry{path: p, content: data, meta: BuildMeta(src)})
-			}
-		} else {
-			src, err := adpt.Parse(s.root, path, false)
-			if err != nil {
-				errs = append(errs, fmt.Errorf("parse %s: %w", p, err))
+			if st.size == size && st.mtime == mtimeStr {
 				return nil
 			}
-			toAdd = append(toAdd, changeEntry{path: p, content: data, meta: BuildMeta(src)})
+		}
+
+		data, err := store.Read(path)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("read %s: %w", p, err))
+			return nil
+		}
+
+		src, err := adpt.Parse(s.root, path, false)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("parse %s: %w", p, err))
+			return nil
+		}
+
+		entry := changeEntry{path: p, content: data, meta: BuildMeta(src), size: size, mtime: mtimeStr}
+		if indexedAlready {
+			toUpdate = append(toUpdate, entry)
+		} else {
+			toAdd = append(toAdd, entry)
 		}
 		return nil
 	})
@@ -426,13 +416,13 @@ func (s *SQLiteIndex) CheckConsistency(store storage.Storage, adpt adapter.Adapt
 		removed++
 	}
 	for _, e := range toUpdate {
-		if err := s.addTx(tx, e.path, e.content, e.meta); err != nil {
+		if err := s.addTx(tx, e.path, e.content, e.meta, e.size, e.mtime); err != nil {
 			return 0, 0, 0, fmt.Errorf("index.CheckConsistency: apply: %w: %w", ErrConsistencySystemic, err)
 		}
 		updated++
 	}
 	for _, e := range toAdd {
-		if err := s.addTx(tx, e.path, e.content, e.meta); err != nil {
+		if err := s.addTx(tx, e.path, e.content, e.meta, e.size, e.mtime); err != nil {
 			return 0, 0, 0, fmt.Errorf("index.CheckConsistency: apply: %w: %w", ErrConsistencySystemic, err)
 		}
 		added++
@@ -447,20 +437,21 @@ func (s *SQLiteIndex) CheckConsistency(store storage.Storage, adpt adapter.Adapt
 	return added, removed, updated, errors.Join(errs...)
 }
 
-func (s *SQLiteIndex) loadIndexedHashes() (map[string]string, error) {
-	rows, err := s.db.Query(`SELECT path, content_hash FROM file_meta`)
+func (s *SQLiteIndex) loadIndexedHashes() (map[string]fileState, error) {
+	rows, err := s.db.Query(`SELECT path, content_hash, size, mtime FROM file_meta`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	indexed := make(map[string]string)
+	indexed := make(map[string]fileState)
 	for rows.Next() {
-		var path, hash string
-		if err := rows.Scan(&path, &hash); err != nil {
+		var path string
+		var st fileState
+		if err := rows.Scan(&path, &st.hash, &st.size, &st.mtime); err != nil {
 			return nil, err
 		}
-		indexed[path] = hash
+		indexed[path] = st
 	}
 	return indexed, rows.Err()
 }
@@ -479,18 +470,14 @@ type changeEntry struct {
 	path    string
 	content []byte
 	meta    map[string]string
+	size    int64
+	mtime   string
 }
 
-func appendScopeFilter(q string, args []any, scope, wikiDir string) (string, []any) {
-	switch scope {
-	case "wiki":
-		q += ` AND f.path LIKE ? ESCAPE '\'`
-		args = append(args, escapeLike(normalizePath(wikiDir))+"/%")
-	case "vault":
-		q += ` AND f.path NOT LIKE ? ESCAPE '\'`
-		args = append(args, escapeLike(normalizePath(wikiDir))+"/%")
-	}
-	return q, args
+type fileState struct {
+	hash  string
+	size  int64
+	mtime string
 }
 
 func normalizePath(p string) string {

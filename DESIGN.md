@@ -1,419 +1,315 @@
-# Design Document — cogvault MVP
+# Design Document — cogvault v2
 
-스펙: `SPEC.md` (draft-5 final) 참조.
-이 문서는 스펙의 **실현 방법**을 다룬다.
+Spec: `SPEC.md` (v2). This document covers **how** the spec is realized.
+Refounding rationale: `docs/decisions/0021-v2-refounding.md`.
 
 ---
 
-## 1. 컴포넌트 의존 그래프
+## 1. Component dependency graph
 
 ```
 cmd/cogvault/main.go
     │
-    ▼
-┌─────────┐     ┌───────────┐
-│ mcp/    │────▶│ storage/  │
-│ server  │     │ fs        │
-│ tools   │──┐  └───────────┘
-└─────────┘  │  ┌───────────┐     ┌───────────┐
-             ├─▶│ index/    │────▶│ adapter/  │
-             │  │ sqlite    │     │ obsidian  │
-             │  └───────────┘     └───────────┘
-             │  ┌───────────┐
-             └─▶│ adapter/  │
-                │ obsidian  │
-                └───────────┘
+    ├──────────────┬───────────────────────────┐
+    ▼              ▼                             ▼
+┌─────────┐   ┌──────────┐                 ┌──────────┐
+│ mcp/    │──▶│ storage/ │◀────────────────│ ingest/  │──┐
+│ server  │   │ fs       │                 │ (ledger) │  │
+│ tools   │──┐└──────────┘                 └──────────┘  │
+└─────────┘  │ ┌──────────┐   ┌──────────┐     │  │      │
+             ├▶│ index/   │──▶│ adapter/ │◀────┘  │      │
+             │ │ sqlite   │   │ obsidian │        ▼      │
+             │ └──────────┘   └──────────┘   ┌──────────┐│
+             └▶ adapter/obsidian             │ llm/     ││
+                                             │ claudecode│
+   ingest/ reads sources[] directly ────────┴──────────┘│
+   (plain os calls, NOT through storage) ◀───────────────┘
 
-모든 패키지 ──▶ errors/
-모든 패키지 ──▶ config/
+all packages ──▶ errors/, config/
 ```
 
-단방향. 순환 없음.
-
-**v0.2 확장 포인트**: `engine/` 패키지가 `storage` + `index` + `adapter` + `llm`을 조합하여 compile/query/lint 구현. `mcp/tools.go`와 `cmd/`에서 engine 호출. 현재 `mcp/tools.go`의 조합 로직(write-then-index 등)이 engine 추출 후보.
+Unidirectional, no cycles. Two new packages in v2: `internal/llm` and
+`internal/ingest`. `ingest` composes `storage` (wiki writes), `index` (Add),
+`llm` (Digest), and `config`, and additionally reads source files directly.
 
 ---
 
-## 2. 컴포넌트별 설계
+## 2. Component design
 
 ### 2.1 errors
 
-sentinel error 패키지. 스펙 4절 참조.
-
-에러 매핑: `mcp/tools.go`의 `mapError` 공용 함수. switch 문. MVP 에러 5개 수준이면 충분.
+Sentinel error package (SPEC §4.1). Mapping lives in `mcp/tools.go` `mapError`.
+The ingest error classes (§4.2) are separate: `llm.ErrTransient` plus an internal
+`failureClass` enum (permanent/transient/infra) in `internal/ingest`.
 
 ### 2.2 config
 
 ```go
+type SourceDir struct { Path string; Types []string }
+type LLMConfig struct { Backend string }
 type Config struct {
-    WikiDir             string   `yaml:"wiki_dir"`
-    DBPath              string   `yaml:"db_path"`
-    Exclude             []string `yaml:"exclude"`
-    ExcludeRead         []string `yaml:"exclude_read"`
-    Adapter             string   `yaml:"adapter"`
-    ConsistencyInterval int      `yaml:"consistency_interval"`
+    WikiDir, DBPath     string
+    Sources             []SourceDir
+    Exclude, ExcludeRead []string
+    Adapter             string
+    ConsistencyInterval int
+    LLM                 LLMConfig
 }
+func Load(configPath string) (*Config, error)   // explicit path, no vault discovery
+func Save(configPath string) error
+func DefaultConfigPath() (string, error)         // ~/.config/cogvault/config.yaml
+func (c *Config) SchemaPath() string             // "_schema.md" (root-relative)
 ```
 
-`AllExcluded()`: `exclude` 뒤에 `exclude_read`를 순서 보존 연결한 슬라이스 반환. 정규화/중복 제거 없음.
-`SchemaPath()`: `filepath.Join(WikiDir, "_schema.md")`.
-
-**책임 경계**: config는 경로 문자열의 안전성 + 최소 정책 제약 검증 (traversal, 절대경로, 빈 값, 허용 목록, wiki_dir 격리, db_path 파일성). 실제 파일시스템 상태와 권한은 storage에서 집행.
+`expandTilde` applies to `WikiDir`, `DBPath`, and each `Sources[i].Path`
+(leading `~/` or exact `~` → `$HOME`; `~` mid-path literal). `validate` requires
+those three absolute after expansion and rejects overlaps via `hasPathPrefix`.
+Responsibility boundary unchanged (0001): config validates path-string safety and
+policy; filesystem existence/permissions are enforced by storage/runtime. Source
+directory existence is checked at ingest runtime, not config load.
 
 ### 2.3 storage/fs
 
 ```go
-type FSStorage struct {
-    root string
-    cfg  *config.Config
-    mu   sync.Mutex
-}
+type FSStorage struct { root string; cfg *config.Config; mu sync.Mutex }
 ```
 
-경로 파이프라인:
-
-```
-relPath → raw ".." 체크 → filepath.Clean → abs 생성 → 경로 컴포넌트별 Lstat 심볼릭 체크 → 메서드별 검증
-```
-
-메서드 의미:
-- `Read`: `exclude_read` → `ErrPermission`
-- `List`: `exclude_read` 디렉토리 자체 접근 → `ErrPermission`, child는 `exclude` + `exclude_read` 필터링
-- `Exists`: `exclude_read` → `false, nil`
-
-List 반환: `ListEntry{Path, Name, IsDir}`. title/type은 MCP 핸들러가 `Index.GetMeta`로 보강.
+`root` is the absolute `wiki_dir` (single mode). The path pipeline is unchanged
+(raw `..` check → `filepath.Clean` → abs → per-component symlink check →
+per-method checks). The v1 `Write` wiki-prefix check is **deleted**: the whole
+root is writable except `_schema.md` (guarded via `cfg.SchemaPath()`). New
+`Stat(path) (int64, time.Time, error)` uses `resolvePath` + `os.Stat` with the
+existing error mapping, feeding the index stat-gate. Single global write mutex
+retained (0006).
 
 ### 2.4 adapter/obsidian
 
-두 파일: `scanner.go` + `parser.go`.
-
-MVP에서 `linkresolve.go`, `cache.go`는 없음. `ResolveLink`는 v0.3에서 Lint와 함께 도입.
-
-**scanner.go** — Scan:
-
-```
-filepath.WalkDir(root)
-  ├── 디렉토리: AllExcluded? → SkipDir
-  ├── .md 파일 → fn(relPath)
-  └── 기타 → 무시
-```
-
-**parser.go** — Parse:
-
-```
-확장자 체크 → .md 아니면 ErrNotMarkdown
-  │
-  ▼
-github.com/adrg/frontmatter 로 파싱
-  ├── 성공 → Frontmatter 채움
-  └── 실패 → Frontmatter={}, 전체를 본문으로
-  │
-  ▼
-Title: frontmatter["title"] > 첫 # heading > 파일명
-  │
-  ▼
-정규식으로 추출:
-  \[\[([^\]]+)\]\]  → 캡처 그룹에서 target 추출
-  !\[\[([^\]]+)\]\] → 캡처 그룹에서 file 추출
-  │
-  ▼
-후처리:
-  "target|display" → "target"   (| 뒤 제거)
-  "target#heading" → "target"   (# 뒤 제거)
-  │
-  ▼
-Links: ["target1", "target2"]        ← 대괄호 없음
-Attachments: ["file1", "file2"]      ← 대괄호 없음
-  │
-  ▼
-Tags: frontmatter["tags"] + 본문 인라인 #태그
-Dataview: ^(\w+)::\s*(.+)$ 매칭
-Aliases: frontmatter["aliases"]
-```
-
-**includeContent 참고**: Ingest 워크플로우에서 `include_content=true`가 사실상 필수. 메타데이터만으로는 에이전트가 source 페이지를 작성할 정보가 부족. 스펙 `_schema.md`에도 `wiki_parse(path, include_content=true)`로 명시.
-
-`includeContent=false`여도 파일 전체를 읽어야 링크/태그 추출 가능. 내부 파싱은 바이트 기반으로 처리하되, `Source.Content`는 MCP JSON 계약에 맞춰 문자열로 직렬화하고 `includeContent=false`면 필드를 생략한다.
+Unchanged from v1 (`scanner.go` + `parser.go`; frontmatter, wikilink, tag,
+dataview extraction). It parses wiki pages under `wiki_dir`. `ResolveLink` still
+absent (v0.3 with Lint).
 
 ### 2.5 index/sqlite
 
 ```go
 type SQLiteIndex struct {
-    db              *sql.DB
-    cfg             *config.Config
-    root            string           // adapter 전달용 only
-    lastConsistency atomic.Int64     // UnixNano
-    mu              sync.RWMutex    // DB read/write
-    ccMu            sync.Mutex      // CheckConsistency 직렬화
-    useTrigram      bool
+    db *sql.DB; cfg *config.Config; root string
+    lastConsistency atomic.Int64
+    mu sync.RWMutex; ccMu sync.Mutex; useTrigram bool
 }
 ```
 
-**DB 초기화**:
+v2 changes:
 
-```sql
-PRAGMA journal_mode=WAL;
+- **`Search(query, limit)`** — the `scope` parameter and `appendScopeFilter` are
+  removed; the index holds wiki pages only.
+- **Schema versioning** — `PRAGMA user_version=2` replaces the `mod_time`-column
+  sniffing migration. A DB with tables at `user_version < 2` is dropped and
+  recreated. `file_meta` gains `size INTEGER` and `mtime TEXT`.
+- **busy_timeout** — every connection (via the pooled DSN pragma) sets
+  `busy_timeout=5000` so multi-process contention waits instead of failing. One
+  exception: `Add`'s DELETE-then-INSERT runs in a DEFERRED tx whose FTS5 DELETE
+  reads shadow tables first; a concurrent committed writer makes the write upgrade
+  return `SQLITE_BUSY_SNAPSHOT`, which `busy_timeout` does not retry. Ingest
+  classifies this infra (attempts spared, self-heals next run); it is a documented
+  limitation (`docs/deviations/2026-07-22-busy-timeout-fts-write-write.md`).
+- **Stat-gate** — `CheckConsistency`'s scan callback calls `store.Stat(path)`
+  first and only `store.Read` + re-hashes when size or mtime differ from the
+  stored row. Dataless/eviction read errors stay per-file warnings (existing
+  `errs` join path). This bounds iCloud re-download cost.
 
-CREATE VIRTUAL TABLE IF NOT EXISTS wiki_fts USING fts5(
-    path, title, content, tags,
-    tokenize='trigram'  -- 미지원 시 unicode61 fallback
-);
+`Add` remains a pure indexing API (hash + FTS, single TX, no disk access);
+direct `Add` calls pass zero size/mtime, CheckConsistency threads real values.
 
-CREATE TABLE IF NOT EXISTS file_meta (
-    path TEXT PRIMARY KEY,
-    title TEXT DEFAULT '',
-    type TEXT DEFAULT '',
-    content_hash TEXT NOT NULL,
-    indexed_at TEXT NOT NULL
-);
-```
-
-기존 DB 열기 시 `sqlite_master`로 tokenizer 감지, `PRAGMA table_info`로 스키마 불일치(mod_time 컬럼) 감지 → 불일치 시 wiki_fts + file_meta 모두 DROP 후 재생성.
-
-**Add**: 순수 인덱싱 API. 주어진 content를 hash + FTS에 저장. 디스크 접근 안 함. 단일 TX.
-
-**Search**:
-- query 길이 ≥ 3 + useTrigram → FTS5 MATCH
-- query 길이 ≤ 2 또는 !useTrigram → `content LIKE '%query%'` + Go 기반 snippet 생성
-- scope: `escapeLike(normalizePath(wikiDir)) + "/%"` LIKE 패턴
-- `snippet`: FTS5 → `snippet()` 함수, LIKE → rune 기반 전후 32 rune 잘라 생성
-- `score`: FTS5 → -rank, LIKE → 0
-
-**CheckConsistency(storage, adapter, force)**:
-
-```
-1. Lock-free interval check (atomic.Int64)
-2. ccMu.Lock + double-check interval
-3. RLock → indexed map (path → content_hash) 로드 → RUnlock
-4. Scan 기반 단일 패스:
-   - 기존 파일: store.Read → content_hash 비교 → 변경 시 Parse(false) → meta 추출
-   - 신규 파일: store.Read + Parse(false) → Add
-   - Parse/Read 에러: skip, errs 누적
-   - Scan 에러: toRemove skip, 즉시 에러 반환 (lastConsistency 미갱신)
-5. indexed 잔여 = 삭제/exclude → Remove
-6. Lock → 단일 TX apply (all-or-nothing) → lastConsistency 갱신 (per-file 에러 시에도) → Unlock
-```
-
-**Rebuild(storage, adapter)**: clear + CheckConsistency(force=true).
-
-**GetMeta**: `SELECT ... FROM file_meta WHERE path = ?`. 미존재 → `ErrNotFound`.
-
-**BuildMeta(src)**: Source → meta map. `frontmatter["type"]` → 페이지 타입 (SourceType 아님).
-
-**경로 정규화**: 모든 public method 입력을 `normalizePath` (filepath.Clean + `\` → `/`)로 통일.
-
-**CheckConsistency 에러 처리**: per-file 에러 → `(counts, errors.Join(errs...))` 반환. error가 non-nil이어도 Search/GetMeta 정상 호출 가능. 상위 레이어(mcp)의 에러 처리 정책은 Step 5에서 결정.
-
-### 2.6 mcp/
-
-**server.go**:
+### 2.6 llm (new)
 
 ```go
-func NewServer(cfg, store, idx, adpt) *server.MCPServer {
-    s := server.NewMCPServer("cogvault", "0.1.0",
-        server.WithInstructions(schemaInstructions(cfg, store)),
-    )
-    registerTools(s, cfg, store, idx, adpt)
-    return s
+type DigestRequest struct { SourcePath, SchemaText, PageSlug string }
+type DigestResult  struct { PageContent string }
+type Adapter interface {
+    Digest(ctx context.Context, req DigestRequest) (*DigestResult, error)
+    Name() string
 }
+var ErrTransient error   // wraps quota/rate-limit/timeout/transport failures
+func NewClaudeCode(binPath string) *ClaudeCode
 ```
 
-**instructions 전략**:
-- `cfg.SchemaPath()` 전문 읽기.
-- 2,000자 이하: 전문 포함.
-- 2,000자 초과: 앞 2,000자 + `fmt.Sprintf("\n\n[전문은 wiki_read(%q)로 확인]", cfg.SchemaPath())`.
-- 읽기 실패: 하드코딩된 기본 요약.
-- 섹션 추출 로직 불필요. 단순 절삭.
+**Responsibility**: define the digestion contract and one backend. `claudecode`
+runs `claude --print --output-format json --allowedTools "Read"` with the prompt
+(schema text + instructions + absolute source path) on **stdin** (avoids ARG_MAX),
+a per-call 5-minute timeout, strips an optional leading/trailing ``` fence, parses
+the final JSON array element, and treats any non-`success` subtype or
+`is_error:true` as failure regardless of exit code (O1 findings). Error
+classification: quota/rate-limit/timeout/transport/`error_during_execution` →
+`ErrTransient` (permanent otherwise). A future local backend implements the same
+interface without touching `ingest`.
 
-**tools.go 핸들러 패턴**:
-
-모든 핸들러는 `registerTools`에서 클로저로 `store`, `idx`, `adpt`를 캡처. 구조체 필드가 아닌 함수 클로저로 의존성 전달.
-
-1. 파라미터 추출 + 검증
-2. storage/index/adapter 호출
-3. `mapError` → MCP 에러
-4. JSON 직렬화
-
-**write-then-index** (write 핸들러):
+### 2.7 ingest (new)
 
 ```go
-// NOTE: v0.2에서 engine/service 레이어로 추출 후보.
-func handleWrite(cfg, store, idx, adpt) handler {
-    return func(ctx, req) {
-        path, content := extractArgs(req)
-
-        if err := store.Write(path, []byte(content)); err != nil {
-            return mapError(err)
-        }
-
-        // best-effort 인덱싱
-        if strings.HasSuffix(path, ".md") {
-            if src, err := adpt.Parse(root, path, false); err == nil {
-                _ = idx.Add(path, content, extractMeta(src))
-            }
-        }
-
-        return writeResponse(path, len(content), nil)
-    }
-}
+type Runner struct { /* cfg, store, idx, llm, dbPath, ledger, seams */ }
+func New(cfg *config.Config, store storage.Storage, idx index.Index,
+         llmAdapter llm.Adapter, dbPath string) (*Runner, error)
+func (r *Runner) Run(ctx context.Context, opts RunOptions) (*Report, error)
+func (r *Runner) Close() error
+type RunOptions struct { DryRun bool; Limit int; Origin string }
 ```
 
-**listWithMeta** (list 핸들러 내부 헬퍼):
+**Responsibility**: orchestrate the digest stage. `Run` acquires an exclusive
+`flock` on `<dir(dbPath)>/ingest.lock` (fail fast → `ErrAlreadyRunning`), scans
+each `cfg.Sources` dir **top level only** (`os.ReadDir` + `os.Lstat`, skipping
+dirs and symlinks) applying the type filter, 32MB size cap, and 2m settle window,
+streams a sha256 hash (`hashFile`, no full file in memory), looks up the ledger,
+calls `llm.Digest`, validates the page's frontmatter from bytes, resolves the
+collision-aware page path, writes through `storage`, indexes via `idx.Add`, and
+finalizes the ledger row. It honors ctx cancellation between files (partial report
++ wrapped ctx error) and releases the lock via defer. Error classes drive
+`attempts` (permanent ++, transient/infra unchanged; §4.2).
 
-```go
-// NOTE: v0.2에서 engine/service 레이어로 추출 후보.
-func listWithMeta(store, idx, adpt, prefix) ([]map[string]any, error) {
-    if _, _, _, err := idx.CheckConsistency(store, adpt, false); err != nil {
-        return nil, err
-    }
-    entries, err := store.List(prefix)
-    if err != nil { return nil, err }
+**Ledger** (`ledger.go`): owns its **own** `sql.Open("sqlite", dsn)` to `db_path`
+with DSN pragmas `busy_timeout(5000)` + `journal_mode(WAL)` on **every** pooled
+connection (not a one-shot `PRAGMA` exec). The `index` package never touches the
+`ingest_ledger` table; WAL + busy_timeout make the second connection to the same
+DB file safe. DDL and transitions (`lookup`, `supersedePrevSuccess`, `upsert`) per
+SPEC §10.6.
 
-    results := make([]map[string]any, len(entries))
-    for i, e := range entries {
-        r := map[string]any{
-            "path": e.Path, "name": e.Name, "is_dir": e.IsDir,
-            "title": "", "type": "",
-        }
-        if !e.IsDir {
-            if meta, err := idx.GetMeta(e.Path); err == nil {
-                r["title"] = meta.Title
-                r["type"] = meta.Type
-            }
-        }
-        results[i] = r
-    }
-    return results, nil
-}
-```
+**Report** (`report.go`): builds the `Report` struct + a `String()` renderer;
+printing is the CLI's job.
 
-`map[string]any`로 JSON 직접 구성. 별도 ListResult 타입 불필요.
+### 2.8 mcp
+
+`server.go`/`tools.go`: the `wiki_search` tool drops the `scope` parameter; tool
+descriptions say "wiki root" instead of "vault". `handleWikiSearch` calls
+`idx.Search(query, limit)`. mcp-go does not enforce `additionalProperties:false`,
+so a stray `scope` arg is ignored, not rejected — the enforceable contract is
+schema absence of `scope`. Instructions/`mapError`/write-then-index otherwise
+unchanged.
+
+### 2.9 cmd/cogvault
+
+Root persistent flag `--config` (default `config.DefaultConfigPath()`); the old
+vault flag is deleted. `wire.go`: `resolveConfigPath(cmd)` + `bootstrap(configPath)` →
+`config.Load` → adapter → `storage.NewFSStorage(cfg.WikiDir, cfg)` →
+`index.NewSQLiteIndex(cfg.WikiDir, cfg.DBPath, cfg)`. `init.go` is the two-step
+flow (SPEC §9.1). `ingest.go` (new): flags → `ingest.RunOptions`, `exec.LookPath`
+for `claude` → `llm.NewClaudeCode`, prints `report.String()`, nonzero exit only on
+run-level failure.
 
 ---
 
-## 3. 데이터 흐름
+## 3. Data flow
 
-### 3.1 init
-
-```
-parseFlags → config 로드/생성 → wiki_dir/ 생성 → SchemaPath() 복사(embed)
-  → DB 생성 → CheckConsistency(force=true) → 출력
-```
-
-### 3.2 serve
+### 3.1 Ingest (Phase 1)
 
 ```
-parseFlags → config.Load → 검증 (실패 시 exit 1)
-  → storage/index/adapter 생성
-  → CheckConsistency(force=true)
-  → mcp.NewServer → server.ServeStdio (블로킹)
-  → cleanup
+sources[].path ──scan──▶ stability gate ──▶ content hash ──new?──▶ llm.Adapter.Digest(file, schema)
+                                                                      │ (claude --print subprocess)
+                                                                      ▼
+                                                           markdown source page
+                                                                      │
+                                        storage.Write ──▶ index.Add ──▶ ledger: success
+                                        (failure at any step ──▶ ledger: failed + class, run continues)
 ```
 
-### 3.3 에이전트 Ingest (passthrough, 6회 호출)
+### 3.2 init (two-step)
 
 ```
-에이전트                          MCP 서버
-  │  (instructions로 스키마 수신)
-  ├─ wiki_scan("notes/")     ──▶ Scan → 경로 목록
-  ├─ wiki_parse(path,true)   ──▶ Parse(includeContent=true) → Source
-  │  (내용 분석)
-  ├─ wiki_search(q,"wiki")   ──▶ CheckConsistency(false) + FTS5 → Results
-  ├─ wiki_write(source_page) ──▶ Write + best-effort Add → 성공
-  ├─ wiki_read(related_page) ──▶ Read → 내용
-  └─ wiki_write(updated)     ──▶ Write + best-effort Add → 성공
+run 1: stat config → absent/invalid-fresh → Save template + guidance, exit 0
+run 2: Load (valid) → MkdirAll(wiki_dir) → WriteSchema → MkdirAll(dir(db_path))
+       → NewSQLiteIndex → Rebuild (new DB) | CheckConsistency(force) (existing DB)
+```
+
+### 3.3 serve
+
+```
+resolveConfigPath → Load → bootstrap(store/index/adapter) → CheckConsistency(force)
+  → mcp.NewServer(wiki root) → ServeStdio (blocking) → cleanup
 ```
 
 ---
 
-## 4. 설계 결정
+## 4. Design decisions
 
-### 4.1 eventual consistency
-
-Write-then-index + CheckConsistency. 단순. 부분 실패 허용.
-
-### 4.2 trigram 토크나이저
-
-Pure Go SQLite에서 ICU 불확실. trigram은 추가 의존 없이 한국어 동작. 2글자 이하 LIKE fallback.
-
-### 4.3 Storage/Index 분리
-
-독립 mock, 검색 엔진 교체 가능. 비용: 조합 로직이 mcp/에 위치 → v0.2에서 engine으로.
-
-### 4.4 `//go:embed`로 default_schema.md 배포
-
-```go
-//go:embed default_schema.md
-var DefaultContent string
-```
-
-`internal/schema/` 패키지. 싱글 바이너리. init 시 `_schema.md` 없으면 이 내용으로 생성.
+- **Single mode over dual mode** (0021 D1): one root, no vault/wiki split.
+- **Batch + launchd over daemon** (0021 D2): no long-lived process.
+- **Eventual consistency** retained: write-then-index + bounded-staleness
+  CheckConsistency (now stat-gated for iCloud).
+- **Ledger owns its DB connection**: keeps `index` free of ingest state; DSN
+  busy_timeout + WAL make concurrent openers safe (multi-process contract).
+- **Validate-then-write**: an unparsable generated page is a permanent failure and
+  nothing lands in the synced wiki folder.
+- **trigram tokenizer** retained (Korean already validated; LIKE fallback ≤ 2
+  chars).
 
 ---
 
-## 5. 파일별 책임
+## 5. File responsibilities
 
-| 파일 | 책임 |
+| File | Responsibility |
 |------|------|
-| `errors/errors.go` | sentinel error |
-| `config/config.go` | YAML, 기본값, 검증 |
-| `storage/storage.go` | 인터페이스 + ListEntry |
-| `storage/fs.go` | 파일시스템, 보안, 뮤텍스 |
-| `adapter/adapter.go` | 인터페이스 + Source |
-| `adapter/obsidian/scanner.go` | WalkDir Scan |
-| `adapter/obsidian/parser.go` | frontmatter, wikilink, tag, dataview |
-| `adapter/markdown/parser.go` | 표준 마크다운 fallback |
-| `index/index.go` | 인터페이스 + Result + FileMeta |
-| `index/sqlite.go` | FTS5, file_meta, CheckConsistency, GetMeta |
-| `mcp/server.go` | MCP 서버, instructions |
-| `mcp/tools.go` | 도구 6개, mapError, listWithMeta |
-| `cmd/cogvault/main.go` | cobra CLI |
-| `schema/schema.go` | go:embed + DefaultContent 노출 |
-| `schema/default_schema.md` | go:embed 대상 |
+| `errors/errors.go` | sentinel errors |
+| `config/config.go` | YAML, `~` expansion, absolute/overlap validation, explicit-path Load/Save |
+| `storage/storage.go` | interface + ListEntry + `Stat` |
+| `storage/fs.go` | filesystem (single wiki root), security, mutex |
+| `adapter/obsidian/*` | Scan, frontmatter/wikilink/tag/dataview parse |
+| `adapter/markdown/parser.go` | standard-markdown fallback |
+| `index/index.go` | interface + Result + FileMeta |
+| `index/sqlite.go` | FTS5, file_meta (+size/mtime), user_version=2, stat-gated CheckConsistency, busy_timeout |
+| `llm/llm.go` | Adapter interface, DigestRequest/Result, ErrTransient |
+| `llm/claudecode.go` | `claude --print` backend, JSON parse, error classification |
+| `ingest/ingest.go` | Runner: scan, hash, digest, validate, write, index, ledger, lock, ctx |
+| `ingest/ledger.go` | `ingest_ledger` DDL + transitions; own DB connection |
+| `ingest/report.go` | Report struct + String() |
+| `mcp/server.go` | MCP server, instructions |
+| `mcp/tools.go` | six tools, mapError, listWithMeta (no scope) |
+| `cmd/cogvault/*` | cobra CLI: `--config`, init/search/serve/ingest |
+| `schema/schema.go` + `default_schema.md` | `go:embed` default schema |
 
 ---
 
-## 6. 동시성
+## 6. Concurrency
 
 ```
-Storage.Read     — 잠금 없음
-Storage.Write    — Storage.mu
-Index.Search     — Index.mu.RLock (WAL 읽기)
-Index.Add        — Index.mu.Lock
-Index.GetMeta    — Index.mu.RLock (WAL 읽기)
-Index.Remove     — Index.mu.Lock
-Index.Rebuild    — Index.mu.Lock → CheckConsistency
-CheckConsistency — ccMu.Lock (직렬화) + mu.RLock (읽기) + mu.Lock (적용)
+Storage.Read/Stat  — no lock
+Storage.Write      — Storage.mu
+Index.Search/GetMeta — Index.mu.RLock (WAL read)
+Index.Add/Remove   — Index.mu.Lock
+CheckConsistency   — ccMu.Lock (serialize) + mu (read then apply)
+Ingest run         — flock on ingest.lock (single instance, cross-process)
+DB (all openers)   — busy_timeout=5000 per connection (contention → wait)
 ```
 
-Storage.mu ↔ Index.mu 동시 미획득. ccMu는 CheckConsistency 전용. 데드락 없음.
+Storage.mu ↔ Index.mu never held together; no deadlock. Cross-process safety
+(scheduled ingest vs live serve) rests on the ingest flock + WAL + busy_timeout.
 
 ---
 
-## 7. 테스트 설계
+## 7. Test design
 
-| 대상 | 방법 |
+| Target | Method |
 |------|------|
-| config | YAML 생성 → Load → 검증 |
-| storage/fs | `t.TempDir()` + fixtures |
-| adapter/obsidian | fixtures/obsidian, edge |
-| index/sqlite | 임시 DB. force=true/false 분기 |
-| MCP 도구 | mcp-go 테스트 클라이언트 |
-| 통합 | init→write→search round-trip |
-| 레이스 | `go test -race ./...` |
+| config | YAML → Load → validate (absolute/overlap/expansion) |
+| storage/fs | `t.TempDir()` fixtures; Stat; whole-root write; security |
+| adapter | fixtures/obsidian, edge |
+| index/sqlite | temp DB; user_version recreation; stat-gate Read-count |
+| llm | fake `claude` in `testdata/bin` (argv/stdin/mode) |
+| ingest | mock `llm.Adapter` + real temp dirs; ledger transitions; lock; ctx |
+| mcp | mcp-go test client; schema has no scope |
+| cmd | in-process cobra; `--config` temp files; ingest via fake `claude` on PATH |
+| integration (U9) | backlog/incremental/contention e2e |
+| race | `go test -race ./...` |
 
 ---
 
-## 8. 구현 순서
+## 8. Implementation order (v2 Phase 1)
 
 ```
-Step 1: errors + config
-Step 2: storage (인터페이스 + fs + 보안 테스트)
-Step 3: adapter (인터페이스 + obsidian scanner/parser + 파싱 테스트)
-Step 4: index (인터페이스 + sqlite + GetMeta + 정합성 테스트)
-Step 5: mcp (server + tools + round-trip 테스트)
-Step 6: cmd (cobra: init/search/serve + CLI 테스트)
-Step 7: schema (default_schema.md + go:embed)
-Step 8: testdata/fixtures/real + 통합 테스트
-Step 9: 1주 실사용 (스펙 11절)
+U1: O1 spike — headless PDF digestion verification (research note)
+U2: config v2 (single mode, explicit path, sources, ~ expansion)
+U3: storage — root is the wiki, Stat added
+U4: index — user_version=2, size+mtime stat-gate, scope removal, busy_timeout
+U5: llm — adapter interface + claudecode backend + error classes
+U6: ingest — pipeline, ledger, lock, report
+U7: cmd — --config model, ingest command, scope-flag removal
+U8: launchd template + canonical docs (this document set)
+U9: end-to-end integration tests
 ```

@@ -15,12 +15,12 @@ func newServeCmd() *cobra.Command {
 }
 
 func runServe(cmd *cobra.Command, args []string) error {
-	vaultRoot, err := resolveVaultRoot(cmd)
+	configPath, err := resolveConfigPath(cmd)
 	if err != nil {
 		return err
 	}
 
-	cfg, store, idx, adpt, err := bootstrap(vaultRoot)
+	cfg, store, idx, adpt, err := bootstrap(configPath)
 	if err != nil {
 		return err
 	}
@@ -31,6 +31,6 @@ func runServe(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	mcpSrv := cogmcp.NewServer(vaultRoot, cfg, store, idx, adpt)
+	mcpSrv := cogmcp.NewServer(cfg.WikiDir, cfg, store, idx, adpt)
 	return server.ServeStdio(mcpSrv)
 }

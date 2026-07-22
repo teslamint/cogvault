@@ -199,27 +199,11 @@ func TestIntegration_Security_WriteSchema(t *testing.T) {
 	_, s := setupIntegration(t)
 
 	result := callTool(t, s, "wiki_write", map[string]any{
-		"path":    "_wiki/_schema.md",
+		"path":    "_schema.md",
 		"content": "modified schema",
 	})
 	if !result.IsError {
 		t.Fatal("expected error for schema write")
-	}
-	text := extractText(t, result)
-	if !strings.Contains(text, "access denied") {
-		t.Errorf("error = %q, want 'access denied'", text)
-	}
-}
-
-func TestIntegration_Security_WriteOutsideWikiDir(t *testing.T) {
-	_, s := setupIntegration(t)
-
-	result := callTool(t, s, "wiki_write", map[string]any{
-		"path":    "notes/test.md",
-		"content": "outside wiki dir",
-	})
-	if !result.IsError {
-		t.Fatal("expected error for write outside wiki_dir")
 	}
 	text := extractText(t, result)
 	if !strings.Contains(text, "access denied") {
@@ -388,16 +372,17 @@ func TestIntegration_IngestWorkflow(t *testing.T) {
 		t.Error("expected content with include_content=true")
 	}
 
-	// Step 3: wiki_search(keyword, "wiki") — empty (no wiki pages yet)
+	// Step 3: wiki_search(keyword) — no wiki page exists yet (only the raw note)
 	searchResult := callTool(t, s, "wiki_search", map[string]any{
 		"query": "ingestworkflow",
-		"scope": "wiki",
 	})
 	searchText := extractText(t, searchResult)
 	var searchResults []map[string]any
 	json.Unmarshal([]byte(searchText), &searchResults)
-	if len(searchResults) != 0 {
-		t.Errorf("expected empty wiki search before write, got %d results", len(searchResults))
+	for _, r := range searchResults {
+		if path, _ := r["path"].(string); strings.HasPrefix(path, "_wiki/") {
+			t.Errorf("expected no _wiki page before write, found %s", path)
+		}
 	}
 
 	// Step 4: wiki_write source page
@@ -435,7 +420,6 @@ func TestIntegration_IngestWorkflow(t *testing.T) {
 	// Verify updated content is searchable
 	searchResult2 := callTool(t, s, "wiki_search", map[string]any{
 		"query": "ingestworkflow",
-		"scope": "wiki",
 	})
 	searchText2 := extractText(t, searchResult2)
 	var searchResults2 []map[string]any
@@ -482,48 +466,6 @@ func TestIntegration_RealVault_InitAndSearch(t *testing.T) {
 	json.Unmarshal([]byte(searchText2), &results2)
 	if len(results2) == 0 {
 		t.Error("expected results for 2-char Korean query '프로' (LIKE fallback)")
-	}
-}
-
-func TestIntegration_RealVault_ScopeFiltering(t *testing.T) {
-	_, s := setupRealVault(t)
-
-	// scope=wiki should only return _wiki/ files
-	wikiResult := callTool(t, s, "wiki_search", map[string]any{
-		"query": "LLM",
-		"scope": "wiki",
-	})
-	wikiText := extractText(t, wikiResult)
-	var wikiResults []map[string]any
-	json.Unmarshal([]byte(wikiText), &wikiResults)
-	for _, r := range wikiResults {
-		path, _ := r["path"].(string)
-		if !strings.HasPrefix(path, "_wiki/") {
-			t.Errorf("wiki scope returned non-wiki path: %s", path)
-		}
-	}
-
-	// scope=vault should only return non-wiki files
-	vaultResult := callTool(t, s, "wiki_search", map[string]any{
-		"query": "LLM",
-		"scope": "vault",
-	})
-	vaultText := extractText(t, vaultResult)
-	var vaultResults []map[string]any
-	json.Unmarshal([]byte(vaultText), &vaultResults)
-	for _, r := range vaultResults {
-		path, _ := r["path"].(string)
-		if strings.HasPrefix(path, "_wiki/") {
-			t.Errorf("vault scope returned wiki path: %s", path)
-		}
-	}
-
-	// Both should have results (LLM appears in both wiki and vault)
-	if len(wikiResults) == 0 {
-		t.Error("expected wiki results for 'LLM'")
-	}
-	if len(vaultResults) == 0 {
-		t.Error("expected vault results for 'LLM'")
 	}
 }
 

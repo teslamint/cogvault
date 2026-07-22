@@ -1,6 +1,7 @@
 package index
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -123,17 +124,46 @@ func TestInitSchemaFresh(t *testing.T) {
 	}
 }
 
+func TestBusyTimeoutAppliesToAllConnections(t *testing.T) {
+	root := t.TempDir()
+	idx := newTestIndex(t, root, testCfg())
+
+	ctx := context.Background()
+
+	// Grab several distinct pooled connections at once, then verify each carries
+	// busy_timeout. A per-connection db.Exec would only configure one of them.
+	conns := make([]*sql.Conn, 0, 4)
+	for i := 0; i < 4; i++ {
+		c, err := idx.db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("open conn %d: %v", i, err)
+		}
+		conns = append(conns, c)
+	}
+	for i, c := range conns {
+		var bt int
+		if err := c.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&bt); err != nil {
+			t.Fatalf("conn %d PRAGMA busy_timeout: %v", i, err)
+		}
+		if bt != 5000 {
+			t.Fatalf("conn %d busy_timeout = %d, want 5000", i, bt)
+		}
+		c.Close()
+	}
+}
+
 func TestInitSchemaExistingUnicode61(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 
-	// Create DB with unicode61
+	// Create a v2 DB (user_version=2) with unicode61 tokenizer — must be preserved.
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	db.Exec(`PRAGMA journal_mode=WAL`)
 	db.Exec(`CREATE VIRTUAL TABLE wiki_fts USING fts5(path, title, content, tags, tokenize='unicode61')`)
-	db.Exec(`CREATE TABLE file_meta (path TEXT PRIMARY KEY, title TEXT DEFAULT '', type TEXT DEFAULT '', content_hash TEXT NOT NULL, indexed_at TEXT NOT NULL)`)
+	db.Exec(`CREATE TABLE file_meta (path TEXT PRIMARY KEY, title TEXT DEFAULT '', type TEXT DEFAULT '', content_hash TEXT NOT NULL, size INTEGER NOT NULL DEFAULT 0, mtime TEXT NOT NULL DEFAULT '', indexed_at TEXT NOT NULL)`)
+	db.Exec(`PRAGMA user_version = 2`)
 	db.Close()
 
 	// Reopen with SQLiteIndex
@@ -144,36 +174,70 @@ func TestInitSchemaExistingUnicode61(t *testing.T) {
 	defer idx.Close()
 
 	if idx.useTrigram {
-		t.Fatal("expected useTrigram=false for existing unicode61 DB")
+		t.Fatal("expected useTrigram=false for existing v2 unicode61 DB")
 	}
 }
 
-func TestInitSchemaMigration(t *testing.T) {
+func TestInitSchemaUserVersionRecreation(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 
-	// Create old schema with mod_time
+	// Create a v1-shaped DB: old tables without size/mtime columns, user_version left at 0.
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	db.Exec(`PRAGMA journal_mode=WAL`)
 	db.Exec(`CREATE VIRTUAL TABLE wiki_fts USING fts5(path, title, content, tags, tokenize='trigram')`)
-	db.Exec(`CREATE TABLE file_meta (path TEXT PRIMARY KEY, title TEXT, type TEXT, content_hash TEXT NOT NULL, mod_time TEXT NOT NULL, indexed_at TEXT NOT NULL)`)
-	db.Exec(`INSERT INTO file_meta VALUES ('old.md', 'Old', '', 'abc', '2024-01-01', '2024-01-01')`)
+	db.Exec(`CREATE TABLE file_meta (path TEXT PRIMARY KEY, title TEXT, type TEXT, content_hash TEXT NOT NULL, indexed_at TEXT NOT NULL)`)
+	db.Exec(`INSERT INTO file_meta VALUES ('old.md', 'Old', '', 'abc', '2024-01-01')`)
 	db.Exec(`INSERT INTO wiki_fts(path, title, content, tags) VALUES ('old.md', 'Old', 'old content', '')`)
 	db.Close()
 
-	// Reopen — should drop and recreate
+	// Reopen — user_version 0 < 2 with tables present must drop and recreate on the v2 DDL.
 	idx, err := NewSQLiteIndex(t.TempDir(), dbPath, testCfg())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer idx.Close()
 
-	// old data should be gone
+	// Old data should be gone.
 	_, err = idx.GetMeta("old.md")
 	if !errors.Is(err, cverr.ErrNotFound) {
-		t.Fatalf("expected ErrNotFound after migration, got %v", err)
+		t.Fatalf("expected ErrNotFound after recreation, got %v", err)
+	}
+
+	// user_version must now be 2.
+	var uv int
+	if err := idx.db.QueryRow(`PRAGMA user_version`).Scan(&uv); err != nil {
+		t.Fatal(err)
+	}
+	if uv != 2 {
+		t.Fatalf("user_version = %d, want 2", uv)
+	}
+
+	// The recreated file_meta must carry the v2 size/mtime columns.
+	var hasSize, hasMtime bool
+	rows, err := idx.db.Query(`PRAGMA table_info(file_meta)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, typ string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
+			t.Fatal(err)
+		}
+		switch name {
+		case "size":
+			hasSize = true
+		case "mtime":
+			hasMtime = true
+		}
+	}
+	if !hasSize || !hasMtime {
+		t.Fatalf("recreated file_meta missing v2 columns: size=%v mtime=%v", hasSize, hasMtime)
 	}
 }
 
@@ -263,7 +327,7 @@ func TestSearchFTS(t *testing.T) {
 
 	idx.Add("notes/go.md", "Go programming language is awesome", map[string]string{"title": "Go Lang", "type": "source"})
 
-	results, err := idx.Search("programming", 10, "all")
+	results, err := idx.Search("programming", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,7 +351,7 @@ func TestSearchShortQuery(t *testing.T) {
 
 	idx.Add("notes/kr.md", "한국어 테스트입니다", map[string]string{"title": "Korean"})
 
-	results, err := idx.Search("한국", 10, "all")
+	results, err := idx.Search("한국", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -302,7 +366,7 @@ func TestSearchKorean(t *testing.T) {
 
 	idx.Add("notes/kr.md", "인공지능 프로그래밍 가이드", map[string]string{"title": "AI Guide"})
 
-	results, err := idx.Search("프로그래밍", 10, "all")
+	results, err := idx.Search("프로그래밍", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -311,70 +375,19 @@ func TestSearchKorean(t *testing.T) {
 	}
 }
 
-func TestSearchScopeWiki(t *testing.T) {
+func TestSearchMultipleResults(t *testing.T) {
 	root := t.TempDir()
 	idx := newTestIndex(t, root, testCfg())
 
 	idx.Add("_wiki/page.md", "wiki content here", map[string]string{"title": "Wiki"})
 	idx.Add("notes/page.md", "vault content here", map[string]string{"title": "Vault"})
 
-	results, err := idx.Search("content", 10, "wiki")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(results) != 1 || results[0].Path != "_wiki/page.md" {
-		t.Fatalf("wiki scope: expected only _wiki/page.md, got %v", results)
-	}
-}
-
-func TestSearchScopeVault(t *testing.T) {
-	root := t.TempDir()
-	idx := newTestIndex(t, root, testCfg())
-
-	idx.Add("_wiki/page.md", "wiki content here", map[string]string{"title": "Wiki"})
-	idx.Add("notes/page.md", "vault content here", map[string]string{"title": "Vault"})
-
-	results, err := idx.Search("content", 10, "vault")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(results) != 1 || results[0].Path != "notes/page.md" {
-		t.Fatalf("vault scope: expected only notes/page.md, got %v", results)
-	}
-}
-
-func TestSearchScopeAll(t *testing.T) {
-	root := t.TempDir()
-	idx := newTestIndex(t, root, testCfg())
-
-	idx.Add("_wiki/page.md", "wiki content here", map[string]string{"title": "Wiki"})
-	idx.Add("notes/page.md", "vault content here", map[string]string{"title": "Vault"})
-
-	results, err := idx.Search("content", 10, "all")
+	results, err := idx.Search("content", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(results) != 2 {
-		t.Fatalf("all scope: expected 2 results, got %d", len(results))
-	}
-}
-
-func TestSearchScopeWikiDirUnderscore(t *testing.T) {
-	root := t.TempDir()
-	idx := newTestIndex(t, root, testCfg())
-
-	idx.Add("_wiki/page.md", "wiki content", map[string]string{})
-	idx.Add("xwiki/page.md", "xwiki content", map[string]string{})
-
-	results, err := idx.Search("content", 10, "wiki")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(results) != 1 {
-		t.Fatalf("underscore escape: expected 1 wiki result, got %d", len(results))
-	}
-	if results[0].Path != "_wiki/page.md" {
-		t.Fatalf("expected _wiki/page.md, got %s", results[0].Path)
+		t.Fatalf("expected 2 results across all paths, got %d", len(results))
 	}
 }
 
@@ -386,7 +399,7 @@ func TestSearchLimitDefault(t *testing.T) {
 		idx.Add(fmt.Sprintf("notes/%d.md", i), "common searchable content", map[string]string{})
 	}
 
-	results, err := idx.Search("searchable", 0, "all")
+	results, err := idx.Search("searchable", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -403,7 +416,7 @@ func TestSearchLimitCap(t *testing.T) {
 		idx.Add(fmt.Sprintf("notes/%d.md", i), "common searchable content", map[string]string{})
 	}
 
-	results, err := idx.Search("searchable", 200, "all")
+	results, err := idx.Search("searchable", 200)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -418,7 +431,7 @@ func TestSearchEmptyResult(t *testing.T) {
 
 	idx.Add("test.md", "some content", map[string]string{})
 
-	results, err := idx.Search("nonexistent query xyz", 10, "all")
+	results, err := idx.Search("nonexistent query xyz", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -437,7 +450,7 @@ func TestSearchEmptyQuery(t *testing.T) {
 	idx.Add("test.md", "content", map[string]string{})
 
 	for _, q := range []string{"", "   ", "\t\n"} {
-		results, err := idx.Search(q, 10, "all")
+		results, err := idx.Search(q, 10)
 		if err != nil {
 			t.Fatalf("query %q: %v", q, err)
 		}
@@ -454,7 +467,7 @@ func TestSearchSpecialChars(t *testing.T) {
 	idx.Add("test.md", "test AND OR NOT content NEAR", map[string]string{})
 
 	for _, q := range []string{"AND", "OR NOT", `"quoted"`} {
-		_, err := idx.Search(q, 10, "all")
+		_, err := idx.Search(q, 10)
 		if err != nil {
 			t.Fatalf("special chars query %q: %v", q, err)
 		}
@@ -467,7 +480,7 @@ func TestSearchSnippet(t *testing.T) {
 
 	idx.Add("test.md", "This is a long document with the keyword programming embedded in the middle of the text and more text after", map[string]string{})
 
-	results, err := idx.Search("programming", 10, "all")
+	results, err := idx.Search("programming", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -486,7 +499,7 @@ func TestSearchScoreDescending(t *testing.T) {
 	idx.Add("a.md", "apple apple apple", map[string]string{})
 	idx.Add("b.md", "apple banana cherry date elderberry fig grape", map[string]string{})
 
-	results, err := idx.Search("apple", 10, "all")
+	results, err := idx.Search("apple", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -508,7 +521,7 @@ func TestSearchWithFrontmatter(t *testing.T) {
 	idx.Add("test.md", content, map[string]string{"title": "Test Page"})
 
 	// Body search works
-	results, err := idx.Search("Actual body", 10, "all")
+	results, err := idx.Search("Actual body", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -524,7 +537,7 @@ func TestSearchLIKESnippet(t *testing.T) {
 	idx.Add("test.md", "This document contains Important Information for review", map[string]string{})
 
 	// 2-char query → LIKE fallback. Case-insensitive: "im" matches "Important"
-	results, err := idx.Search("im", 10, "all")
+	results, err := idx.Search("im", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -827,15 +840,100 @@ func TestCheckConsistencySubSecondChange(t *testing.T) {
 
 	idx.CheckConsistency(store, adpt, true)
 
-	// Immediately change content (sub-second)
-	mustWriteFile(t, p, "version 2")
+	// Immediately change content and length (sub-second). The size+mtime gate
+	// detects the differing size (and mtime), then rehashes to record the change.
+	mustWriteFile(t, p, "version 2 — expanded body")
 
 	_, _, updated, err := idx.CheckConsistency(store, adpt, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if updated != 1 {
-		t.Fatalf("sub-second change should be detected via content_hash, updated = %d", updated)
+		t.Fatalf("sub-second change should be detected via size+mtime gate, updated = %d", updated)
+	}
+}
+
+func TestCheckConsistencyMtimeTouchUpdatesStoredMtime(t *testing.T) {
+	root := t.TempDir()
+	p := filepath.Join(root, "notes", "touch.md")
+	mustWriteFile(t, p, "# Touch\nStable body")
+
+	cfg := testCfg()
+	store := storage.NewFSStorage(root, cfg)
+	adpt := obsidian.New()
+	idx := newTestIndex(t, root, cfg)
+
+	idx.CheckConsistency(store, adpt, true)
+
+	before, err := idx.GetMeta("notes/touch.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var mtimeBefore string
+	idx.db.QueryRow(`SELECT mtime FROM file_meta WHERE path = ?`, "notes/touch.md").Scan(&mtimeBefore)
+	if mtimeBefore == "" {
+		t.Fatal("expected a stored mtime after first consistency run")
+	}
+
+	// Touch mtime forward without changing content.
+	future := time.Now().Add(2 * time.Hour)
+	if err := os.Chtimes(p, future, future); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, updated, err := idx.CheckConsistency(store, adpt, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated != 1 {
+		t.Fatalf("mtime touch should register as an update, updated = %d", updated)
+	}
+
+	after, err := idx.GetMeta("notes/touch.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.ContentHash != before.ContentHash {
+		t.Fatalf("content_hash must be unchanged on mtime touch: before=%s after=%s", before.ContentHash, after.ContentHash)
+	}
+
+	var mtimeAfter string
+	idx.db.QueryRow(`SELECT mtime FROM file_meta WHERE path = ?`, "notes/touch.md").Scan(&mtimeAfter)
+	if mtimeAfter == mtimeBefore {
+		t.Fatalf("stored mtime should be updated on touch: still %s", mtimeAfter)
+	}
+}
+
+func TestCheckConsistencyStatGateZeroReads(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, filepath.Join(root, "notes", "a.md"), "# A\nBody a")
+	mustWriteFile(t, filepath.Join(root, "notes", "b.md"), "# B\nBody b")
+
+	cfg := testCfg()
+	store := &countingStorage{inner: storage.NewFSStorage(root, cfg)}
+	adpt := obsidian.New()
+	idx := newTestIndex(t, root, cfg)
+
+	// First run indexes both files: reads must happen.
+	if _, _, _, err := idx.CheckConsistency(store, adpt, true); err != nil {
+		t.Fatal(err)
+	}
+	if store.reads == 0 {
+		t.Fatal("first run should read files")
+	}
+
+	// Second run over unchanged files: the size+mtime gate must skip every Read.
+	store.reads = 0
+	added, removed, updated, err := idx.CheckConsistency(store, adpt, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if added != 0 || removed != 0 || updated != 0 {
+		t.Fatalf("unchanged run should be a no-op, got (%d,%d,%d)", added, removed, updated)
+	}
+	if store.reads != 0 {
+		t.Fatalf("size+mtime gate must skip re-reads on unchanged files, reads = %d", store.reads)
 	}
 }
 
@@ -903,6 +1001,104 @@ func TestCheckConsistencyPerFileParseError(t *testing.T) {
 	// lastConsistency should be updated despite per-file error
 	if idx.lastConsistency.Load() == 0 {
 		t.Fatal("lastConsistency should be updated even with per-file errors")
+	}
+}
+
+func TestCheckConsistencyPerFileReadError(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "notes", "target.md")
+	mustWriteFile(t, target, "# Target\nOriginal body")
+	mustWriteFile(t, filepath.Join(root, "notes", "other.md"), "# Other\nBody")
+
+	cfg := testCfg()
+	store := storage.NewFSStorage(root, cfg)
+	adpt := obsidian.New()
+	idx := newTestIndex(t, root, cfg)
+
+	// Index both files first.
+	if _, _, _, err := idx.CheckConsistency(store, adpt, true); err != nil {
+		t.Fatal(err)
+	}
+	before, err := idx.GetMeta("notes/target.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Modify target so size differs → forces a Read on the next run.
+	mustWriteFile(t, target, "# Target\nModified body that is much longer than the original")
+	// A brand-new file that must still index despite target's read failure.
+	mustWriteFile(t, filepath.Join(root, "notes", "fresh.md"), "# Fresh\nBody")
+
+	failing := &failingStorage{inner: store, failReadOn: "notes/target.md"}
+	added, _, _, err := idx.CheckConsistency(failing, adpt, true)
+	if err == nil {
+		t.Fatal("expected joined per-file error for read failure")
+	}
+	if !strings.Contains(err.Error(), "notes/target.md") {
+		t.Fatalf("joined error should mention failing file, got: %v", err)
+	}
+	// The new file still indexed despite the per-file failure.
+	if added != 1 {
+		t.Fatalf("fresh file should index despite target read failure, added = %d", added)
+	}
+	if _, gerr := idx.GetMeta("notes/fresh.md"); gerr != nil {
+		t.Fatalf("fresh file should be indexed: %v", gerr)
+	}
+	// Target's stale row is PRESERVED (delete(indexed,p) keeps it, not removes it).
+	after, err := idx.GetMeta("notes/target.md")
+	if err != nil {
+		t.Fatalf("target's existing row should be preserved after read failure: %v", err)
+	}
+	if after.ContentHash != before.ContentHash {
+		t.Fatalf("stale row should be preserved unchanged: before=%s after=%s", before.ContentHash, after.ContentHash)
+	}
+}
+
+func TestCheckConsistencyPerFileStatError(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, filepath.Join(root, "notes", "target.md"), "# Target\nOriginal body")
+	mustWriteFile(t, filepath.Join(root, "notes", "other.md"), "# Other\nBody")
+
+	cfg := testCfg()
+	store := storage.NewFSStorage(root, cfg)
+	adpt := obsidian.New()
+	idx := newTestIndex(t, root, cfg)
+
+	if _, _, _, err := idx.CheckConsistency(store, adpt, true); err != nil {
+		t.Fatal(err)
+	}
+	before, err := idx.GetMeta("notes/target.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A brand-new file that must still index despite target's stat failure.
+	mustWriteFile(t, filepath.Join(root, "notes", "fresh.md"), "# Fresh\nBody")
+
+	failing := &failingStorage{inner: store, failStatOn: "notes/target.md"}
+	added, removed, _, err := idx.CheckConsistency(failing, adpt, true)
+	if err == nil {
+		t.Fatal("expected joined per-file error for stat failure")
+	}
+	if !strings.Contains(err.Error(), "notes/target.md") {
+		t.Fatalf("joined error should mention failing file, got: %v", err)
+	}
+	if added != 1 {
+		t.Fatalf("fresh file should index despite target stat failure, added = %d", added)
+	}
+	// Stat failure must NOT remove the stale row (delete(indexed,p) preserves it).
+	if removed != 0 {
+		t.Fatalf("stat failure must not remove the existing row, removed = %d", removed)
+	}
+	if _, gerr := idx.GetMeta("notes/fresh.md"); gerr != nil {
+		t.Fatalf("fresh file should be indexed: %v", gerr)
+	}
+	after, err := idx.GetMeta("notes/target.md")
+	if err != nil {
+		t.Fatalf("target's existing row should be preserved after stat failure: %v", err)
+	}
+	if after.ContentHash != before.ContentHash {
+		t.Fatalf("stale row should be preserved unchanged: before=%s after=%s", before.ContentHash, after.ContentHash)
 	}
 }
 
@@ -1045,20 +1241,18 @@ func TestPathNormalizationRemove(t *testing.T) {
 	}
 }
 
-func TestPathNormalizationSearchScope(t *testing.T) {
+func TestPathNormalizationSearch(t *testing.T) {
 	root := t.TempDir()
-	cfg := testCfg()
-	cfg.WikiDir = `_wiki`
-	idx := newTestIndex(t, root, cfg)
+	idx := newTestIndex(t, root, testCfg())
 
 	idx.Add("_wiki/page.md", "wiki searchable content", map[string]string{})
 
-	results, err := idx.Search("searchable", 10, "wiki")
+	results, err := idx.Search("searchable", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(results) != 1 {
-		t.Fatalf("expected 1 wiki result, got %d", len(results))
+		t.Fatalf("expected 1 result, got %d", len(results))
 	}
 }
 
@@ -1081,7 +1275,7 @@ func TestConcurrentSearchDuringAdd(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 50; i++ {
-			idx.Search("content", 10, "all")
+			idx.Search("content", 10)
 		}
 	}()
 
@@ -1221,5 +1415,57 @@ func (a *capturingAdapter) Scan(root string, exclude []string, fn func(string) e
 }
 func (a *capturingAdapter) Parse(root, relPath string, includeContent bool) (*adapter.Source, error) {
 	return a.real.Parse(root, relPath, includeContent)
+}
+
+type countingStorage struct {
+	inner storage.Storage
+	reads int
+}
+
+func (c *countingStorage) Read(path string) ([]byte, error) {
+	c.reads++
+	return c.inner.Read(path)
+}
+func (c *countingStorage) Write(path string, data []byte) error {
+	return c.inner.Write(path, data)
+}
+func (c *countingStorage) List(prefix string) ([]storage.ListEntry, error) {
+	return c.inner.List(prefix)
+}
+func (c *countingStorage) Exists(path string) (bool, error) {
+	return c.inner.Exists(path)
+}
+func (c *countingStorage) Stat(path string) (int64, time.Time, error) {
+	return c.inner.Stat(path)
+}
+
+// failingStorage injects Read or Stat failures for a specific normalized path
+// while delegating everything else to inner, to exercise per-file tolerance.
+type failingStorage struct {
+	inner      storage.Storage
+	failReadOn string // normalized path whose Read must fail
+	failStatOn string // normalized path whose Stat must fail
+}
+
+func (f *failingStorage) Read(path string) ([]byte, error) {
+	if f.failReadOn != "" && normalizePath(path) == normalizePath(f.failReadOn) {
+		return nil, fmt.Errorf("simulated read failure for %s", path)
+	}
+	return f.inner.Read(path)
+}
+func (f *failingStorage) Write(path string, data []byte) error {
+	return f.inner.Write(path, data)
+}
+func (f *failingStorage) List(prefix string) ([]storage.ListEntry, error) {
+	return f.inner.List(prefix)
+}
+func (f *failingStorage) Exists(path string) (bool, error) {
+	return f.inner.Exists(path)
+}
+func (f *failingStorage) Stat(path string) (int64, time.Time, error) {
+	if f.failStatOn != "" && normalizePath(path) == normalizePath(f.failStatOn) {
+		return 0, time.Time{}, fmt.Errorf("simulated stat failure for %s", path)
+	}
+	return f.inner.Stat(path)
 }
 

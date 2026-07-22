@@ -156,7 +156,6 @@ Links to ![[diagram.png]].
 	// 3. wiki_search
 	searchResult := callTool(t, s, "wiki_search", map[string]any{
 		"query": "MCP servers",
-		"scope": "wiki",
 	})
 	if searchResult.IsError {
 		t.Fatalf("wiki_search error: %s", extractText(t, searchResult))

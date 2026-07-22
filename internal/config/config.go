@@ -10,19 +10,27 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const configFileName = ".cogvault.yaml"
-
-type Config struct {
-	WikiDir             string   `yaml:"wiki_dir"`
-	DBPath              string   `yaml:"db_path"`
-	Exclude             []string `yaml:"exclude"`
-	ExcludeRead         []string `yaml:"exclude_read"`
-	Adapter             string   `yaml:"adapter"`
-	ConsistencyInterval int      `yaml:"consistency_interval"`
+type SourceDir struct {
+	Path  string   `yaml:"path"`
+	Types []string `yaml:"types"`
 }
 
-func Load(vaultRoot string) (*Config, error) {
-	configPath := filepath.Join(vaultRoot, configFileName)
+type LLMConfig struct {
+	Backend string `yaml:"backend"`
+}
+
+type Config struct {
+	WikiDir             string      `yaml:"wiki_dir"`
+	DBPath              string      `yaml:"db_path"`
+	Sources             []SourceDir `yaml:"sources"`
+	Exclude             []string    `yaml:"exclude"`
+	ExcludeRead         []string    `yaml:"exclude_read"`
+	Adapter             string      `yaml:"adapter"`
+	ConsistencyInterval int         `yaml:"consistency_interval"`
+	LLM                 LLMConfig   `yaml:"llm"`
+}
+
+func Load(configPath string) (*Config, error) {
 	f, err := os.Open(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("load config %s: %w", configPath, err)
@@ -55,8 +63,16 @@ func DefaultConfig() *Config {
 	return &cfg
 }
 
-func Save(vaultRoot string) error {
-	configPath := filepath.Join(vaultRoot, configFileName)
+// DefaultConfigPath returns ~/.config/cogvault/config.yaml.
+func DefaultConfigPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+	return filepath.Join(home, ".config", "cogvault", "config.yaml"), nil
+}
+
+func Save(configPath string) error {
 	if _, err := os.Stat(configPath); err == nil {
 		return nil
 	}
@@ -70,11 +86,13 @@ func Save(vaultRoot string) error {
 }
 
 func (c *Config) applyDefaults() {
-	if c.WikiDir == "" {
-		c.WikiDir = "_wiki"
-	}
-	if c.DBPath == "" {
-		c.DBPath = ".cogvault.db"
+	c.WikiDir = expandTilde(c.WikiDir)
+	c.DBPath = expandTilde(c.DBPath)
+	for i := range c.Sources {
+		c.Sources[i].Path = expandTilde(c.Sources[i].Path)
+		for j := range c.Sources[i].Types {
+			c.Sources[i].Types[j] = strings.ToLower(strings.TrimLeft(c.Sources[i].Types[j], "."))
+		}
 	}
 	if c.Exclude == nil {
 		c.Exclude = []string{".obsidian", ".trash"}
@@ -88,6 +106,9 @@ func (c *Config) applyDefaults() {
 	if c.ConsistencyInterval <= 0 {
 		c.ConsistencyInterval = 5
 	}
+	if c.LLM.Backend == "" {
+		c.LLM.Backend = "claudecode"
+	}
 }
 
 // AllExcluded returns exclude followed by exclude_read.
@@ -100,20 +121,34 @@ func (c *Config) AllExcluded() []string {
 }
 
 func (c *Config) SchemaPath() string {
-	return filepath.Join(c.WikiDir, "_schema.md")
+	return "_schema.md"
 }
 
 func (c *Config) validate() error {
-	if err := validatePath("wiki_dir", c.WikiDir, false); err != nil {
+	if err := validateAbsPath("wiki_dir", c.WikiDir); err != nil {
 		return err
 	}
-	if err := validatePath("db_path", c.DBPath, false); err != nil {
+	if err := validateAbsPath("db_path", c.DBPath); err != nil {
 		return err
 	}
 	cleanedDB := filepath.Clean(c.DBPath)
 	if strings.HasSuffix(c.DBPath, "/") || strings.HasSuffix(c.DBPath, string(os.PathSeparator)) ||
 		cleanedDB != c.DBPath && strings.HasSuffix(c.DBPath, ".") {
 		return fmt.Errorf("db_path: must be a file path, not a directory")
+	}
+	cleanWiki := filepath.Clean(c.WikiDir)
+	if hasPathPrefix(cleanedDB, cleanWiki) {
+		return fmt.Errorf("db_path: must not be inside wiki_dir; expected a path outside the wiki root")
+	}
+	for i, s := range c.Sources {
+		field := fmt.Sprintf("sources[%d].path", i)
+		if err := validateAbsPath(field, s.Path); err != nil {
+			return err
+		}
+		cleanSrc := filepath.Clean(s.Path)
+		if hasPathPrefix(cleanSrc, cleanWiki) || hasPathPrefix(cleanWiki, cleanSrc) {
+			return fmt.Errorf("%s: must not overlap wiki_dir; expected a path that is neither equal to, inside, nor containing the wiki root", field)
+		}
 	}
 	for i, e := range c.Exclude {
 		if err := validatePath(fmt.Sprintf("exclude[%d]", i), e, false); err != nil {
@@ -127,6 +162,19 @@ func (c *Config) validate() error {
 	}
 	if c.Adapter != "obsidian" && c.Adapter != "markdown" {
 		return fmt.Errorf("adapter: %q not supported; use \"obsidian\" or \"markdown\"", c.Adapter)
+	}
+	if c.LLM.Backend != "claudecode" {
+		return fmt.Errorf("llm.backend: %q not supported; use \"claudecode\"", c.LLM.Backend)
+	}
+	return nil
+}
+
+func validateAbsPath(field, path string) error {
+	if path == "" {
+		return fmt.Errorf("%s: must not be empty", field)
+	}
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("%s: %q is not absolute; expected an absolute path or a leading \"~/\"", field, path)
 	}
 	return nil
 }
@@ -146,6 +194,28 @@ func validatePath(field, path string, allowDot bool) error {
 		return fmt.Errorf("%s: %q not allowed; use a subdirectory", field, path)
 	}
 	return nil
+}
+
+// hasPathPrefix reports whether path equals prefix or lies under it.
+// Both arguments must already be filepath.Clean-ed.
+func hasPathPrefix(path, prefix string) bool {
+	return path == prefix || strings.HasPrefix(path, prefix+string(os.PathSeparator))
+}
+
+// expandTilde expands a leading "~/" (or an exact "~") to the user's home
+// directory. A "~" anywhere else in the path is left literal.
+func expandTilde(path string) string {
+	if path != "~" && !strings.HasPrefix(path, "~/") {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	if path == "~" {
+		return home
+	}
+	return filepath.Join(home, path[2:])
 }
 
 func containsDotDot(path string) bool {

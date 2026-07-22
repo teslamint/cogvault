@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/teslamint/cogvault/internal/config"
 	cverr "github.com/teslamint/cogvault/internal/errors"
@@ -15,16 +16,15 @@ import (
 func TestReadWriteAndExists(t *testing.T) {
 	root := t.TempDir()
 	store := newTestStorage(t, root, &config.Config{
-		WikiDir:     "_wiki",
 		Exclude:     []string{".obsidian"},
 		ExcludeRead: []string{"private"},
 	})
 
-	if err := store.Write("_wiki/notes/test.md", []byte("hello")); err != nil {
+	if err := store.Write("sources/test.md", []byte("hello")); err != nil {
 		t.Fatalf("Write() error = %v", err)
 	}
 
-	data, err := store.Read("_wiki/notes/test.md")
+	data, err := store.Read("sources/test.md")
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -32,7 +32,7 @@ func TestReadWriteAndExists(t *testing.T) {
 		t.Fatalf("Read() data = %q, want %q", string(data), "hello")
 	}
 
-	ok, err := store.Exists("_wiki/notes/test.md")
+	ok, err := store.Exists("sources/test.md")
 	if err != nil {
 		t.Fatalf("Exists() error = %v", err)
 	}
@@ -40,7 +40,7 @@ func TestReadWriteAndExists(t *testing.T) {
 		t.Fatalf("Exists() = false, want true")
 	}
 
-	ok, err = store.Exists("_wiki/notes/missing.md")
+	ok, err = store.Exists("sources/missing.md")
 	if err != nil {
 		t.Fatalf("Exists() missing error = %v", err)
 	}
@@ -48,7 +48,7 @@ func TestReadWriteAndExists(t *testing.T) {
 		t.Fatalf("Exists() missing = true, want false")
 	}
 
-	_, err = store.Read("_wiki/notes/missing.md")
+	_, err = store.Read("sources/missing.md")
 	if !errors.Is(err, cverr.ErrNotFound) {
 		t.Fatalf("Read() missing error = %v, want ErrNotFound", err)
 	}
@@ -56,16 +56,16 @@ func TestReadWriteAndExists(t *testing.T) {
 
 func TestWriteOverwrite(t *testing.T) {
 	root := t.TempDir()
-	store := newTestStorage(t, root, &config.Config{WikiDir: "_wiki"})
+	store := newTestStorage(t, root, &config.Config{})
 
-	if err := store.Write("_wiki/test.md", []byte("first")); err != nil {
+	if err := store.Write("test.md", []byte("first")); err != nil {
 		t.Fatalf("Write() first error = %v", err)
 	}
-	if err := store.Write("_wiki/test.md", []byte("second")); err != nil {
+	if err := store.Write("test.md", []byte("second")); err != nil {
 		t.Fatalf("Write() second error = %v", err)
 	}
 
-	data, err := os.ReadFile(filepath.Join(root, "_wiki", "test.md"))
+	data, err := os.ReadFile(filepath.Join(root, "test.md"))
 	if err != nil {
 		t.Fatalf("os.ReadFile() error = %v", err)
 	}
@@ -74,35 +74,15 @@ func TestWriteOverwrite(t *testing.T) {
 	}
 }
 
-func TestWriteRejectsOutsideWikiDirAndSchema(t *testing.T) {
+func TestWriteAtRootLevelSucceeds(t *testing.T) {
 	root := t.TempDir()
-	store := newTestStorage(t, root, &config.Config{WikiDir: "_wiki"})
+	store := newTestStorage(t, root, &config.Config{})
 
-	err := store.Write("notes/outside.md", []byte("x"))
-	if !errors.Is(err, cverr.ErrPermission) {
-		t.Fatalf("Write() outside error = %v, want ErrPermission", err)
+	if err := store.Write("sources/page.md", []byte("ok")); err != nil {
+		t.Fatalf("Write() root-relative error = %v", err)
 	}
 
-	err = store.Write("_wiki_other/file.md", []byte("x"))
-	if !errors.Is(err, cverr.ErrPermission) {
-		t.Fatalf("Write() prefix collision error = %v, want ErrPermission", err)
-	}
-
-	err = store.Write("_wiki/_schema.md", []byte("x"))
-	if !errors.Is(err, cverr.ErrPermission) {
-		t.Fatalf("Write() schema error = %v, want ErrPermission", err)
-	}
-}
-
-func TestWriteAllowsCanonicalWikiDirWithTrailingSlash(t *testing.T) {
-	root := t.TempDir()
-	store := newTestStorage(t, root, &config.Config{WikiDir: "_wiki/"})
-
-	if err := store.Write("_wiki/file.md", []byte("ok")); err != nil {
-		t.Fatalf("Write() with trailing slash wiki_dir error = %v", err)
-	}
-
-	data, err := os.ReadFile(filepath.Join(root, "_wiki", "file.md"))
+	data, err := os.ReadFile(filepath.Join(root, "sources", "page.md"))
 	if err != nil {
 		t.Fatalf("os.ReadFile() error = %v", err)
 	}
@@ -111,16 +91,93 @@ func TestWriteAllowsCanonicalWikiDirWithTrailingSlash(t *testing.T) {
 	}
 }
 
+func TestWriteNestedNewDirectoriesCreatesParents(t *testing.T) {
+	root := t.TempDir()
+	store := newTestStorage(t, root, &config.Config{})
+
+	if err := store.Write("a/b/c/deep.md", []byte("deep")); err != nil {
+		t.Fatalf("Write() nested error = %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(root, "a", "b", "c", "deep.md"))
+	if err != nil {
+		t.Fatalf("os.ReadFile() error = %v", err)
+	}
+	if string(data) != "deep" {
+		t.Fatalf("file data = %q, want %q", string(data), "deep")
+	}
+}
+
+func TestWriteRejectsSchema(t *testing.T) {
+	root := t.TempDir()
+	store := newTestStorage(t, root, &config.Config{})
+
+	err := store.Write("_schema.md", []byte("x"))
+	if !errors.Is(err, cverr.ErrPermission) {
+		t.Fatalf("Write() schema error = %v, want ErrPermission", err)
+	}
+}
+
+func TestStat(t *testing.T) {
+	root := t.TempDir()
+	store := newTestStorage(t, root, &config.Config{
+		ExcludeRead: []string{"private"},
+	})
+
+	before := time.Now().Add(-time.Second)
+	if err := store.Write("sources/page.md", []byte("hello world")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	after := time.Now().Add(time.Second)
+
+	size, mtime, err := store.Stat("sources/page.md")
+	if err != nil {
+		t.Fatalf("Stat() error = %v", err)
+	}
+	if size != int64(len("hello world")) {
+		t.Fatalf("Stat() size = %d, want %d", size, len("hello world"))
+	}
+	if mtime.Before(before) || mtime.After(after) {
+		t.Fatalf("Stat() mtime = %v, want within [%v, %v]", mtime, before, after)
+	}
+
+	_, _, err = store.Stat("sources/missing.md")
+	if !errors.Is(err, cverr.ErrNotFound) {
+		t.Fatalf("Stat() missing error = %v, want ErrNotFound", err)
+	}
+
+	mustWriteFile(t, filepath.Join(root, "private", "secret.md"), "secret")
+	_, _, err = store.Stat("private/secret.md")
+	if !errors.Is(err, cverr.ErrPermission) {
+		t.Fatalf("Stat() exclude_read error = %v, want ErrPermission", err)
+	}
+}
+
+func TestStatDirectory(t *testing.T) {
+	root := t.TempDir()
+	store := newTestStorage(t, root, &config.Config{})
+
+	mustMkdirAll(t, filepath.Join(root, "sources"))
+
+	size, mtime, err := store.Stat("sources")
+	if err != nil {
+		t.Fatalf("Stat() dir error = %v", err)
+	}
+	if mtime.IsZero() {
+		t.Fatalf("Stat() dir mtime is zero")
+	}
+	_ = size
+}
+
 func TestListBehavior(t *testing.T) {
 	root := t.TempDir()
 	store := newTestStorage(t, root, &config.Config{
-		WikiDir:     "_wiki",
 		Exclude:     []string{".obsidian"},
 		ExcludeRead: []string{"private"},
 	})
 
-	mustWriteFile(t, filepath.Join(root, "_wiki", "note.md"), "note")
-	mustMkdirAll(t, filepath.Join(root, "_wiki", "subdir"))
+	mustWriteFile(t, filepath.Join(root, "note.md"), "note")
+	mustMkdirAll(t, filepath.Join(root, "subdir"))
 	mustWriteFile(t, filepath.Join(root, ".obsidian", "ignore.md"), "ignore")
 	mustWriteFile(t, filepath.Join(root, "private", "secret.md"), "secret")
 
@@ -128,7 +185,8 @@ func TestListBehavior(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List(.) error = %v", err)
 	}
-	assertListEntry(t, entries, "_wiki/", "_wiki", true)
+	assertListEntry(t, entries, "note.md", "note.md", false)
+	assertListEntry(t, entries, "subdir/", "subdir", true)
 	if hasEntry(entries, ".obsidian") || hasEntry(entries, ".obsidian/") {
 		t.Fatalf("List(.) included excluded entry: %#v", entries)
 	}
@@ -136,22 +194,15 @@ func TestListBehavior(t *testing.T) {
 		t.Fatalf("List(.) included exclude_read entry: %#v", entries)
 	}
 
-	entries, err = store.List("_wiki")
+	entries, err = store.List("subdir")
 	if err != nil {
-		t.Fatalf("List(_wiki) error = %v", err)
-	}
-	assertListEntry(t, entries, "_wiki/note.md", "note.md", false)
-	assertListEntry(t, entries, "_wiki/subdir/", "subdir", true)
-
-	entries, err = store.List("_wiki/subdir")
-	if err != nil {
-		t.Fatalf("List(_wiki/subdir) error = %v", err)
+		t.Fatalf("List(subdir) error = %v", err)
 	}
 	if len(entries) != 0 {
-		t.Fatalf("List(_wiki/subdir) len = %d, want 0", len(entries))
+		t.Fatalf("List(subdir) len = %d, want 0", len(entries))
 	}
 
-	_, err = store.List("_wiki/note.md")
+	_, err = store.List("note.md")
 	if !errors.Is(err, cverr.ErrNotFound) {
 		t.Fatalf("List(file) error = %v, want ErrNotFound", err)
 	}
@@ -160,7 +211,6 @@ func TestListBehavior(t *testing.T) {
 func TestExcludeAndExcludeReadSemantics(t *testing.T) {
 	root := t.TempDir()
 	store := newTestStorage(t, root, &config.Config{
-		WikiDir:     "_wiki",
 		Exclude:     []string{".obsidian"},
 		ExcludeRead: []string{"private"},
 	})
@@ -214,9 +264,9 @@ func TestExcludeAndExcludeReadSemantics(t *testing.T) {
 
 func TestTraversalAndAbsolutePathRejected(t *testing.T) {
 	root := t.TempDir()
-	store := newTestStorage(t, root, &config.Config{WikiDir: "_wiki"})
+	store := newTestStorage(t, root, &config.Config{})
 
-	for _, path := range []string{"../etc/passwd", "_wiki/../secret.md", "/tmp/x", "/etc/passwd"} {
+	for _, path := range []string{"../etc/passwd", "sources/../../secret.md", "/tmp/x", "/etc/passwd"} {
 		_, err := store.Read(path)
 		if !errors.Is(err, cverr.ErrTraversal) {
 			t.Fatalf("Read(%q) error = %v, want ErrTraversal", path, err)
@@ -233,34 +283,38 @@ func TestTraversalAndAbsolutePathRejected(t *testing.T) {
 		if !errors.Is(err, cverr.ErrTraversal) {
 			t.Fatalf("Exists(%q) error = %v, want ErrTraversal", path, err)
 		}
+		_, _, err = store.Stat(path)
+		if !errors.Is(err, cverr.ErrTraversal) {
+			t.Fatalf("Stat(%q) error = %v, want ErrTraversal", path, err)
+		}
 	}
 }
 
 func TestSymlinkRejected(t *testing.T) {
 	root := t.TempDir()
-	store := newTestStorage(t, root, &config.Config{WikiDir: "_wiki"})
+	store := newTestStorage(t, root, &config.Config{})
 
 	outside := filepath.Join(root, "outside")
 	mustMkdirAll(t, outside)
-	mustMkdirAll(t, filepath.Join(root, "_wiki"))
-	if err := os.Symlink(outside, filepath.Join(root, "_wiki", "out")); err != nil {
+	mustMkdirAll(t, filepath.Join(root, "sub"))
+	if err := os.Symlink(outside, filepath.Join(root, "sub", "out")); err != nil {
 		t.Fatalf("os.Symlink() ancestor error = %v", err)
 	}
 
-	err := store.Write("_wiki/out/file.md", []byte("x"))
+	err := store.Write("sub/out/file.md", []byte("x"))
 	if !errors.Is(err, cverr.ErrSymlink) {
 		t.Fatalf("Write() ancestor symlink error = %v, want ErrSymlink", err)
 	}
 
-	if err := os.Remove(filepath.Join(root, "_wiki", "out")); err != nil {
+	if err := os.Remove(filepath.Join(root, "sub", "out")); err != nil {
 		t.Fatalf("os.Remove() error = %v", err)
 	}
-	mustWriteFile(t, filepath.Join(root, "_wiki", "target.md"), "x")
-	if err := os.Symlink(filepath.Join(root, "_wiki", "target.md"), filepath.Join(root, "_wiki", "link.md")); err != nil {
+	mustWriteFile(t, filepath.Join(root, "sub", "target.md"), "x")
+	if err := os.Symlink(filepath.Join(root, "sub", "target.md"), filepath.Join(root, "sub", "link.md")); err != nil {
 		t.Fatalf("os.Symlink() leaf error = %v", err)
 	}
 
-	_, err = store.Read("_wiki/link.md")
+	_, err = store.Read("sub/link.md")
 	if !errors.Is(err, cverr.ErrSymlink) {
 		t.Fatalf("Read() leaf symlink error = %v, want ErrSymlink", err)
 	}
@@ -268,12 +322,12 @@ func TestSymlinkRejected(t *testing.T) {
 
 func TestResolvePathPropagatesNonENOENTLstatError(t *testing.T) {
 	root := t.TempDir()
-	store := newTestStorage(t, root, &config.Config{WikiDir: "_wiki"})
+	store := newTestStorage(t, root, &config.Config{})
 
-	mustMkdirAll(t, filepath.Join(root, "_wiki"))
-	mustWriteFile(t, filepath.Join(root, "_wiki", "file.md"), "x")
+	mustMkdirAll(t, filepath.Join(root, "sub"))
+	mustWriteFile(t, filepath.Join(root, "sub", "file.md"), "x")
 
-	_, err := store.Read("_wiki/file.md/child")
+	_, err := store.Read("sub/file.md/child")
 	if err == nil {
 		t.Fatalf("Read() error = nil, want non-nil")
 	}
@@ -284,7 +338,7 @@ func TestResolvePathPropagatesNonENOENTLstatError(t *testing.T) {
 
 func TestEmptyPathRejected(t *testing.T) {
 	root := t.TempDir()
-	store := newTestStorage(t, root, &config.Config{WikiDir: "_wiki"})
+	store := newTestStorage(t, root, &config.Config{})
 
 	_, err := store.Read("")
 	if !errors.Is(err, cverr.ErrNotFound) {
@@ -301,6 +355,10 @@ func TestEmptyPathRejected(t *testing.T) {
 	_, err = store.Exists("")
 	if !errors.Is(err, cverr.ErrNotFound) {
 		t.Fatalf("Exists(\"\") error = %v, want ErrNotFound", err)
+	}
+	_, _, err = store.Stat("")
+	if !errors.Is(err, cverr.ErrNotFound) {
+		t.Fatalf("Stat(\"\") error = %v, want ErrNotFound", err)
 	}
 }
 
@@ -326,7 +384,7 @@ func TestContainsDotDot(t *testing.T) {
 
 func TestConcurrentWritesSamePath(t *testing.T) {
 	root := t.TempDir()
-	store := newTestStorage(t, root, &config.Config{WikiDir: "_wiki"})
+	store := newTestStorage(t, root, &config.Config{})
 
 	var wg sync.WaitGroup
 	values := []string{"first", "second", "third", "fourth"}
@@ -334,14 +392,14 @@ func TestConcurrentWritesSamePath(t *testing.T) {
 		wg.Add(1)
 		go func(v string) {
 			defer wg.Done()
-			if err := store.Write("_wiki/race.md", []byte(v)); err != nil {
+			if err := store.Write("race.md", []byte(v)); err != nil {
 				t.Errorf("Write() error = %v", err)
 			}
 		}(value)
 	}
 	wg.Wait()
 
-	data, err := os.ReadFile(filepath.Join(root, "_wiki", "race.md"))
+	data, err := os.ReadFile(filepath.Join(root, "race.md"))
 	if err != nil {
 		t.Fatalf("os.ReadFile() error = %v", err)
 	}
@@ -415,18 +473,17 @@ func hasEntry(entries []ListEntry, path string) bool {
 func TestWriteExcludeReadBlocked(t *testing.T) {
 	root := t.TempDir()
 	store := newTestStorage(t, root, &config.Config{
-		WikiDir:     "_wiki",
 		Exclude:     []string{},
-		ExcludeRead: []string{"_wiki/private"},
+		ExcludeRead: []string{"private"},
 	})
 
-	err := store.Write("_wiki/private/secret.md", []byte("should fail"))
+	err := store.Write("private/secret.md", []byte("should fail"))
 	if !errors.Is(err, cverr.ErrPermission) {
 		t.Fatalf("Write to exclude_read dir: expected ErrPermission, got %v", err)
 	}
 
 	// Verify non-excluded write still works
-	err = store.Write("_wiki/notes/ok.md", []byte("should succeed"))
+	err = store.Write("notes/ok.md", []byte("should succeed"))
 	if err != nil {
 		t.Fatalf("Write to non-excluded dir: %v", err)
 	}

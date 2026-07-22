@@ -10,6 +10,8 @@
 - **아키텍처/구현 정본**: `DESIGN.md`
 - **결정 기록 정본**: `docs/decisions/`
 - **리뷰/조사 기록**: `docs/research/`
+- **v2 설계 정본 (approved design)**: `docs/specs/2026-07-22-refound-capture-pipeline-design.md`
+- **v2 리파운딩 결정 (refounding decision)**: `docs/decisions/0021-v2-refounding.md` — supersedes 0020; capture→digest→consume pipeline, vault mode removed.
 
 원칙:
 - 새 기능 계약은 `SPEC.md`에 반영한다.
@@ -138,36 +140,59 @@ Gist 댓글에서 얻은 교훈:
 
 ---
 
-## 6. v0.2 / v0.3 방향
+## 6. Roadmap (v2)
 
-SPEC/DESIGN에는 MVP만 정의되어 있다. 향후 방향의 맥락:
+_This section is English; the v2 refounding moved the canonical docs to English
+(0021). Historical Korean sections above are unchanged._
 
-### v0.2: 컴파일러 자동화
+v2 Phase 1 is implemented (this refounding). `SPEC.md`/`DESIGN.md` are the v2
+canon; this is the context for what is done and what remains.
 
-- **LLM 어댑터**: `llm/claudecode.go` — `claude --print` CLI를 subprocess로 호출. **stdin pipe** 필수 (OS ARG_MAX 제한 회피). stderr 캡처로 인증 실패 진단. `--output-format json` 사용 검토. CLI 인터페이스가 Anthropic에 의해 변경될 수 있으므로 `llm/anthropic.go` (API 직접 호출)를 fallback으로 함께 구현.
-- **컴파일러**: 2-pass(summarize → index)로 시작. 5-pass는 필요성 확인 후. sage-wiki의 5-pass를 참고하되 그대로 따르지 않음.
-- **engine 레이어**: 현재 `mcp/tools.go`에 있는 write-then-index, listWithMeta 등 조합 로직을 engine으로 추출. mcp/와 cmd/ 모두 engine 호출.
-- **wiki_delete**: auto-commit과 함께 도입.
-- **fsnotify watch 모드**: `compile --watch`.
-- **wiki doctor**: CLI 인증 상태, SQLite 접근, vault 구조 사전 검증.
-- **wiki_write warnings**: frontmatter 스키마 검증. type 필드 누락 경고 등. 응답의 warnings 배열 활용.
-- **코드블록 내 wikilink 제외**: 상태 머신으로 ``` 블록, 인라인 ` 감지.
+### v2 Phase 1 — done (this work)
 
-### v0.3: 고수준 기능
+- **Single mode**: the vault concept is removed; `wiki_dir` is the sole storage
+  root, `sources[]` are external dirs read directly by the ingest pipeline
+  (0021 D1).
+- **`cogvault ingest`**: batch pipeline — scan → hash → LLM digest → validate →
+  write → index → ledger → report. Per-file error classes (transient/permanent/
+  infra) and a single-instance flock (0021 D2, D4).
+- **`internal/llm`**: adapter interface + `claudecode` backend (`claude --print`,
+  JSON output, stdin, 5m timeout). The old `llm/anthropic.go` API-fallback idea is
+  dropped; the designed escape hatch for CLI changes is now the local-LLM backend
+  (0021 D3).
+- **launchd automation**: plist template + README setup for zero-touch scheduled
+  ingest.
+- **`scope` removed** from `wiki_search` / `cogvault search` (0021 D5).
 
-- **query + file-back**: 검색 → LLM 합성 → 결과를 `wiki_dir/synthesis/`에 저장.
-- **lint**: 모순, 고아 페이지, 깨진 링크, frontmatter 미준수 검사. 이 시점에 ResolveLink + BuildCache 도입.
-- **SSE 전송**: Cloudflare Tunnel 또는 클라우드 배포로 원격 접근.
-- **페이지 타입 확장**: 실사용 패턴 보고 entity, concept, synthesis 강제 스키마 추가.
+### Later phases
 
-### 이후
+- **Local LLM backend** (spike O3): implement the second `llm.Adapter` (ollama /
+  llama.cpp / other) — the primary mitigation for the "Claude CLI changes" risk.
+- **Phone capture (S5)**: share-sheet URL → synced inbox folder → same pipeline;
+  consume-and-archive semantics for dedicated inbox dirs (O5). Secondary priority.
+- **URL/web-article extraction**: fetch + extract before digest.
+- **Periodic digest (S6)**: `cogvault digest` writes a daily/weekly summary page.
+- **Markdown-source digestion**: digest raw vault/markdown notes so full-text
+  search over source notes returns (restores the v1 coverage 0021 gave up).
+- **Watch mode**: revisit only if launchd schedule latency proves unacceptable
+  (batch + launchd was chosen over a daemon, 0021 D2).
 
-- 벡터 검색 (sqlite-vec 또는 외부 임베딩)
-- RRF 하이브리드 검색
-- 온톨로지 그래프
-- git auto-commit
-- 다중 vault 지원
-- `_index.md` 자동 생성 뷰 (wiki_list 기반 읽기 전용)
+### Still-relevant carry-overs (not superseded by v2)
+
+- **wiki_delete + git auto-commit**: deletion is unsafe without auto-commit;
+  introduce them together.
+- **lint**: contradictions, orphan pages, broken links, frontmatter compliance;
+  introduces `ResolveLink` + BuildCache when it lands.
+- **SSE transport**: remote access via Cloudflare Tunnel or a cloud deploy.
+- **wiki_write warnings**: frontmatter schema-validation feedback (warnings array).
+- **code-block wikilink exclusion**: state machine for ``` blocks / inline `.
+- **page-type expansion**: enforce entity/concept/synthesis schemas once real
+  usage justifies it.
+
+### Beyond
+
+- Vector search (sqlite-vec / external embeddings), RRF hybrid search, ontology
+  graph, multi-wiki support, an auto-generated read-only `_index.md` view.
 
 ---
 
@@ -190,21 +215,24 @@ SPEC/DESIGN에는 MVP만 정의되어 있다. 향후 방향의 맥락:
 
 ---
 
-## 8. 알려진 리스크와 피벗 경로
+## 8. Known risks and pivot paths
 
-| 리스크 | 영향 | 피벗 |
-|--------|------|------|
-| trigram 토크나이저의 한국어 검색 품질 | 2글자 이하 검색어 부정확, 인덱스 크기 3~5배 | unicode61 + trigram 이중 테이블. 또는 ICU 토크나이저 조사. |
-| 에이전트가 _schema.md를 잘 안 따름 | 위키 페이지 품질 저하, frontmatter 누락 | 스키마 단순화. MCP 도구 description 보강. instructions 요약 개선. v0.2에서 wiki_write warnings로 피드백. |
-| passthrough 모드의 가치 불분명 | "그냥 파일시스템 접근과 뭐가 다른가" | 차별 가치 4가지: 경로 보안, FTS5 검색, Obsidian 파싱, 스키마 강제. 이 4가지가 실사용에서 체감되지 않으면 v0.2 컴파일러를 앞당겨 자체 가치 강화. |
-| Claude Code CLI `--print` 인터페이스 변경 (v0.2) | claudecode 어댑터 동작 불가 | anthropic.go API 직접 호출 fallback. CLI 출력 파싱 최소화, JSON 모드 우선. |
-| 인제스트 마찰로 사용 중단 | Day 5에 안 쓰게 됨 | CLI 단축 명령 추가. 워크플로우 단순화 (페이지 타입 축소). |
-| MCP instructions 크기 제한 | 사용자가 스키마 확장 시 instructions 절삭 | 현재 설계: 2,000자 초과 시 절삭 + wiki_read 안내. 실제로 문제되면 요약 생성 로직 추가. |
-| modernc.org/sqlite의 FTS5 trigram 지원 여부 | 빌드 실패 또는 런타임 에러 | 구현 초기(Step 4)에 확인. 미지원 시 unicode61로 fallback 후 한국어 검색 품질 별도 대응. |
-| validation 에러에 config 파일 경로 미포함 | 다중 vault/로그 집계 시 원인 파악 어려움 | `docs/decisions/0002-step1-deferred-items.md` 참조. |
-| `internal/errors` 패키지명이 stdlib `errors`와 충돌 | 소비자마다 alias import 필요 | `docs/decisions/0002-step1-deferred-items.md` 참조. |
-| `Storage.List()`가 child symlink entry를 노출 | list에 보인 경로가 이후 access에서 `ErrSymlink`로 실패할 수 있음 | `docs/decisions/0005-step2-deferred-items.md` 참조. |
-| 단일 global write mutex | 병렬 write throughput이 제한될 수 있음 | `docs/decisions/0006-storage-write-serialization.md` 참조. |
+_v2 table (English). Rows the refounding solved are dropped: the passthrough-value
+question (v2 auto-digests, so "how is this different from filesystem access" is
+moot) and per-item ingest friction / "cannot run standalone" (0021 removes both)._
+
+| Risk | Impact | Pivot |
+|------|--------|-------|
+| trigram tokenizer Korean search quality | queries ≤2 chars imprecise, index 3-5× larger | unicode61 + trigram dual table, or investigate ICU. (modernc.org/sqlite trigram support confirmed in U4.) |
+| Claude Code CLI (`claude --print`) interface or policy change | claudecode backend stops working — now load-bearing | everything behind `llm.Adapter` + JSON output mode; the designed escape hatch is the **local-LLM backend** (0021 D3), not an anthropic-API fallback. |
+| Digestion LLM ignores `_schema.md` | low page quality, missing frontmatter | prompt embeds `_schema.md`; an unparsable page is a permanent failure and nothing is indexed; simplify schema / strengthen the prompt. |
+| iCloud Drive eviction / dataless files on the wiki dir | consistency re-read forces re-download or fails | stat-gate (size+mtime) avoids needless re-hash; dataless-read errors are per-file warnings, not fatal; DB kept outside the synced folder (absolute `db_path`). |
+| launchd execution context differs from a shell | TCC blocks `~/Downloads`, PATH lacks `~/.local/bin/claude`, non-interactive auth fails | plist absolute paths + explicit PATH (O1-verified); README one-time TCC/auth grants. |
+| Backlog quota exhaustion during digestion | the PDF backlog burns quota | `--limit` batching; quota failures classified transient (no attempt consumed) so files resume on later runs. |
+| MCP instructions size limit | instructions truncated when the user grows the schema | truncate >2,000 chars + point to `wiki_read`; add a summary generator if it bites. |
+| `internal/errors` clashes with stdlib `errors` | consumers alias-import | `docs/decisions/0002-step1-deferred-items.md`. |
+| `Storage.List()` exposes child symlink entries | a listed path may later fail access with `ErrSymlink` | `docs/decisions/0005-step2-deferred-items.md`. |
+| single global write mutex | parallel write throughput limited | `docs/decisions/0006-storage-write-serialization.md`. |
 
 ---
 
@@ -215,8 +243,8 @@ SPEC/DESIGN에는 MVP만 정의되어 있다. 향후 방향의 맥락:
 ### 9.1 Day 1: 최초 Ingest
 
 ```bash
-# 터미널
-cogvault init --vault ~/vaults/my-vault
+# 터미널 (v2: --config, 기본 ~/.config/cogvault/config.yaml)
+cogvault init --config ~/.config/cogvault/config.yaml
 ```
 
 ```
@@ -228,7 +256,7 @@ cogvault init --vault ~/vaults/my-vault
 2. wiki_parse("notes/project-idea.md", include_content=true)
                                      → 메타데이터 + 본문
 3. (에이전트가 본문 분석, 핵심 추출)
-4. wiki_search("project idea", scope="wiki")
+4. wiki_search("project idea")
                                      → 기존 관련 페이지 확인
 5. wiki_write("_wiki/sources/project-idea.md", ...)
                                      → source 페이지 생성
@@ -242,7 +270,7 @@ cogvault init --vault ~/vaults/my-vault
 사용자: "이전에 인제스트한 프로젝트 아이디어에서 기술 스택 관련 내용 찾아줘"
 
 에이전트:
-1. wiki_search("기술 스택", scope="wiki")  → 관련 source 페이지
+1. wiki_search("기술 스택")  → 관련 source 페이지
 2. wiki_read("_wiki/sources/project-idea.md")  → 상세 확인
 3. (에이전트가 응답 생성)
 ```
@@ -257,6 +285,8 @@ cogvault init --vault ~/vaults/my-vault
 
 ## 10. 프로젝트명
 
+> [역사적 기록 — v1 기준. v2 현황은 §0/§6 및 docs/decisions/0021 참조]
+
 **확정.** `cogvault`로 확정됨.
 
 확정 기준:
@@ -270,6 +300,8 @@ cogvault init --vault ~/vaults/my-vault
 ---
 
 ## 11. 구현 시작 체크리스트
+
+> [역사적 기록 — v1 기준. v2 현황은 §0/§6 및 docs/decisions/0021 참조]
 
 - [x] 프로젝트명 확정
 - [x] `go mod init github.com/teslamint/cogvault`

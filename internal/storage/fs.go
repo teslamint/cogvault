@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/teslamint/cogvault/internal/config"
 	cverr "github.com/teslamint/cogvault/internal/errors"
@@ -57,11 +58,6 @@ func (fs *FSStorage) Write(path string, data []byte) error {
 		return fmt.Errorf("storage.Write %s: %w", path, cverr.ErrPermission)
 	}
 
-	cleanedWikiDir := filepath.Clean(fs.cfg.WikiDir)
-	wikiPrefix := cleanedWikiDir + string(os.PathSeparator)
-	if !strings.HasPrefix(cleaned, wikiPrefix) {
-		return fmt.Errorf("storage.Write %s: %w", path, cverr.ErrPermission)
-	}
 	if cleaned == filepath.Clean(fs.cfg.SchemaPath()) {
 		return fmt.Errorf("storage.Write %s: %w", path, cverr.ErrPermission)
 	}
@@ -173,6 +169,25 @@ func (fs *FSStorage) Exists(path string) (bool, error) {
 		return false, fmt.Errorf("storage.Exists %s: %w", path, err)
 	}
 	return true, nil
+}
+
+func (fs *FSStorage) Stat(path string) (int64, time.Time, error) {
+	absPath, cleaned, err := fs.resolvePath(path)
+	if err != nil {
+		return 0, time.Time{}, err
+	}
+	if fs.isExcludeRead(cleaned) {
+		return 0, time.Time{}, fmt.Errorf("storage.Stat %s: %w", path, cverr.ErrPermission)
+	}
+
+	info, err := os.Stat(absPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, time.Time{}, fmt.Errorf("storage.Stat %s: %w", path, cverr.ErrNotFound)
+	}
+	if err != nil {
+		return 0, time.Time{}, fmt.Errorf("storage.Stat %s: %w", path, err)
+	}
+	return info.Size(), info.ModTime(), nil
 }
 
 func (fs *FSStorage) resolvePath(path string) (string, string, error) {

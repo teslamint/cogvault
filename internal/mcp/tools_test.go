@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/teslamint/cogvault/internal/adapter"
@@ -23,16 +24,23 @@ type mockStorage struct {
 	writeFn  func(path string, data []byte) error
 	listFn   func(prefix string) ([]storage.ListEntry, error)
 	existsFn func(path string) (bool, error)
+	statFn   func(path string) (int64, time.Time, error)
 }
 
 func (m *mockStorage) Read(path string) ([]byte, error)          { return m.readFn(path) }
 func (m *mockStorage) Write(path string, data []byte) error      { return m.writeFn(path, data) }
 func (m *mockStorage) List(prefix string) ([]storage.ListEntry, error) { return m.listFn(prefix) }
 func (m *mockStorage) Exists(path string) (bool, error)          { return m.existsFn(path) }
+func (m *mockStorage) Stat(path string) (int64, time.Time, error) {
+	if m.statFn == nil {
+		return 0, time.Time{}, nil
+	}
+	return m.statFn(path)
+}
 
 type mockIndex struct {
 	addFn              func(path, content string, meta map[string]string) error
-	searchFn           func(query string, limit int, scope string) ([]index.Result, error)
+	searchFn           func(query string, limit int) ([]index.Result, error)
 	removeFn           func(path string) error
 	rebuildFn          func(store storage.Storage, adpt adapter.Adapter) error
 	checkConsistencyFn func(store storage.Storage, adpt adapter.Adapter, force bool) (int, int, int, error)
@@ -41,7 +49,7 @@ type mockIndex struct {
 }
 
 func (m *mockIndex) Add(path, content string, meta map[string]string) error { return m.addFn(path, content, meta) }
-func (m *mockIndex) Search(query string, limit int, scope string) ([]index.Result, error) { return m.searchFn(query, limit, scope) }
+func (m *mockIndex) Search(query string, limit int) ([]index.Result, error) { return m.searchFn(query, limit) }
 func (m *mockIndex) Remove(path string) error                               { return m.removeFn(path) }
 func (m *mockIndex) Rebuild(store storage.Storage, adpt adapter.Adapter) error { return m.rebuildFn(store, adpt) }
 func (m *mockIndex) CheckConsistency(store storage.Storage, adpt adapter.Adapter, force bool) (int, int, int, error) { return m.checkConsistencyFn(store, adpt, force) }
@@ -377,7 +385,7 @@ func TestHandleWikiSearch(t *testing.T) {
 			checkConsistencyFn: func(storage.Storage, adapter.Adapter, bool) (int, int, int, error) {
 				return 0, 0, 0, nil
 			},
-			searchFn: func(query string, limit int, scope string) ([]index.Result, error) {
+			searchFn: func(query string, limit int) ([]index.Result, error) {
 				return []index.Result{{Path: "test.md", Title: "Test", Score: 1.5}}, nil
 			},
 		}
@@ -415,7 +423,7 @@ func TestHandleWikiSearch(t *testing.T) {
 			checkConsistencyFn: func(storage.Storage, adapter.Adapter, bool) (int, int, int, error) {
 				return 1, 0, 0, fmt.Errorf("parse broken.md: bad frontmatter")
 			},
-			searchFn: func(query string, limit int, scope string) ([]index.Result, error) {
+			searchFn: func(query string, limit int) ([]index.Result, error) {
 				return []index.Result{{Path: "test.md"}}, nil
 			},
 		}
@@ -433,7 +441,7 @@ func TestHandleWikiSearch(t *testing.T) {
 		var gotLimit int
 		idx := &mockIndex{
 			checkConsistencyFn: func(storage.Storage, adapter.Adapter, bool) (int, int, int, error) { return 0, 0, 0, nil },
-			searchFn: func(query string, limit int, scope string) ([]index.Result, error) {
+			searchFn: func(query string, limit int) ([]index.Result, error) {
 				gotLimit = limit
 				return nil, nil
 			},
@@ -444,6 +452,19 @@ func TestHandleWikiSearch(t *testing.T) {
 			t.Errorf("limit = %d, want 100", gotLimit)
 		}
 	})
+}
+
+func TestWikiSearchToolSchemaHasNoScope(t *testing.T) {
+	tool := wikiSearchTool()
+	if _, ok := tool.InputSchema.Properties["scope"]; ok {
+		t.Error("wiki_search schema must not advertise a 'scope' parameter")
+	}
+	if _, ok := tool.InputSchema.Properties["query"]; !ok {
+		t.Error("wiki_search schema should still declare 'query'")
+	}
+	if _, ok := tool.InputSchema.Properties["limit"]; !ok {
+		t.Error("wiki_search schema should still declare 'limit'")
+	}
 }
 
 func TestHandleWikiScan(t *testing.T) {
