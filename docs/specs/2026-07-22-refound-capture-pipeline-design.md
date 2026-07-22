@@ -1,6 +1,6 @@
 ---
 title: cogvault v2 Refounding — Capture→Digest→Consume Pipeline
-status: draft
+status: approved
 date: 2026-07-22
 schema: spec/v1
 ---
