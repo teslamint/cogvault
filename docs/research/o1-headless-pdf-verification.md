@@ -19,6 +19,7 @@ One Korean-language article PDF from the real corpus, 53,968 bytes, sha256 prefi
 - Prompt goes on **stdin** (avoids ARG_MAX, per CLAUDE.md §6 guidance). The prompt names the absolute PDF path and instructs "output ONLY a markdown wiki page" with the frontmatter shape.
 - `--allowedTools "Read"` is sufficient permission for the CLI to read the PDF; no `--permission-mode` flag was needed.
 - Output is a JSON **array** of events; the last element has `"type":"result"`. On success: `"subtype":"success"`, `"is_error":false`, and the page text in `"result"`. Parse: take the final array element, check `subtype`/`is_error`, read `result`.
+- **Observed failure shape** (from the accidental launchd re-run): `"subtype":"error_during_execution"`, `"is_error":true`, `"result":""` (empty), exit code still 0. The U5 backend must treat any non-`success` subtype or `is_error:true` as a failure regardless of exit code, and classify `error_during_execution` as **transient** (execution/transport class per the spec's error classification).
 
 ## Measured behavior
 
@@ -33,8 +34,8 @@ One Korean-language article PDF from the real corpus, 53,968 bytes, sha256 prefi
 2. **PATH**: launchd provides `/usr/bin:/bin:/usr/sbin:/sbin`. The plist must use the absolute `claude` binary path. User-level Claude Code hooks that invoke `node` fail ("node: command not found") but do not affect the exit code or result; the shipped plist should either extend PATH with the node directory or accept these harmless hook failures.
 3. **TCC**: reading `~/Downloads` from the launchd-spawned process succeeded without a prompt on this machine. If a future macOS update tightens this, the failure mode is a per-file read error (transient class), visible in the ingest report.
 4. **Auth**: subscription auth resolved non-interactively under launchd (keychain accessible in the GUI session domain).
-5. **One-shot `launchctl submit` re-triggered the job once after completion** (second env-check line in stderr before removal). The production plist uses `StartInterval` and an ingest-level lockfile, so duplicate concurrent digestion is already guarded; noted for awareness.
-6. Reported per-call metadata: `total_cost_usd` ≈ 1.39 and ~35s for a 53KB PDF. For the 65-file backlog expect roughly 40 minutes of wall-clock LLM time; `--limit` batching remains advisable.
+5. **One-shot `launchctl submit` re-triggered the job after completion, and the re-run executed fully**: it made a second real LLM call ($0.60) that ended `error_during_execution` with an empty result (both JSON arrays are concatenated in `launchd-stdout.json`). Two consequences: the production plist must rely on `StartInterval` (not `submit`) plus the ingest-level lockfile against duplicate digestion, and the backend gets a real-world sample of the failure shape recorded above.
+6. Reported per-call metadata: `total_cost_usd` $0.97–$1.39 across the two successful runs, ~31–38s for a 53KB PDF. For the 65-file backlog expect roughly 40 minutes of wall-clock LLM time; `--limit` batching remains advisable.
 
 ## Raw transcripts
 
