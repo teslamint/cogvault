@@ -264,7 +264,13 @@ file_meta(path PK, title, type, content_hash, size, mtime, indexed_at)
 `PRAGMA user_version = 2`. On open, a DB carrying tables at `user_version < 2` is
 dropped and recreated at v2 (v2 uses a fresh DB at a new absolute `db_path`, so no
 data migration exists). Every connection is opened with `busy_timeout=5000` so
-multi-process contention surfaces as a wait, not "database is locked".
+multi-process contention surfaces as a wait, not "database is locked" — **except**
+the FTS5 read→write tx-upgrade path (`index.Add`'s DELETE-then-INSERT runs in a
+DEFERRED transaction; the FTS5 DELETE reads shadow tables first, taking a read
+snapshot). A concurrent committed writer makes the upgrade return
+`SQLITE_BUSY_SNAPSHOT`, which `busy_timeout` by design does not retry. On the
+ingest side this lands in the infra error class (attempts spared, self-heals next
+run); see §10.5.
 
 ### 6.5 Index coverage
 
@@ -473,12 +479,15 @@ scan source dir (top level only, Lstat: skip dirs/symlinks)
 
 ### 10.2 Page identity
 
-One source file path → one wiki page `sources/<slug>.md`, where `<slug>` is the
-source base name with its extension stripped. If that page path is already mapped
-to a different source path, the page becomes `sources/<slug>-<hash8>.md`
-(`hash8` = first 8 hex of sha256 of the absolute source path). Re-digestion of the
-same source path with new content overwrites its page and marks the prior ledger
-row `superseded`.
+One source file path → one wiki page `sources/<slug>.md`. `<slug>` is derived from
+the source base name (extension stripped) by: lowercasing, replacing spaces with
+`-`, dropping every character outside `[a-z0-9._-]`, collapsing runs of `-` to one,
+and trimming leading/trailing `-`. If that leaves the slug empty (e.g. a CJK-only
+name), it falls back to `src-<hash8>` (`hash8` = first 8 hex of sha256 of the file
+content). If the resulting page path is already mapped to a different source path,
+the page becomes `sources/<slug>-<hash8>.md` (here `hash8` = first 8 hex of sha256
+of the absolute source path). Re-digestion of the same source path with new content
+overwrites its page and marks the prior ledger row `superseded`.
 
 ### 10.3 Failure isolation
 
@@ -500,7 +509,13 @@ kept out of the per-file list for readable backlog reports.
 A single-instance exclusive `flock` on `<dir(db_path)>/ingest.lock`, acquired for
 the duration of a run, prevents scheduled and manual runs from overlapping; a
 second run fails fast with the already-running error. Every DB opener (ingest
-ledger + index) sets `busy_timeout` so cross-process writes wait rather than fail.
+ledger + index) sets `busy_timeout` so cross-process writes wait rather than fail,
+**except** the FTS5 read→write tx-upgrade path (`index.Add`, DELETE-then-INSERT in
+a DEFERRED tx): a concurrent writer there yields `SQLITE_BUSY_SNAPSHOT`, which
+`busy_timeout` does not retry. That failure is classified infra (the file's
+attempt is spared and it self-heals on the next run), so it never corrupts state
+or exhausts retries. This write×write FTS case is a documented limitation; see
+`docs/deviations/2026-07-22-busy-timeout-fts-write-write.md`.
 
 ### 10.6 Ledger (`ingest_ledger`)
 
@@ -616,5 +631,10 @@ runtime dependency of `cogvault ingest`, not a Go module.
 ### Integration (U9)
 - Backlog run → N pages/rows/`success`. Incremental run digests only the new file
   with `run_origin` from `--scheduled`. Ratelimit on one file → that file `failed`
-  attempts 0, others succeed, exit 0. Concurrent serve+ingest → no "database is
-  locked" (busy_timeout effective).
+  attempts 0, others succeed, exit 0. Concurrency: a writer + concurrent reader on
+  the production DSN completes with no "database is locked"
+  (`TestE2EConcurrentIndexWriteDuringRead`), and two write-first writers serialize
+  under `busy_timeout` (`TestE2EBusyTimeoutSerializesWriters`, ledger-style plain
+  table). The FTS5 write×write tx-upgrade case is not covered by an e2e test — it
+  is a known limitation (`SQLITE_BUSY_SNAPSHOT`, infra-classed on ingest); see
+  `docs/deviations/2026-07-22-busy-timeout-fts-write-write.md`.

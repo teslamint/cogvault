@@ -1,6 +1,6 @@
 # 0020-step9-validation-outcome
 
-Status: accepted
+Status: superseded by 0021
 Date: 2026-05-05
 
 ## Context

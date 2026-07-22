@@ -106,7 +106,12 @@ v2 changes:
   sniffing migration. A DB with tables at `user_version < 2` is dropped and
   recreated. `file_meta` gains `size INTEGER` and `mtime TEXT`.
 - **busy_timeout** — every connection (via the pooled DSN pragma) sets
-  `busy_timeout=5000` so multi-process contention waits instead of failing.
+  `busy_timeout=5000` so multi-process contention waits instead of failing. One
+  exception: `Add`'s DELETE-then-INSERT runs in a DEFERRED tx whose FTS5 DELETE
+  reads shadow tables first; a concurrent committed writer makes the write upgrade
+  return `SQLITE_BUSY_SNAPSHOT`, which `busy_timeout` does not retry. Ingest
+  classifies this infra (attempts spared, self-heals next run); it is a documented
+  limitation (`docs/deviations/2026-07-22-busy-timeout-fts-write-write.md`).
 - **Stat-gate** — `CheckConsistency`'s scan callback calls `store.Stat(path)`
   first and only `store.Read` + re-hashes when size or mtime differ from the
   stored row. Dataless/eviction read errors stay per-file warnings (existing
