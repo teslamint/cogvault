@@ -11,7 +11,7 @@ var ErrConsistencySystemic = errors.New("systemic consistency error")
 
 type Index interface {
 	Add(path, content string, meta map[string]string) error
-	Search(query string, limit int, scope string) ([]Result, error)
+	Search(query string, limit int) ([]Result, error)
 	Remove(path string) error
 	Rebuild(store storage.Storage, adpt adapter.Adapter) error
 	CheckConsistency(store storage.Storage, adpt adapter.Adapter, force bool) (added, removed, updated int, err error)
