@@ -15,50 +15,67 @@ import (
 func newInitCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "init",
-		Short: "Initialize a vault with config, wiki directory, schema, and database",
-		RunE:  runInit,
+		Short: "Create the config file, then the wiki directory, schema, and database",
+		Long: `Initialize cogvault in two steps.
+
+First run (no config file yet): creates the config file at the configured path
+with default placeholder values and exits. Edit wiki_dir, db_path, and sources
+in that file, then run init again.
+
+Second run (valid config): creates the wiki directory, writes _schema.md, and
+builds the search index at the configured absolute locations.`,
+		RunE: runInit,
 	}
 }
 
 func runInit(cmd *cobra.Command, args []string) error {
-	vaultRoot, err := resolveVaultRoot(cmd)
+	configPath, err := resolveConfigPath(cmd)
 	if err != nil {
 		return err
 	}
 
-	// 1. Config file
-	if err := config.Save(vaultRoot); err != nil {
+	// 1. Config file. Track whether it already existed so we can distinguish a
+	// fresh scaffold (guidance + success exit) from a real validation error.
+	configExisted := fileExists(configPath)
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		return fmt.Errorf("init config dir: %w", err)
+	}
+	if err := config.Save(configPath); err != nil {
 		return fmt.Errorf("init config: %w", err)
 	}
 
-	cfg, err := config.Load(vaultRoot)
+	// 2. Load and validate.
+	cfg, err := config.Load(configPath)
 	if err != nil {
-		return fmt.Errorf("init load config: %w", err)
+		if !configExisted {
+			cmd.Printf("created %s; edit wiki_dir/db_path/sources, then re-run cogvault init\n", configPath)
+			return nil
+		}
+		return err
 	}
 
-	// 2. Wiki directory
-	wikiAbs := filepath.Join(vaultRoot, cfg.WikiDir)
-	if err := os.MkdirAll(wikiAbs, 0o755); err != nil {
+	// 3. Wiki directory (via storage for symlink/traversal security on schema).
+	if err := os.MkdirAll(cfg.WikiDir, 0o755); err != nil {
 		return fmt.Errorf("init wiki dir: %w", err)
 	}
 
-	// 3. Schema file (via storage for symlink/traversal security)
-	fsStore := storage.NewFSStorage(vaultRoot, cfg)
+	fsStore := storage.NewFSStorage(cfg.WikiDir, cfg)
 	if err := fsStore.WriteSchema([]byte(schema.DefaultContent)); err != nil {
 		return fmt.Errorf("init schema: %w", err)
 	}
 
-	// 4. Adapter
 	adpt, err := newAdapter(cfg.Adapter)
 	if err != nil {
 		return err
 	}
 
-	// 5. Database
-	dbAbs := filepath.Join(vaultRoot, cfg.DBPath)
-	dbExisted := fileExists(dbAbs)
+	// 4. Database.
+	if err := os.MkdirAll(filepath.Dir(cfg.DBPath), 0o755); err != nil {
+		return fmt.Errorf("init db dir: %w", err)
+	}
+	dbExisted := fileExists(cfg.DBPath)
 
-	idx, err := index.NewSQLiteIndex(vaultRoot, dbAbs, cfg)
+	idx, err := index.NewSQLiteIndex(cfg.WikiDir, cfg.DBPath, cfg)
 	if err != nil {
 		return fmt.Errorf("init database: %w", err)
 	}
@@ -75,7 +92,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	cmd.Println("Initialized vault at", vaultRoot)
+	cmd.Println("Initialized wiki at", cfg.WikiDir)
 	return nil
 }
 

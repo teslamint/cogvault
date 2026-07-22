@@ -2,8 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"github.com/teslamint/cogvault/internal/adapter"
@@ -14,29 +12,15 @@ import (
 	"github.com/teslamint/cogvault/internal/storage"
 )
 
-func resolveVaultRoot(cmd *cobra.Command) (string, error) {
-	vault, _ := cmd.Flags().GetString("vault")
-	if vault == "" {
-		wd, err := os.Getwd()
-		if err != nil {
-			return "", fmt.Errorf("resolve vault root: %w", err)
-		}
-		vault = wd
+// resolveConfigPath returns the --config flag value, or the default config path
+// when the flag is empty. No filesystem stat is performed here; config.Load
+// reports a clear error (naming the path) when the file is missing.
+func resolveConfigPath(cmd *cobra.Command) (string, error) {
+	path, _ := cmd.Flags().GetString("config")
+	if path != "" {
+		return path, nil
 	}
-
-	abs, err := filepath.Abs(vault)
-	if err != nil {
-		return "", fmt.Errorf("resolve vault root: %w", err)
-	}
-
-	info, err := os.Stat(abs)
-	if err != nil {
-		return "", fmt.Errorf("vault root %q: %w", abs, err)
-	}
-	if !info.IsDir() {
-		return "", fmt.Errorf("vault root %q: not a directory", abs)
-	}
-	return abs, nil
+	return config.DefaultConfigPath()
 }
 
 func newAdapter(name string) (adapter.Adapter, error) {
@@ -50,11 +34,11 @@ func newAdapter(name string) (adapter.Adapter, error) {
 	}
 }
 
-// bootstrap loads config and creates storage, index, and adapter.
-// Caller must defer idx.Close() on success. If bootstrap returns a non-nil error,
-// all resources are already cleaned up.
-func bootstrap(vaultRoot string) (*config.Config, *storage.FSStorage, *index.SQLiteIndex, adapter.Adapter, error) {
-	cfg, err := config.Load(vaultRoot)
+// bootstrap loads config and creates storage, index, and adapter, all rooted at
+// the absolute wiki_dir/db_path in the config. Caller must defer idx.Close() on
+// success. If bootstrap returns a non-nil error, all resources are cleaned up.
+func bootstrap(configPath string) (*config.Config, *storage.FSStorage, *index.SQLiteIndex, adapter.Adapter, error) {
+	cfg, err := config.Load(configPath)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -64,10 +48,9 @@ func bootstrap(vaultRoot string) (*config.Config, *storage.FSStorage, *index.SQL
 		return nil, nil, nil, nil, err
 	}
 
-	store := storage.NewFSStorage(vaultRoot, cfg)
+	store := storage.NewFSStorage(cfg.WikiDir, cfg)
 
-	dbPath := filepath.Join(vaultRoot, cfg.DBPath)
-	idx, err := index.NewSQLiteIndex(vaultRoot, dbPath, cfg)
+	idx, err := index.NewSQLiteIndex(cfg.WikiDir, cfg.DBPath, cfg)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}

@@ -42,7 +42,7 @@ func schemaInstructions(cfg *config.Config, store storage.Storage) string {
 
 func defaultSchemaInstructions(cfg *config.Config) string {
 	return fmt.Sprintf(`Wiki pages live under %q. Each page is a Markdown file with YAML frontmatter.
-Use wiki_read/wiki_write/wiki_list/wiki_search/wiki_scan/wiki_parse to interact with the vault.
+Use wiki_read/wiki_write/wiki_list/wiki_search/wiki_scan/wiki_parse to interact with the wiki root.
 Read the schema with wiki_read(%q) for detailed formatting rules.`,
 		cfg.WikiDir, cfg.SchemaPath())
 }
@@ -58,15 +58,15 @@ func registerTools(s *server.MCPServer, root string, cfg *config.Config, store s
 
 func wikiReadTool() mcp.Tool {
 	return mcp.NewTool("wiki_read",
-		mcp.WithDescription("Read a file from the vault. Returns the file content as text."),
-		mcp.WithString("path", mcp.Required(), mcp.Description("Vault root-relative file path")),
+		mcp.WithDescription("Read a file from the wiki root. Returns the file content as text."),
+		mcp.WithString("path", mcp.Required(), mcp.Description("Wiki root-relative file path")),
 	)
 }
 
 func wikiWriteTool() mcp.Tool {
 	return mcp.NewTool("wiki_write",
-		mcp.WithDescription("Write content to a file in the wiki directory. Creates intermediate directories as needed. Overwrites existing files."),
-		mcp.WithString("path", mcp.Required(), mcp.Description("Vault root-relative file path")),
+		mcp.WithDescription("Write content to a file in the wiki root. Creates intermediate directories as needed. Overwrites existing files."),
+		mcp.WithString("path", mcp.Required(), mcp.Description("Wiki root-relative file path")),
 		mcp.WithString("content", mcp.Required(), mcp.Description("File content to write")),
 	)
 }
@@ -74,7 +74,7 @@ func wikiWriteTool() mcp.Tool {
 func wikiListTool() mcp.Tool {
 	return mcp.NewTool("wiki_list",
 		mcp.WithDescription("List direct children of a directory. Returns path, name, is_dir, title, and type for each entry."),
-		mcp.WithString("prefix", mcp.Description("Directory prefix to list (default: vault root)")),
+		mcp.WithString("prefix", mcp.Description("Directory prefix to list (default: wiki root)")),
 	)
 }
 
@@ -83,14 +83,13 @@ func wikiSearchTool() mcp.Tool {
 		mcp.WithDescription("Full-text search across indexed files. Returns matching files with snippets."),
 		mcp.WithString("query", mcp.Required(), mcp.Description("Search query")),
 		mcp.WithNumber("limit", mcp.Description("Max results (default 10, max 100)")),
-		mcp.WithString("scope", mcp.Description("Search scope: all (default), wiki, or vault"), mcp.Enum("all", "wiki", "vault")),
 	)
 }
 
 func wikiScanTool() mcp.Tool {
 	return mcp.NewTool("wiki_scan",
-		mcp.WithDescription("Recursively list all markdown file paths. Designed for vault discovery."),
-		mcp.WithString("dir", mcp.Description("Directory to scan (default: entire vault)")),
+		mcp.WithDescription("Recursively list all markdown file paths. Designed for wiki root discovery."),
+		mcp.WithString("dir", mcp.Description("Directory to scan (default: entire wiki root)")),
 	)
 }
 

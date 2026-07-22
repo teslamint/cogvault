@@ -143,7 +143,6 @@ func handleWikiSearch(cfg *config.Config, store storage.Storage, idx index.Index
 		if limit > 100 {
 			limit = 100
 		}
-		scope := req.GetString("scope", "all")
 
 		if _, _, _, err := idx.CheckConsistency(store, adpt, false); err != nil {
 			if errors.Is(err, index.ErrConsistencySystemic) {
@@ -152,7 +151,7 @@ func handleWikiSearch(cfg *config.Config, store storage.Storage, idx index.Index
 			slog.Warn("consistency check: per-file errors", "error", err)
 		}
 
-		results, err := idx.Search(query, limit, scope)
+		results, err := idx.Search(query, limit)
 		if err != nil {
 			return mapError(err, ""), nil
 		}
