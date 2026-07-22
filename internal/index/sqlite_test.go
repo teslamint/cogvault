@@ -1,6 +1,7 @@
 package index
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -120,6 +121,34 @@ func TestInitSchemaFresh(t *testing.T) {
 	idx := newTestIndex(t, root, testCfg())
 	if !idx.useTrigram {
 		t.Fatal("expected useTrigram=true on fresh DB")
+	}
+}
+
+func TestBusyTimeoutAppliesToAllConnections(t *testing.T) {
+	root := t.TempDir()
+	idx := newTestIndex(t, root, testCfg())
+
+	ctx := context.Background()
+
+	// Grab several distinct pooled connections at once, then verify each carries
+	// busy_timeout. A per-connection db.Exec would only configure one of them.
+	conns := make([]*sql.Conn, 0, 4)
+	for i := 0; i < 4; i++ {
+		c, err := idx.db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("open conn %d: %v", i, err)
+		}
+		conns = append(conns, c)
+	}
+	for i, c := range conns {
+		var bt int
+		if err := c.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&bt); err != nil {
+			t.Fatalf("conn %d PRAGMA busy_timeout: %v", i, err)
+		}
+		if bt != 5000 {
+			t.Fatalf("conn %d busy_timeout = %d, want 5000", i, bt)
+		}
+		c.Close()
 	}
 }
 
@@ -975,6 +1004,104 @@ func TestCheckConsistencyPerFileParseError(t *testing.T) {
 	}
 }
 
+func TestCheckConsistencyPerFileReadError(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "notes", "target.md")
+	mustWriteFile(t, target, "# Target\nOriginal body")
+	mustWriteFile(t, filepath.Join(root, "notes", "other.md"), "# Other\nBody")
+
+	cfg := testCfg()
+	store := storage.NewFSStorage(root, cfg)
+	adpt := obsidian.New()
+	idx := newTestIndex(t, root, cfg)
+
+	// Index both files first.
+	if _, _, _, err := idx.CheckConsistency(store, adpt, true); err != nil {
+		t.Fatal(err)
+	}
+	before, err := idx.GetMeta("notes/target.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Modify target so size differs → forces a Read on the next run.
+	mustWriteFile(t, target, "# Target\nModified body that is much longer than the original")
+	// A brand-new file that must still index despite target's read failure.
+	mustWriteFile(t, filepath.Join(root, "notes", "fresh.md"), "# Fresh\nBody")
+
+	failing := &failingStorage{inner: store, failReadOn: "notes/target.md"}
+	added, _, _, err := idx.CheckConsistency(failing, adpt, true)
+	if err == nil {
+		t.Fatal("expected joined per-file error for read failure")
+	}
+	if !strings.Contains(err.Error(), "notes/target.md") {
+		t.Fatalf("joined error should mention failing file, got: %v", err)
+	}
+	// The new file still indexed despite the per-file failure.
+	if added != 1 {
+		t.Fatalf("fresh file should index despite target read failure, added = %d", added)
+	}
+	if _, gerr := idx.GetMeta("notes/fresh.md"); gerr != nil {
+		t.Fatalf("fresh file should be indexed: %v", gerr)
+	}
+	// Target's stale row is PRESERVED (delete(indexed,p) keeps it, not removes it).
+	after, err := idx.GetMeta("notes/target.md")
+	if err != nil {
+		t.Fatalf("target's existing row should be preserved after read failure: %v", err)
+	}
+	if after.ContentHash != before.ContentHash {
+		t.Fatalf("stale row should be preserved unchanged: before=%s after=%s", before.ContentHash, after.ContentHash)
+	}
+}
+
+func TestCheckConsistencyPerFileStatError(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, filepath.Join(root, "notes", "target.md"), "# Target\nOriginal body")
+	mustWriteFile(t, filepath.Join(root, "notes", "other.md"), "# Other\nBody")
+
+	cfg := testCfg()
+	store := storage.NewFSStorage(root, cfg)
+	adpt := obsidian.New()
+	idx := newTestIndex(t, root, cfg)
+
+	if _, _, _, err := idx.CheckConsistency(store, adpt, true); err != nil {
+		t.Fatal(err)
+	}
+	before, err := idx.GetMeta("notes/target.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A brand-new file that must still index despite target's stat failure.
+	mustWriteFile(t, filepath.Join(root, "notes", "fresh.md"), "# Fresh\nBody")
+
+	failing := &failingStorage{inner: store, failStatOn: "notes/target.md"}
+	added, removed, _, err := idx.CheckConsistency(failing, adpt, true)
+	if err == nil {
+		t.Fatal("expected joined per-file error for stat failure")
+	}
+	if !strings.Contains(err.Error(), "notes/target.md") {
+		t.Fatalf("joined error should mention failing file, got: %v", err)
+	}
+	if added != 1 {
+		t.Fatalf("fresh file should index despite target stat failure, added = %d", added)
+	}
+	// Stat failure must NOT remove the stale row (delete(indexed,p) preserves it).
+	if removed != 0 {
+		t.Fatalf("stat failure must not remove the existing row, removed = %d", removed)
+	}
+	if _, gerr := idx.GetMeta("notes/fresh.md"); gerr != nil {
+		t.Fatalf("fresh file should be indexed: %v", gerr)
+	}
+	after, err := idx.GetMeta("notes/target.md")
+	if err != nil {
+		t.Fatalf("target's existing row should be preserved after stat failure: %v", err)
+	}
+	if after.ContentHash != before.ContentHash {
+		t.Fatalf("stale row should be preserved unchanged: before=%s after=%s", before.ContentHash, after.ContentHash)
+	}
+}
+
 func TestApplyRollbackOnFailure(t *testing.T) {
 	root := t.TempDir()
 	mustWriteFile(t, filepath.Join(root, "notes", "existing.md"), "# Existing\nOriginal body")
@@ -1310,5 +1437,35 @@ func (c *countingStorage) Exists(path string) (bool, error) {
 }
 func (c *countingStorage) Stat(path string) (int64, time.Time, error) {
 	return c.inner.Stat(path)
+}
+
+// failingStorage injects Read or Stat failures for a specific normalized path
+// while delegating everything else to inner, to exercise per-file tolerance.
+type failingStorage struct {
+	inner      storage.Storage
+	failReadOn string // normalized path whose Read must fail
+	failStatOn string // normalized path whose Stat must fail
+}
+
+func (f *failingStorage) Read(path string) ([]byte, error) {
+	if f.failReadOn != "" && normalizePath(path) == normalizePath(f.failReadOn) {
+		return nil, fmt.Errorf("simulated read failure for %s", path)
+	}
+	return f.inner.Read(path)
+}
+func (f *failingStorage) Write(path string, data []byte) error {
+	return f.inner.Write(path, data)
+}
+func (f *failingStorage) List(prefix string) ([]storage.ListEntry, error) {
+	return f.inner.List(prefix)
+}
+func (f *failingStorage) Exists(path string) (bool, error) {
+	return f.inner.Exists(path)
+}
+func (f *failingStorage) Stat(path string) (int64, time.Time, error) {
+	if f.failStatOn != "" && normalizePath(path) == normalizePath(f.failStatOn) {
+		return 0, time.Time{}, fmt.Errorf("simulated stat failure for %s", path)
+	}
+	return f.inner.Stat(path)
 }
 

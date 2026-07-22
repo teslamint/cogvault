@@ -32,7 +32,7 @@ type SQLiteIndex struct {
 }
 
 func NewSQLiteIndex(root, dbPath string, cfg *config.Config) (*SQLiteIndex, error) {
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", dsnWithPragmas(dbPath))
 	if err != nil {
 		return nil, fmt.Errorf("index: open db: %w", err)
 	}
@@ -53,14 +53,18 @@ func NewSQLiteIndex(root, dbPath string, cfg *config.Config) (*SQLiteIndex, erro
 
 const schemaVersion = 2
 
-func (s *SQLiteIndex) initSchema() error {
-	if _, err := s.db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
-		return fmt.Errorf("index: set WAL: %w", err)
+// dsnWithPragmas appends _pragma DSN parameters so every pooled connection —
+// not just the first one — is opened with busy_timeout and WAL. Setting these
+// via db.Exec only configures a single pooled connection; the DSN applies to all.
+func dsnWithPragmas(dbPath string) string {
+	sep := "?"
+	if strings.Contains(dbPath, "?") {
+		sep = "&"
 	}
-	if _, err := s.db.Exec(`PRAGMA busy_timeout=5000`); err != nil {
-		return fmt.Errorf("index: set busy_timeout: %w", err)
-	}
+	return dbPath + sep + "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
+}
 
+func (s *SQLiteIndex) initSchema() error {
 	var userVersion int
 	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&userVersion); err != nil {
 		return fmt.Errorf("index: read user_version: %w", err)
@@ -75,8 +79,12 @@ func (s *SQLiteIndex) initSchema() error {
 
 	if tableCount > 0 && userVersion < schemaVersion {
 		slog.Info("index: recreating outdated schema", "from", userVersion, "to", schemaVersion)
-		s.db.Exec(`DROP TABLE IF EXISTS wiki_fts`)
-		s.db.Exec(`DROP TABLE IF EXISTS file_meta`)
+		if _, err := s.db.Exec(`DROP TABLE IF EXISTS wiki_fts`); err != nil {
+			return fmt.Errorf("index: drop wiki_fts: %w", err)
+		}
+		if _, err := s.db.Exec(`DROP TABLE IF EXISTS file_meta`); err != nil {
+			return fmt.Errorf("index: drop file_meta: %w", err)
+		}
 	}
 
 	var existingSQL sql.NullString
