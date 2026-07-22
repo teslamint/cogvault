@@ -1,0 +1,12 @@
+{
+  "id": "6921b5b5-05bf-45ea-a5df-c83e1c2d5a1c",
+  "session_id": "7e26b846-7391-4363-921e-c4ef9506e865",
+  "git_commit_hash": "16d4ff80250e2610801db66b42776143db63753c",
+  "git_branch": "main",
+  "parent_checkpoint_id": null,
+  "files_snapshot": null,
+  "diff_summary": "DESIGN.md                                     |  9 ++---\n README.md                                     |  6 ++--\n cmd/cogvault/cli_test.go                      | 15 ++++++++\n cmd/cogvault/init.go                          | 44 ++---------------------\n docs/decisions/0016-step6-deferred-items.md   |  2 +-\n docs/decisions/0017-step7-schema-decisions.md | 50 +++++++++++++++++++++++++++\n internal/schema/default_schema.md             | 39 +++++++++++++++++++++\n internal/schema/schema.go                     |  6 ++++\n internal/schema/schema_test.go                | 31 +++++++++++++++++\n 9 files changed, 152 insertions(+), 50 deletions(-)",
+  "agent_state": null,
+  "created_at": "2026-04-07 13:45:59",
+  "metadata": "{\"source\": \"post_commit\"}"
+}

@@ -1,0 +1,12 @@
+{
+  "id": "7cbec145-35cd-4f53-ae01-a82eacb7cf0b",
+  "session_id": "b84c1d16-a78d-466c-ba11-19beed969074",
+  "git_commit_hash": "9834f316fdd7acd4a550fb94c90ecbc5495f94a4",
+  "git_branch": "main",
+  "parent_checkpoint_id": null,
+  "files_snapshot": null,
+  "diff_summary": "README.md                                          |   6 +-\n cmd/cogvault/consistency.go                        |  19 +\n cmd/cogvault/consistency_test.go                   |  56 ++\n cmd/cogvault/init.go                               |   8 +-\n cmd/cogvault/integration_test.go                   |  73 ++\n cmd/cogvault/serve.go                              |  11 +-\n docs/decisions/0016-step6-deferred-items.md        |   2 +-\n .../0018-step8-integration-test-decisions.md       |  91 +++\n docs/decisions/0019-step8-deferred-items.md        |  25 +\n internal/mcp/integration_test.go                   | 748 +++++++++++++++++++++\n testdata/fixtures/basic/.cogvault.yaml             |   7 +\n testdata/fixtures/basic/_wiki/_schema.md           |  39 ++\n testdata/fixtures/basic/notes/hello.md             |   7 +\n testdata/fixtures/real/.cogvault.yaml              |   7 +\n testdata/fixtures/real/_wiki/_schema.md            |  39 ++\n .../real/_wiki/concepts/knowledge-graph.md         |  13 +\n testdata/fixtures/real/_wiki/entities/llm.md       |  12 +\n ...355\\212\\270-\\352\\260\\234\\354\\232\\224-source.md\" |  22 +\n testdata/fixtures/real/notes/meeting-2024-01.md    |  11 +\n testdata/fixtures/real/notes/research/diagram.png  |   2 +\n .../fixtures/real/notes/research/llm-patterns.md   |  18 +\n ...40\\235\\355\\212\\270-\\352\\260\\234\\354\\232\\224.md\" |  15 +\n testdata/fixtures/security/private/secret.md       |   6 +\n testdata/fixtures/security/traversal/.gitkeep      |   0\n 24 files changed, 1218 insertions(+), 19 deletions(-)",
+  "agent_state": null,
+  "created_at": "2026-04-07 14:44:31",
+  "metadata": "{\"source\": \"post_commit\"}"
+}

@@ -1,0 +1,10 @@
+{
+  "id": "4e381d6d-391c-4c28-a245-21fb472f269f",
+  "project_id": "ac587b13-4e68-4844-9bd0-0090e2f3abb5",
+  "session_type": "claude",
+  "started_at": "2026-04-08T09:46:48.391246+00:00",
+  "ended_at": "2026-04-09T00:30:46.902999+00:00",
+  "session_title": "Act as a code review orchestrator for this repository. For each changed file since the last commit: ",
+  "session_summary": null,
+  "total_turns": 2
+}

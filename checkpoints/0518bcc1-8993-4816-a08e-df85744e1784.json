@@ -1,0 +1,12 @@
+{
+  "id": "0518bcc1-8993-4816-a08e-df85744e1784",
+  "session_id": "b84c1d16-a78d-466c-ba11-19beed969074",
+  "git_commit_hash": "29f8b6d4d14fa45654f85c4486ee63f80a380fa1",
+  "git_branch": "main",
+  "parent_checkpoint_id": null,
+  "files_snapshot": null,
+  "diff_summary": "docs/research/index.md                  |  1 +\n docs/research/step9-mcp-unblock-plan.md | 33 +++++++++++++++\n internal/mcp/integration_test.go        | 71 +++++++++++++++++++++++++++++++++\n internal/mcp/tools.go                   | 15 +++++--\n internal/mcp/tools_test.go              |  9 +++++\n 5 files changed, 126 insertions(+), 3 deletions(-)",
+  "agent_state": null,
+  "created_at": "2026-04-07 15:51:30",
+  "metadata": "{\"source\": \"post_commit\"}"
+}
