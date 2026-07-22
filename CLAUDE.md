@@ -256,7 +256,7 @@ cogvault init --config ~/.config/cogvault/config.yaml
 2. wiki_parse("notes/project-idea.md", include_content=true)
                                      → 메타데이터 + 본문
 3. (에이전트가 본문 분석, 핵심 추출)
-4. wiki_search("project idea", scope="wiki")
+4. wiki_search("project idea")
                                      → 기존 관련 페이지 확인
 5. wiki_write("_wiki/sources/project-idea.md", ...)
                                      → source 페이지 생성
@@ -270,7 +270,7 @@ cogvault init --config ~/.config/cogvault/config.yaml
 사용자: "이전에 인제스트한 프로젝트 아이디어에서 기술 스택 관련 내용 찾아줘"
 
 에이전트:
-1. wiki_search("기술 스택", scope="wiki")  → 관련 source 페이지
+1. wiki_search("기술 스택")  → 관련 source 페이지
 2. wiki_read("_wiki/sources/project-idea.md")  → 상세 확인
 3. (에이전트가 응답 생성)
 ```
@@ -285,6 +285,8 @@ cogvault init --config ~/.config/cogvault/config.yaml
 
 ## 10. 프로젝트명
 
+> [역사적 기록 — v1 기준. v2 현황은 §0/§6 및 docs/decisions/0021 참조]
+
 **확정.** `cogvault`로 확정됨.
 
 확정 기준:
@@ -298,6 +300,8 @@ cogvault init --config ~/.config/cogvault/config.yaml
 ---
 
 ## 11. 구현 시작 체크리스트
+
+> [역사적 기록 — v1 기준. v2 현황은 §0/§6 및 docs/decisions/0021 참조]
 
 - [x] 프로젝트명 확정
 - [x] `go mod init github.com/teslamint/cogvault`

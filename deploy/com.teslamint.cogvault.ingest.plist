@@ -37,6 +37,11 @@
         <!-- launchd's default PATH excludes ~/.local/bin, where the claude CLI
              lives (verified by the O1 spike). Keep the standard dirs and append
              the claude CLI directory so the claudecode backend can find it. -->
+        <!-- User-level Claude Code hooks that invoke `node` will log harmless
+             "node: command not found" errors under this minimal PATH (they do
+             not affect ingest's exit code or result; O1 spike finding 2, see
+             docs/research/o1-headless-pdf-verification.md). Add node's
+             directory to PATH below if the noise bothers you. -->
         <string>/usr/bin:/bin:/usr/sbin:/sbin:/Users/USERNAME/.local/bin</string>
     </dict>
 

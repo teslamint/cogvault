@@ -207,6 +207,8 @@ Stat(path) → (size int64, mtime time.Time, error)
 - `prefix` must be a directory; a file path → `ErrNotFound`.
 - Direct children only (non-recursive); directories end with `/`.
 - `exclude`/`exclude_read` filtered out.
+- Listing an `exclude_read` directory itself → `ErrPermission` (not an empty
+  list — existence must not leak).
 
 ### 5.6 Exists
 
@@ -238,6 +240,8 @@ GetMeta(path) → (*FileMeta, error)
 ```
 
 `Search` has **no `scope` parameter** (removed in v2 — 0021 D5).
+`GetMeta` on a missing path → `ErrNotFound`. `Add`'s `meta` map carries keys
+`title`, `type`, `tags` (`tags` comma-separated).
 
 ### 6.2 Result / FileMeta
 
@@ -289,8 +293,13 @@ internal (FTS5 MATCH for ≥ 3 chars with trigram; LIKE otherwise).
 
 ## 7. Adapter
 
-Unchanged from v1 (parses wiki pages under `wiki_dir`). `ResolveLink` still not
-provided.
+Two adapters implement this interface: `obsidian` (default) parses `wiki_dir`
+pages using Obsidian wikilink syntax; `markdown` is a standard-Markdown fallback
+(config `adapter: markdown`) using `[text](target)` / `![alt](target)` link
+syntax instead of wikilinks. `ResolveLink` still not provided.
+
+- `Scan`: a non-directory `root` → `ErrNotFound`; a callback (`fn`) error aborts
+  Scan immediately (returned as the Scan error, not swallowed).
 
 ### 7.1 Interface
 

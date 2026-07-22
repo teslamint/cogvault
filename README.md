@@ -118,6 +118,12 @@ so the template sets an explicit PATH that includes the `claude` CLI directory
 - **Auth**: `claude` must resolve auth non-interactively under launchd (it does
   when subscription auth is in the login keychain and the GUI session is active).
 
+User-level Claude Code hooks that invoke `node` will log harmless "node: command
+not found" errors under the template's minimal PATH — they don't affect ingest's
+exit code or result. Extend PATH with the node directory in the plist if the
+noise bothers you (see O1 spike finding 2 in
+[docs/research/o1-headless-pdf-verification.md](docs/research/o1-headless-pdf-verification.md)).
+
 ## Migrating from v1
 
 v2 uses a fresh wiki root and database — there is no in-place upgrade.
