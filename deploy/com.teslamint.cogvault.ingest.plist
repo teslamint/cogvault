@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  cogvault scheduled ingest — launchd template.
+
+  This is a TEMPLATE. Before loading it you MUST:
+    1. Replace /usr/local/bin/cogvault below with the absolute path to your
+       built cogvault binary (launchd jobs have no useful PATH or cwd).
+    2. Replace every /Users/USERNAME/... path with your real home directory.
+    3. Create the log directory first: mkdir -p ~/Library/Logs/cogvault
+    4. Load it: cp this file to ~/Library/LaunchAgents/ and run
+       launchctl load ~/Library/LaunchAgents/com.teslamint.cogvault.ingest.plist
+
+  See README.md "launchd automation" for the one-time TCC and auth grants.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.teslamint.cogvault.ingest</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <!-- Replace with the absolute path to your built cogvault binary. -->
+        <string>/usr/local/bin/cogvault</string>
+        <string>ingest</string>
+        <string>--config</string>
+        <string>/Users/USERNAME/.config/cogvault/config.yaml</string>
+        <string>--scheduled</string>
+    </array>
+
+    <key>StartInterval</key>
+    <integer>3600</integer>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <!-- launchd's default PATH excludes ~/.local/bin, where the claude CLI
+             lives (verified by the O1 spike). Keep the standard dirs and append
+             the claude CLI directory so the claudecode backend can find it. -->
+        <string>/usr/bin:/bin:/usr/sbin:/sbin:/Users/USERNAME/.local/bin</string>
+    </dict>
+
+    <!-- mkdir -p ~/Library/Logs/cogvault before loading; launchd will not
+         create the parent directory for these log files. -->
+    <key>StandardOutPath</key>
+    <string>/Users/USERNAME/Library/Logs/cogvault/ingest.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/USERNAME/Library/Logs/cogvault/ingest.err.log</string>
+</dict>
+</plist>

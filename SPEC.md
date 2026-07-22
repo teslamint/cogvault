@@ -1,270 +1,298 @@
-# MVP Spec — cogvault
+# Spec — cogvault v2
 
-버전: draft-5 (final)
-범위: MVP (v0.1) 만. v0.2 이후는 실사용 후 별도 스펙.
-상태: **구현 준비 완료.** 구현 중 발견되는 이슈는 스펙 갱신으로 반영.
+Version: v2 (Phase 1)
+Scope: v2 Phase 1 — the capture→digest→consume pipeline. Later phases (URL
+capture, periodic digest, local LLM backend) get their own specs.
+Status: **implemented; 1-week validation pending.** Issues found during use are
+folded back into this spec.
 
-> **구현 시작 전 필수 사전 작업**:
-> 1. 프로젝트명 확정 (GitHub 가용성 확인, Go 모듈 경로 유효성)
-> 2. 자신의 Obsidian vault에서 민감 정보 제거한 테스트 fixture 준비
-> 3. `mcp-go` 버전 선정 및 고정
-
----
-
-## 1. 개요
-
-### 1.1 목적
-
-Obsidian vault를 LLM 에이전트가 읽고, 검색하고, 설정된 `wiki_dir/` 디렉토리에 구조화된 위키를 빌드할 수 있게 하는 **MCP 도구 서버 + CLI**.
-
-### 1.2 MVP 범위
-
-- MCP stdio 서버: 도구 6개 (읽기, 쓰기, 목록, 검색, 스캔, 파싱)
-- CLI: `init`, `search`, `serve`
-- Obsidian vault 하이브리드 통합
-- SQLite FTS5 전문 검색
-- Passthrough 모드 전용 (LLM 호출 없음)
-
-### 1.3 MVP 범위 밖
-
-- LLM 어댑터 (claudecode, anthropic, ollama)
-- 자동 컴파일러 (engine/compiler)
-- Query file-back, Lint
-- `wiki_delete` 도구
-- SSE 전송
-- 벡터 검색, 온톨로지 그래프
-- watch 모드 (fsnotify)
-- `_log.md` 자동 관리
-- 링크 해석 (`ResolveLink`) — v0.3에서 Lint와 함께 도입
+Canonical design: `docs/specs/2026-07-22-refound-capture-pipeline-design.md`.
+Refounding rationale: `docs/decisions/0021-v2-refounding.md` (supersedes 0020).
 
 ---
 
-## 2. 런타임 구조
+## 1. Overview
 
-### 2.1 Vault 레이아웃
+### 1.1 Purpose
 
-기본 설정(`wiki_dir: "_wiki"`) 기준 예시:
+A standalone personal knowledge pipeline. cogvault watches source folders the
+user already fills, digests new material with an LLM into a searchable Markdown
+wiki, and serves that wiki over MCP, a CLI, and a phone-readable synced folder.
+
+The v1 "MCP wiki server hosted inside an Obsidian vault" is gone. cogvault has
+one mode: `wiki_dir` is the sole storage root, and `sources` are plain external
+directories the ingest pipeline reads directly (0021).
+
+### 1.2 In scope (Phase 1)
+
+- `cogvault ingest`: scan sources → hash → digest each PDF via the LLM adapter →
+  write + index wiki pages → record a per-file outcome in the ledger → print a
+  report.
+- MCP stdio server: six tools (read, write, list, search, scan, parse).
+- CLI: `init`, `search`, `serve`, `ingest`.
+- `internal/llm` adapter interface with a `claudecode` backend (`claude --print`).
+- Single-mode config/storage: absolute `wiki_dir` root, `sources[]`, absolute
+  `db_path` outside the synced folder.
+- SQLite FTS5 full-text search (trigram, Korean-friendly).
+- launchd template + setup docs for zero-touch scheduled ingest.
+
+### 1.3 Out of scope (Phase 1)
+
+- Phone capture (share sheet, synced inbox), URL/web extraction, image OCR.
+- Local LLM backend implementation (interface only).
+- `pdftotext` text-extraction step (conditional fallback; **not activated** — O1
+  verified headless PDF reading works, see 0021 D6).
+- Watch mode / resident daemon (batch + launchd chosen instead).
+- Periodic `cogvault digest` command.
+- `wiki_delete`, auto-commit, vector search, ontology graph, `ResolveLink`.
+
+---
+
+## 2. Runtime structure
+
+### 2.1 Layout (single mode)
+
+`wiki_dir` is the entire storage root. Sources live wherever the user keeps them
+and are not part of the wiki tree.
 
 ```
-obsidian-vault/
-├── .obsidian/                 # 무시
-├── .cogvault.yaml          # 설정 파일
-├── .cogvault.db            # SQLite DB
-├── _wiki/                     # LLM 소유 영역
-│   ├── _schema.md             # 규칙 정의 (읽기 전용)
-│   ├── entities/
-│   ├── concepts/
-│   ├── sources/
-│   └── synthesis/
-└── (기존 vault 파일들)         # raw source
+<wiki_dir>/                     # the sole storage root (may live under iCloud Drive)
+├── _schema.md                  # rules definition (read-only)
+├── sources/                    # digested source pages (one per source file)
+└── (other pages the agent writes)
+
+<source dir>/                   # e.g. ~/Downloads/_Articles — read directly by ingest,
+    *.pdf                       #   never through storage, never MCP-addressable
+
+<db_path>                       # absolute, OUTSIDE wiki_dir (e.g. ~/.local/state/cogvault/)
 ```
 
-### 2.2 접근 규칙
+### 2.2 Access model
 
-| 영역 | 읽기 | 쓰기 |
-|------|------|------|
-| vault 일반 파일 | 허용 (`exclude_read` 제외) | **거부** |
-| `wiki_dir/` 내부 (일반) | 허용 | 허용 |
-| `wiki_dir/_schema.md` | 허용 | **거부** (사용자 직접 수정만) |
-| `exclude_read` 디렉토리 | **거부** | **거부** |
-| `.obsidian/`, `.trash/` | 허용 (`exclude_read` 제외), 단 스캔/인덱싱/목록 제외 | **거부** |
+| Area | Read | Write |
+|------|------|-------|
+| `wiki_dir/` (general) | allowed (`exclude_read` excepted) | allowed |
+| `wiki_dir/_schema.md` | allowed | **denied** (user edits only) |
+| `exclude_read` paths (under `wiki_dir`) | **denied** | **denied** |
+| `sources[]` directories | read directly by the ingest pipeline only | never written |
 
-### 2.3 인덱스
+**Boundary contract (0021 D1)**: `internal/storage` and every MCP tool operate on
+`wiki_dir` only. Sources are read by the ingest pipeline via plain `os` calls
+(`Lstat` to refuse symlinks, size cap applied), never through storage and never
+addressable via an MCP path.
 
-`wiki_list` (file_meta 캐시) + `wiki_search` (FTS5)가 담당. `_index.md` 없음.
+### 2.3 Index
 
-### 2.4 스키마 전달
+`wiki_list` (file_meta cache) + `wiki_search` (FTS5). No `_index.md`. The index
+contains wiki pages only.
 
-MCP 서버가 스키마 **요약**을 서버 instructions로 전달. 전문은 `wiki_read("<wiki_dir>/_schema.md")`로 조회한다. 기본 설정에서는 `wiki_read("_wiki/_schema.md")`.
+### 2.4 Schema delivery
+
+The MCP server passes a schema **summary** as server instructions; the full text
+is read with `wiki_read("_schema.md")`.
 
 ---
 
-## 3. 설정 파일
+## 3. Config file
 
-파일명: `.cogvault.yaml`, 위치: vault root
+Location: any path, passed via `--config`. Default: `~/.config/cogvault/config.yaml`.
 
-### 3.1 스키마
+### 3.1 Schema
 
 ```yaml
-wiki_dir: string        # 기본값: "_wiki"
-db_path: string         # 기본값: ".cogvault.db"
-exclude: string[]       # 스캔 + 인덱싱 제외. 기본값: [".obsidian", ".trash"]
-exclude_read: string[]  # 읽기 + 스캔 + 인덱싱 전부 제외. 기본값: []
-adapter: string         # 기본값: "obsidian". 허용: "obsidian", "markdown"
-consistency_interval: int  # 정합성 체크 최소 간격 (초). 기본값: 5
+wiki_dir: string        # absolute (after leading ~/ expansion). The sole storage root. Required.
+db_path: string         # absolute (after leading ~/ expansion). MUST be outside wiki_dir. Required.
+sources:                # external directories the ingest pipeline reads. May be empty.
+  - path: string        # absolute (after leading ~/ expansion)
+    types: [string]     # allowed extensions, lowercase, no leading dot (e.g. [pdf])
+llm:
+  backend: string       # default "claudecode". Only "claudecode" accepted in Phase 1.
+exclude: string[]       # scan + index exclusion, relative to wiki_dir. Default: [".obsidian", ".trash"]
+exclude_read: string[]  # read + scan + index exclusion, relative to wiki_dir. Default: []
+adapter: string         # default "obsidian". Allowed: "obsidian", "markdown".
+consistency_interval: int  # min seconds between consistency checks. Default: 5.
 ```
 
-### 3.2 `exclude`와 `exclude_read`의 관계
+### 3.2 Path handling
 
-**`exclude_read`는 `exclude`를 암묵적으로 포함.**
+- A leading `~/` (or an exact `~`) expands to `$HOME`. This applies to `wiki_dir`,
+  `db_path`, and every `sources[].path`.
+- A `~` anywhere else in a path (e.g. iCloud's `com~apple~CloudDocs`) is literal.
+- After expansion, `wiki_dir`, `db_path`, and `sources[].path` must be absolute.
+  This inverts the v1 rule (v1 required these to be vault-relative).
+- `exclude`/`exclude_read` remain wiki-root-relative (v1 rules retained: no `..`,
+  no absolute, no empty, no `"."`).
 
-- **스캔 + 인덱싱 제외** = `exclude` ∪ `exclude_read`
-- **읽기 제외** = `exclude_read`
-- **쓰기 제한** = `wiki_dir/` 외부 전체 + `wiki_dir/_schema.md`
+### 3.3 Validation
 
-### 3.3 경로 탐색
+Config validates path-string safety and policy only; filesystem state is enforced
+later (0001). Rejected:
 
-- `--vault` 지정 시: 해당 경로에서 탐색.
-- `--vault` 미지정 시: 현재 디렉토리. 없으면 에러. 상위 탐색 안 함.
+- `wiki_dir`, `db_path`, or any `sources[].path` not absolute after expansion.
+- A source that contains, is contained by, or equals `wiki_dir` (overlap).
+- `db_path` inside `wiki_dir`.
+- `db_path` that is a directory-like path.
+- `adapter` outside the allowed list; `llm.backend` other than `claudecode`.
+- Unknown YAML keys (`KnownFields(true)`) and multi-document YAML.
 
-### 3.4 검증
-
-- `wiki_dir`이 vault root 외부면 에러. `"."`(vault root 자체)도 거부.
-- `db_path`: 절대경로, `..` 포함, `"."`, 경로 구분자로 끝나는 값 거부.
-- `exclude`, `exclude_read`에 `..` 포함 시 에러. 절대경로, 빈 문자열, `"."` 거부.
-- `adapter`가 허용 목록 외면 에러.
-- 알 수 없는 설정 키가 있으면 에러 (오타 조기 차단).
+`wiki_dir`/`db_path` have no invented defaults: an empty value is a validation
+error, which drives the two-step `init` (§9.1).
 
 ---
 
-## 4. 에러 타입
+## 4. Error types
 
-| 에러 | 의미 |
+### 4.1 Storage/adapter sentinels (`internal/errors`)
+
+| Error | Meaning |
 |------|------|
-| `ErrNotFound` | 파일/경로 없음, 또는 디렉토리가 아닌 경로에 디렉토리 연산 |
-| `ErrPermission` | 접근 거부 (쓰기 보호, 읽기 제외) |
-| `ErrTraversal` | `..` 포함 경로 |
-| `ErrSymlink` | 심볼릭 링크 접근 거부 |
-| `ErrNotMarkdown` | `.md`가 아닌 파일에 대한 파싱 시도 |
+| `ErrNotFound` | path missing, or a directory op on a non-directory |
+| `ErrPermission` | access denied (write protection, read exclusion) |
+| `ErrTraversal` | path contains `..` or is absolute where relative is required |
+| `ErrSymlink` | symlink component in the path |
+| `ErrNotMarkdown` | parse attempted on a non-`.md` file |
+
+### 4.2 Ingest error classes (`internal/ingest` / `internal/llm`)
+
+Per-file failures are classified; the run always continues past them (§10.3).
+
+| Class | Examples | Attempt cost |
+|------|------|------|
+| transient | quota/rate limit, timeout, CLI transport, `error_during_execution` | **none** — retries on later runs |
+| permanent | malformed LLM output, schema-invalid page | consumes one attempt (bounded at 3) |
+| infra | storage write / index add / ledger write failure | **none** — local infra, not the file |
+
+`llm.ErrTransient` is the wrapped sentinel for the transient class.
 
 ---
 
 ## 5. Storage
 
-### 5.1 인터페이스
+Storage is rooted at the absolute `wiki_dir`. It never touches `sources[]`.
+
+### 5.1 Interface
 
 ```
 Read(path) → ([]byte, error)
 Write(path, data []byte) → error
 List(prefix) → ([]ListEntry, error)
 Exists(path) → (bool, error)
+Stat(path) → (size int64, mtime time.Time, error)
 ```
 
-### 5.2 경로 규칙
+### 5.2 Path rules
 
-- vault root 기준 **상대경로**.
-- 빈 경로 `""` → `ErrNotFound`.
-- 절대경로 또는 raw path의 `..` 컴포넌트 → `ErrTraversal`.
-- 경로 컴포넌트 중 심볼릭 링크 → `ErrSymlink`.
+- Paths are relative to `wiki_dir`.
+- Empty path `""` → `ErrNotFound`.
+- Absolute path or a `..` component → `ErrTraversal`.
+- Symlink component → `ErrSymlink`.
 
-### 5.3 Read
+### 5.3 Read / Stat
 
 - `exclude_read` → `ErrPermission`.
-- 파일 없음 → `ErrNotFound`.
+- Missing file → `ErrNotFound`.
+- `Stat` returns size and mtime for the consistency stat-gate (§6.9); same error
+  mapping as Read.
 
 ### 5.4 Write
 
-- `wiki_dir` 하위 아니면 `ErrPermission`.
-- `_schema.md` 경로면 `ErrPermission`.
-- 중간 디렉토리 **자동 생성**.
-- 기존 파일 **덮어쓰기**.
-- 인덱스 반영: eventual consistency (5.7).
+- The **whole `wiki_dir` root is writable** (no `wiki_dir/` sub-prefix check —
+  that was the vault-mode rule and is removed).
+- `_schema.md` → `ErrPermission`.
+- Intermediate directories auto-created; existing files overwritten.
+- Index reflection is eventual (§5.7).
 
 ### 5.5 List
 
-- `prefix`는 **디렉토리**여야 함. 파일 경로 → `ErrNotFound`.
-- `exclude_read` 디렉토리 자체 접근 → `ErrPermission`.
-- 직계 자식만 (비재귀). 디렉토리는 `/`로 끝남.
-- `exclude`, `exclude_read` 제외. 빈 디렉토리면 빈 배열.
+- `prefix` must be a directory; a file path → `ErrNotFound`.
+- Direct children only (non-recursive); directories end with `/`.
+- `exclude`/`exclude_read` filtered out.
 
 ### 5.6 Exists
 
-- `exclude_read` → 항상 `false`.
+- `exclude_read` → always `false`.
 
-### 5.7 일관성 모델
+### 5.7 Consistency model
 
-**Eventual consistency.** 쓰기↔인덱스 간 일시적 불일치 허용. 자동 탐지·복구 보장.
+Eventual consistency. Transient write↔index divergence is allowed; automatic
+detection and repair are guaranteed (bounded staleness, §6.9).
 
-### 5.8 동시성
+### 5.8 Concurrency
 
-- 동일 경로 Write 직렬화. last-write-wins.
-- Read↔Write 동시 가능.
+- Same-path writes serialized (single global mutex, 0006); last-write-wins.
+- Read↔Write concurrent.
 
 ---
 
 ## 6. Index
 
-### 6.1 인터페이스
+### 6.1 Interface
 
 ```
 Add(path, content string, meta map[string]string) → error
-Search(query string, limit int, scope string) → ([]Result, error)
+Search(query string, limit int) → ([]Result, error)
 Remove(path) → error
 Rebuild(storage, adapter) → error
 CheckConsistency(storage, adapter, force bool) → (added, removed, updated int, error)
 GetMeta(path) → (*FileMeta, error)
 ```
 
-`CheckConsistency`는 Storage와 Adapter에 의존. 신규 파일 시 `Adapter.Parse`로 title, type 추출.
-`force=true`: 간격 무시, 즉시 실행.
-`GetMeta`: file_meta 단건 조회. 미존재 시 `ErrNotFound`.
+`Search` has **no `scope` parameter** (removed in v2 — 0021 D5).
 
-### 6.2 Result
+### 6.2 Result / FileMeta
 
 ```
-Result { Path, Title, Type, Snippet string; Score float64 }
-```
-
-### 6.3 FileMeta
-
-```
+Result   { Path, Title, Type, Snippet string; Score float64 }
 FileMeta { Path, Title, Type, ContentHash, IndexedAt string }
 ```
 
-### 6.4 데이터 테이블
+### 6.3 Data tables
 
 ```
-wiki_fts(path, title, content, tags)
-file_meta(path PK, title, type, content_hash, indexed_at)
+wiki_fts(path, title, content, tags)                          -- FTS5, trigram
+file_meta(path PK, title, type, content_hash, size, mtime, indexed_at)
 ```
 
-### 6.5 인덱싱 범위
+`file_meta` gains `size`/`mtime` for the stat-gate (§6.9).
 
-vault 전체 `.md`. `exclude` + `exclude_read` 제외. `wiki_dir/` 포함.
+### 6.4 Schema versioning
 
-### 6.6 검색 동작
+`PRAGMA user_version = 2`. On open, a DB carrying tables at `user_version < 2` is
+dropped and recreated at v2 (v2 uses a fresh DB at a new absolute `db_path`, so no
+data migration exists). Every connection is opened with `busy_timeout=5000` so
+multi-process contention surfaces as a wait, not "database is locked".
 
-`limit` 기본 10, 최대 100. 스코어 내림차순. 빈 결과 = 빈 배열.
+### 6.5 Index coverage
 
-### 6.7 검색 범위 (scope)
+All wiki `.md` under `wiki_dir`, minus `exclude`/`exclude_read`. Sources are not
+indexed (they are mostly binary; their digested pages carry the text).
 
-| 값 | 대상 |
-|----|------|
-| `"all"` (기본) | 전체 |
-| `"wiki"` | `wiki_dir` 하위만 |
-| `"vault"` | `wiki_dir` 하위 제외 |
+### 6.6 Search behavior
 
-`wiki_dir` 설정값 참조.
+`limit` default 10, max 100. Descending score. Empty result = empty array.
+Korean supported, including queries ≤ 2 characters (LIKE fallback). Method is
+internal (FTS5 MATCH for ≥ 3 chars with trigram; LIKE otherwise).
 
-### 6.8 한국어 검색
+### 6.7 Consistency (bounded staleness)
 
-한국어 지원 필수. 2글자 이하도 결과 반환. 내부 방식 자유. 호출 측에 투명.
-
-### 6.9 정합성 (bounded staleness)
-
-- `wiki_list`, `wiki_search` 반환 전 정합성 보장.
-- `force=false`: `consistency_interval` (기본 5초) 이내면 스킵.
-- `force=true`: 즉시 실행.
-- 보장: 삭제 파일 제거, 변경 파일 재인덱싱, 신규 파일 추가. exclude 규칙 준수.
-- 성능: 대형 vault에서 체감 없을 것.
-
-### 6.10 Add meta
-
-| 키 | 용도 |
-|----|------|
-| `title` | 제목 |
-| `type` | 페이지 타입 |
-| `tags` | 태그 (쉼표 구분) |
-
-### 6.11 동시성
-
-동시 읽기 허용. 쓰기 직렬화.
+- `wiki_list`/`wiki_search` guarantee consistency before returning.
+- `force=false`: skipped if within `consistency_interval` (default 5s).
+- `force=true`: immediate.
+- Guarantees: deleted files removed, changed files re-indexed, new files added;
+  `exclude` rules honored.
+- **Stat-gate**: a file's content is re-read and re-hashed only when its size or
+  mtime differs from the stored `file_meta` row (guards against forcing iCloud to
+  re-download evicted files on every check). Dataless/eviction read errors are
+  per-file warnings, not fatal.
 
 ---
 
 ## 7. Adapter
 
-### 7.1 인터페이스
+Unchanged from v1 (parses wiki pages under `wiki_dir`). `ResolveLink` still not
+provided.
+
+### 7.1 Interface
 
 ```
 Name() → string
@@ -272,341 +300,312 @@ Scan(root, exclude []string, fn func(path string) error) → error
 Parse(root, relPath string, includeContent bool) → (*Source, error)
 ```
 
-MVP에서 `ResolveLink`는 미제공. v0.3에서 Lint와 함께 도입.
-
 ### 7.2 Source
 
 ```
 Source {
-    Path           string
-    Title          string               # frontmatter title > 첫 # heading > 파일명
-    Content        string               # includeContent=true일 때만 포함. 아니면 필드 생략.
-    Frontmatter    map[string]any
-    Links          []string             # 대괄호 미포함 target 문자열
-    Attachments    []string             # 대괄호 미포함 파일명 문자열
-    Tags           []string
+    Path, Title string
+    Content string               # only when includeContent=true
+    Frontmatter map[string]any
+    Links []string               # bracket-free targets
+    Attachments []string         # bracket-free filenames
+    Tags []string
     DataviewFields map[string]string
-    Aliases        []string
-    SourceType     string               # "obsidian" | "markdown"
+    Aliases []string
+    SourceType string            # "obsidian" | "markdown"
 }
 ```
 
-### 7.3 Scan
+### 7.3 Parsing rules
 
-- 콜백 패턴: `fn(path)`.
-- `fn` 에러 시 즉시 중단.
-- `exclude` 건너뜀. `.md`만. 재귀.
-- 파일 경로 전달 시 `ErrNotFound`.
-
-### 7.4 Parse
-
-- `.md`만. 비-`.md` → `ErrNotMarkdown`.
-- frontmatter: 경량 라이브러리 사용. 파싱 실패 시 빈 frontmatter + 전체를 본문으로.
-- Title: frontmatter `title` > 첫 `#` heading > 파일명.
-
-### 7.5 Wikilink 파싱
-
-**추출 규칙** — Links/Attachments에는 **대괄호 없는 target만** 저장:
-
-| 문법 | Links/Attachments에 저장되는 값 |
-|------|-------------------------------|
-| `[[target]]` | Links: `"target"` |
-| `[[target\|display]]` | Links: `"target"` |
-| `[[target#heading]]` | Links: `"target"` |
-| `![[file]]` | Attachments: `"file"` |
-| `![[file\|size]]` | Attachments: `"file"` |
-
-코드블록 내 wikilink: MVP에서 무시 안 함 (false positive 허용).
-
-### 7.6 Markdown 어댑터 (fallback)
-
-Obsidian 문법 미지원. 표준 마크다운 링크, frontmatter만 파싱.
+- `.md` only; non-`.md` → `ErrNotMarkdown`.
+- Frontmatter via `adrg/frontmatter`; on failure, empty frontmatter + whole body.
+- Title: frontmatter `title` > first `#` heading > filename.
+- Wikilinks stored bracket-free: `[[t]]`, `[[t|d]]`, `[[t#h]]` → Links `"t"`;
+  `![[f]]`, `![[f|s]]` → Attachments `"f"`. Code-block wikilinks not excluded
+  (false positives allowed in Phase 1).
 
 ---
 
-## 8. MCP 도구
+## 8. MCP tools
 
-### 8.1 공통 규칙
+### 8.1 Common rules
 
-- 전송: stdio.
-- 서버명: `cogvault`, 버전: `0.1.0`.
-- path: vault root 기준 상대경로.
-- 스키마 요약: 서버 instructions 자동 전달.
-- 에러 매핑:
+- Transport: stdio. Server name `cogvault`.
+- `path`: relative to `wiki_dir`.
+- Sentinel → message mapping:
 
-| sentinel error | MCP 메시지 |
+| sentinel | message |
 |----------------|-----------|
 | `ErrNotFound` | `"not found: {path}"` |
 | `ErrPermission` | `"access denied: {path}"` |
 | `ErrTraversal` | `"invalid path: {path}"` |
 | `ErrNotMarkdown` | `"not a markdown file: {path}"` |
-| 기타 | `"internal error: {message}"` |
+| other | `"internal error: {message}"` |
 
 ### 8.2 wiki_read
 
-| 파라미터 | `path: string` (필수) |
-|---------|---------------------|
-| 반환 | 파일 내용 (텍스트) |
-| 에러 | `ErrNotFound`, `ErrPermission`, `ErrTraversal`, `ErrSymlink` |
+`path: string` (required) → file content. Errors: `ErrNotFound`, `ErrPermission`,
+`ErrTraversal`, `ErrSymlink`.
 
 ### 8.3 wiki_write
 
-| 파라미터 | `path: string` (필수), `content: string` (필수) |
-|---------|-----------------------------------------------|
-| 반환 | `{ "status": "written", "path": "...", "bytes": N, "warnings": [] }` |
-| 에러 | `ErrPermission`, `ErrTraversal`, `ErrSymlink` |
-
-- `bytes` = Go `len(content)`.
-- `warnings`: 문자열 배열. MVP에서 항상 빈 배열.
-- 부수 효과: 인덱스 반영 (eventual consistency).
+`path: string`, `content: string` (required) → `{status:"written", path, bytes, warnings:[]}`.
+`bytes` = `len(content)`; `warnings` always empty in Phase 1. Side effect:
+best-effort index reflection. Errors: `ErrPermission`, `ErrTraversal`, `ErrSymlink`.
 
 ### 8.4 wiki_list
 
-디렉토리 브라우징. 비재귀. 메타데이터.
-
-| 파라미터 | `prefix: string` (선택, 기본 `""`) |
-|---------|----------------------------------|
-| 반환 | `[{ "path", "name", "is_dir", "title", "type" }]` |
-| 에러 | `ErrNotFound` (파일 경로 또는 없는 디렉토리), `ErrTraversal` |
-
-정합성: bounded staleness (6.9). title/type: `GetMeta` 캐시.
+`prefix: string` (optional, default `""`) → `[{path, name, is_dir, title, type}]`.
+Non-recursive; title/type from the `GetMeta` cache. Errors: `ErrNotFound`,
+`ErrTraversal`.
 
 ### 8.5 wiki_search
 
-| 파라미터 | `query: string` (필수), `limit: int` (선택, 기본 10), `scope: string` (선택, 기본 `"all"`) |
-|---------|----------------------------------------------------------------------------------------|
-| 반환 | `[{ "path", "title", "type", "snippet", "score" }]` |
-| 에러 | 빈 결과는 에러 아님 |
+`query: string` (required), `limit: int` (optional, default 10) →
+`[{path, title, type, snippet, score}]`. Empty result is not an error.
 
-정합성: bounded staleness (6.9). scope: `wiki_dir` 참조 (6.7).
-- `snippet`: 일치 지점 주변의 짧은 발췌. 추출할 수 없으면 빈 문자열.
-- `score`: 정렬용 `float64`. 같은 응답 안에서의 상대 순서만 의미 있으며, 검색 방식(FTS5/LIKE fallback) 간 절대값 비교는 보장하지 않음.
+- **No `scope` parameter** (removed in v2). The input schema does not advertise
+  `scope`. Note: mcp-go does not set `additionalProperties:false`, so a stray
+  `scope` argument is silently **ignored**, not schema-rejected — the contract is
+  simply that `scope` no longer exists.
+- `snippet`: short excerpt around the match, or empty.
+- `score`: sort-only `float64`; only relative order within one response is
+  meaningful.
 
 ### 8.6 wiki_scan
 
-vault `.md` 경로 목록. 재귀. wiki_list와의 차이: 재귀 + 경로만.
-
-| 파라미터 | `dir: string` (선택, 기본 `""`) |
-|---------|-------------------------------|
-| 반환 | 경로 문자열 배열 |
-| 에러 | `ErrNotFound` (파일 경로 또는 없는 디렉토리) |
+`dir: string` (optional, default `""`) → array of `.md` paths under `wiki_dir`
+(recursive). Errors: `ErrNotFound`.
 
 ### 8.7 wiki_parse
 
-`.md` 메타데이터. 선택적 본문.
-
-| 파라미터 | `path: string` (필수), `include_content: bool` (선택, 기본 `false`) |
-|---------|------------------------------------------------------------------|
-| 반환 | Source (JSON) |
-| 에러 | `ErrNotFound`, `ErrPermission`, `ErrNotMarkdown` |
-
-반환 예 (`include_content=false`):
-
-```json
-{
-  "path": "notes/idea.md",
-  "title": "새로운 아이디어",
-  "frontmatter": {"tags": ["project", "ai"]},
-  "links": ["related-note", "another"],
-  "attachments": ["diagram.png"],
-  "tags": ["project", "ai"],
-  "dataview_fields": {"status": "draft"},
-  "aliases": ["idea-v2"],
-  "source_type": "obsidian"
-}
-```
-
-`include_content=true`면 `"content": "..."` 필드 추가.
+`path: string` (required), `include_content: bool` (optional, default `false`) →
+Source (JSON). Errors: `ErrNotFound`, `ErrPermission`, `ErrNotMarkdown`.
 
 ---
 
 ## 9. CLI
 
-### 9.1 init
+Every command takes `--config <path>` (default `~/.config/cogvault/config.yaml`).
+launchd invokes `cogvault ingest --config <path>` explicitly (no useful cwd).
+
+### 9.1 init (two-step)
 
 ```
-cogvault init [--vault <경로>]
+cogvault init [--config <path>]
 ```
 
-1. 설정 파일 — 없으면 생성, 있으면 스킵.
-2. `wiki_dir/` — 없으면 생성, 있으면 스킵.
-3. `wiki_dir/_schema.md` — 없으면 복사, 있으면 스킵.
-4. DB — 없으면 생성 + 전체 인덱싱, 있으면 `CheckConsistency(force=true)`.
+Because `wiki_dir`/`db_path` have no defaults, `init` is two-step:
 
-멱등. 기존 파일 미덮어쓰기.
+1. **First run** (no config file): scaffold a template config at the config path
+   (creating the parent dir), print `created <path>; edit wiki_dir/db_path/sources,
+   then re-run cogvault init`, and exit 0. If the file already existed but fails
+   validation, return the error instead.
+2. **Second run** (valid config): create `wiki_dir`, copy `_schema.md`, create the
+   DB parent dir and DB; new DB → full index (Rebuild), existing DB →
+   `CheckConsistency(force=true)`.
+
+Idempotent; existing files are not overwritten.
 
 ### 9.2 search
 
 ```
-cogvault search [--vault <경로>] [--scope all|wiki|vault] <검색어>
+cogvault search [--config <path>] <terms>
 ```
+
+No `--scope` flag (removed in v2).
 
 ### 9.3 serve
 
 ```
-cogvault serve [--vault <경로>]
+cogvault serve [--config <path>]
 ```
 
-### 9.4 서버 생명주기
+Init failure → exit 1 + stderr. Runtime tool errors are returned to the client;
+the server keeps running.
 
-초기화 실패: exit 1 + stderr. 런타임 이상: 도구 에러 반환, 서버 계속.
+### 9.4 ingest
 
----
-
-## 10. _schema.md
-
-읽기 전용. 서버가 요약을 instructions로 전달. 강제 타입: `source`만. 나머지 자유.
-
-### 기본 내용
-
-```markdown
-# Wiki Schema
-
-## 규칙
-- 설정된 wiki 디렉토리 외부 파일은 절대 수정하지 않는다.
-- 모든 위키 페이지는 YAML frontmatter를 포함한다.
-- 출처 없는 주장은 [TODO: source needed]로 표기한다.
-- 소스 원문을 그대로 복사하지 않고 요약·합성한다.
-- 모든 사실에는 소스 페이지 [[링크]]를 포함한다.
-- LLM이 추측한 내용은 [UNCERTAIN]로 명시한다.
-
-## 사용 가능한 도구
-- wiki_read: 파일 읽기 (일부 디렉토리는 접근 제한됨)
-- wiki_write: wiki 디렉토리 내 파일 쓰기 (덮어쓰기, _schema.md 제외)
-- wiki_list: 디렉토리 브라우징 (비재귀, 경로·제목·타입 포함)
-- wiki_search: 전문 검색 (scope: all, wiki, vault)
-- wiki_scan: vault 마크다운 파일 경로 목록 (재귀)
-- wiki_parse: 노트 메타데이터 파싱 (include_content로 본문 포함 가능)
-
-## 위키 구조 파악
-1. wiki_list("<wiki_dir>/")로 최상위 구조 확인 (기본값 예: `"_wiki/"`)
-2. wiki_list("<wiki_dir>/entities/") 등으로 하위 탐색
-3. wiki_search로 키워드 기반 탐색
-
-## 페이지 타입
-
-### source (필수 스키마)
-- 필수 frontmatter: type: source, source_path, ingested_at
-- 필수 섹션: ## 요약, ## 핵심 포인트, ## 관련 페이지
-
-### 자유 타입 (선택)
-entity, concept, synthesis 등 자유롭게 생성 가능. type 필드 포함 권장.
-
-## Ingest 워크플로우
-1. wiki_scan으로 vault 노트 목록 확인
-2. wiki_parse(path, include_content=true)로 대상 노트 로드
-3. 내용 분석, 핵심 정보 추출
-4. wiki_search(query, scope="wiki")로 기존 관련 페이지 확인
-5. wiki_write로 sources/ 요약 페이지 생성
-6. 필요 시 wiki_read로 관련 페이지 로드 후 wiki_write로 갱신
+```
+cogvault ingest [--config <path>] [--dry-run] [--limit N] [--scheduled]
 ```
 
----
-
-## 11. MVP 검증
-
-**성공 기준**: 1주간 매일 사용, 위키가 유용했는가.
-
-- [ ] Day 1: init → 노트 3개 인제스트
-- [ ] Day 2~5: 매일 1개 이상 추가
-- [ ] Day 3: search로 이전 인제스트 활용
-- [ ] Day 7: 위키 우선 참조 습관 형성
-
-| 실패 신호 | 피벗 |
-|-----------|------|
-| 검색 무용 | 토크나이저 전환 |
-| 마찰 높음 | CLI 단축, 워크플로우 단순화 |
-| 스키마 미준수 | 스키마 단순화, 도구 description 보강 |
-| 품질 낮음 | v0.2 컴파일러 조기 착수 |
+- `--dry-run`: list what would be digested; write nothing (no LLM/store/index/
+  ledger mutation).
+- `--limit N`: process at most N files (backlog batching / quota control).
+- `--scheduled`: set the ledger run origin to `scheduled` (used by the launchd
+  job); otherwise the origin is `interactive`.
+- Requires `claude` on PATH; if absent: `claude CLI not found in PATH; install
+  Claude Code or add it to PATH`.
+- Prints the per-run report (§10.4) to stdout.
+- **Exit codes**: nonzero only on a run-level failure (e.g. lock contention:
+  `ingest already running (lock held)`, or a ctx-cancelled run). Per-file
+  failures inside a completed run do **not** fail the run (exit 0).
 
 ---
 
-## 12. 의존성
+## 10. Ingest pipeline & ledger
+
+### 10.1 Flow (per file)
+
+```
+scan source dir (top level only, Lstat: skip dirs/symlinks)
+  → type filter (lowercase ext vs sources[].types)
+  → size cap (32MB; oversized files reported, not persisted)
+  → settle-window gate (skip files modified within 2m — mid-download guard)
+  → sha256 content hash → ledger lookup (skip if already processed)
+  → llm.Digest(source path, schema) via claude --print
+  → validate page frontmatter from bytes (non-empty map + title)
+  → collision-aware page path under sources/
+  → storage.Write → index.Add → ledger: success
+(any failure → ledger: failed + classified error; the run continues)
+```
+
+### 10.2 Page identity
+
+One source file path → one wiki page `sources/<slug>.md`, where `<slug>` is the
+source base name with its extension stripped. If that page path is already mapped
+to a different source path, the page becomes `sources/<slug>-<hash8>.md`
+(`hash8` = first 8 hex of sha256 of the absolute source path). Re-digestion of the
+same source path with new content overwrites its page and marks the prior ledger
+row `superseded`.
+
+### 10.3 Failure isolation
+
+Per-file failures are classified (§4.2) and never abort the run. Permanent
+failures increment `attempts`, bounded at 3; at the bound the file is skipped in
+later runs (reported as exhausted). Transient and infra failures leave `attempts`
+unchanged so the file retries indefinitely.
+
+### 10.4 Report
+
+A per-run report with counts (digested, failed, skipped, deferred, unchanged) and
+a per-file list (action ∈ `digested | would-digest | failed | skipped | deferred |
+exhausted`, plus an error string). Oversized/type-excluded files appear in the
+report but not the ledger. Unchanged (already-processed) files are counted but
+kept out of the per-file list for readable backlog reports.
+
+### 10.5 Concurrency
+
+A single-instance exclusive `flock` on `<dir(db_path)>/ingest.lock`, acquired for
+the duration of a run, prevents scheduled and manual runs from overlapping; a
+second run fails fast with the already-running error. Every DB opener (ingest
+ledger + index) sets `busy_timeout` so cross-process writes wait rather than fail.
+
+### 10.6 Ledger (`ingest_ledger`)
+
+```
+ingest_ledger(
+  source_path TEXT, content_hash TEXT, source_dir TEXT,
+  digested_at TEXT, wiki_page TEXT,
+  status TEXT,            -- success | failed | superseded
+  attempts INTEGER, last_error TEXT,
+  run_origin TEXT,        -- scheduled | interactive
+  PRIMARY KEY (source_path, content_hash)
+)
+```
+
+Owned by `internal/ingest` through its own DB connection to `db_path` (WAL +
+busy_timeout make the second connection safe). Type-excluded/oversized files are
+reported per run, not persisted. Source originals are never moved or deleted.
+
+### 10.7 Behavior constants (not config)
+
+LLM timeout 5m, max permanent-failure attempts 3, max file size 32MB, settle
+window 2m. Each is promoted to a config key only on demonstrated need.
+
+---
+
+## 11. _schema.md
+
+Read-only. The server passes a summary as instructions; the full text is read via
+`wiki_read("_schema.md")`. Enforced type: `source` only; other types are free-form.
+The default schema (embedded via `go:embed`) defines source-page frontmatter
+(`type: source`, `source_path`, `ingested_at`) and required sections, plus
+provenance rules (`[TODO: source needed]`, `[UNCERTAIN]`). The ingest digestion
+prompt embeds these rules so generated pages conform.
+
+---
+
+## 12. Validation (v2)
+
+Success criteria (full detail in the design spec, "Success Criteria"):
+
+1. **Backlog digested** — ≥90% of the corpus PDFs have a `success` ledger row and
+   an indexed page.
+2. **Zero-touch inflow** — a newly dropped PDF gains a page with no manual command
+   (ledger row with `run_origin = scheduled`).
+3. **Re-find** — ≥4/5 real "where did I see that" attempts answered from the wiki
+   over a 1-week validation.
+4. **Zero per-item instructions** — validation-week ledger rows are all
+   `scheduled`, none `interactive`.
+5. **Tests pass** — `go test -race ./...`.
+
+---
+
+## 13. Dependencies
 
 ```
 modernc.org/sqlite              # Pure Go SQLite
-github.com/mark3labs/mcp-go     # MCP SDK — 버전 고정
+github.com/mark3labs/mcp-go     # MCP SDK (v0.47.0)
 github.com/spf13/cobra          # CLI
 gopkg.in/yaml.v3                # YAML
-github.com/adrg/frontmatter     # frontmatter 파싱
+github.com/adrg/frontmatter     # frontmatter parsing
+golang.org/x/sys                # unix.Flock for the ingest lock
 ```
+
+The `claudecode` backend shells out to the `claude` CLI (Claude Code); it is a
+runtime dependency of `cogvault ingest`, not a Go module.
 
 ---
 
-## 부록 A: 테스트 요건
+## Appendix A: Test requirements (v2 highlights)
+
+### Config
+- Absolute `wiki_dir`/`db_path` accepted; leading `~/` expands; `~` mid-path
+  literal. Relative after expansion → error. Source overlapping `wiki_dir` (either
+  direction / equal) → error. `db_path` inside `wiki_dir` → error. Unknown key →
+  error. `llm.backend != claudecode` → error.
 
 ### Storage
-- path traversal → `ErrTraversal`.
-- 심볼릭 링크 → `ErrSymlink`.
-- `wiki_dir/` 외부 쓰기 → `ErrPermission`.
-- `_schema.md` 쓰기 → `ErrPermission`.
-- `exclude_read` 읽기 → `ErrPermission`.
-- `exclude_read` Exists → `false`.
-- 미존재 파일 Read → `ErrNotFound`.
-- Write 중간 디렉토리 자동 생성.
-- 동시 Write 데이터 손상 없음.
+- Whole wiki root writable; `_schema.md` write → `ErrPermission`. `..`/absolute →
+  `ErrTraversal`; symlink → `ErrSymlink`; `exclude_read` read → `ErrPermission`,
+  Exists → false. `Stat` returns size/mtime.
 
 ### Index
-- Add 후 Search 가능.
-- 2글자 이하 한국어 검색어 결과 반환.
-- exclude/exclude_read 파일 검색 미포함.
-- CheckConsistency(force=true) 후 삭제 파일 미포함.
-- scope "wiki"/"vault" 필터.
-- bounded staleness: force=false 시 interval 이내 스킵.
-- GetMeta 정상 + 미존재 시 ErrNotFound.
+- Add→Search round-trip incl. Korean ≤2-char queries. `Search(query, limit)` has
+  no scope. `user_version < 2` DB dropped/recreated. Stat-gate skips re-hash when
+  size+mtime unchanged. Per-file Read error surfaces as a joined error while other
+  files index.
 
-### Adapter (Obsidian)
-- `[[note]]`, `[[note|alias]]`, `[[note#heading]]` → Links에 `"note"`.
-- `![[file]]`, `![[file|size]]` → Attachments에 `"file"`.
-- 깨진 frontmatter → 빈 frontmatter + 정상 처리.
-- 한글 파일명/경로.
-- 바이너리 파일 Scan 건너뜀.
-- 비-`.md` Parse → `ErrNotMarkdown`.
-- 파일 경로 Scan → `ErrNotFound`.
+### LLM
+- Fake `claude` in `testdata/bin` records argv/stdin, returns canned JSON.
+  Success; timeout → `ErrTransient`; rate-limit/nonzero-exit → `ErrTransient`;
+  malformed JSON → permanent; missing binary → transport (transient).
 
-### MCP 도구
-- 정상 round-trip.
-- sentinel error 매핑.
-- write 후 search 가능.
-- list의 title/type = GetMeta 일치.
-- parse include_content 동작.
-- search scope 필터.
-- list/scan에 파일 경로 → ErrNotFound.
-- parse에 비-.md → ErrNotMarkdown.
+### Ingest
+- Two files → pages + index rows + `success` rows. Second run digests nothing
+  (hash dedup). Settle-window deferral. Content change → old row `superseded`.
+  Slug collision → `-<hash8>` page. Oversized/type-excluded reported, not
+  persisted. `--limit 1` processes one. Dry-run writes nothing. Transient → row
+  `failed`, attempts 0. Permanent → attempts++, exhausted at 3. Unparsable page →
+  permanent, no file written. Infra write failure → spares attempts. Second Runner
+  holding the lock → fast already-running error. Mid-run ctx cancel → partial
+  report, lock released.
+
+### MCP
+- Round-trip; sentinel mapping; write-then-search; list title/type = GetMeta;
+  parse include_content; `wiki_search` schema has no `scope`.
 
 ### CLI
-- init 멱등성.
-- init 시 force=true.
-- --vault 미지정 시 현재 디렉토리, 설정 없으면 에러.
-- serve 초기화 실패 시 exit 1.
+- `init` two-step (first run scaffolds + guidance; second run builds wiki/schema/
+  db); idempotent. Missing config → error naming the path. `ingest --dry-run`
+  lists pending; lock held → nonzero already-running; missing `claude` → clear
+  error. `serve` init failure → exit 1.
 
----
-
-## 부록 B: 테스트 fixture
-
-```
-testdata/fixtures/
-├── basic/                      # 최소 동작
-│   ├── .cogvault.yaml
-│   ├── _wiki/_schema.md
-│   └── notes/hello.md
-├── obsidian/                   # 파싱
-│   ├── same-name/{a,b}/note.md
-│   ├── aliases.md
-│   ├── dataview.md
-│   ├── embed.md
-│   ├── heading-link.md
-│   ├── korean-path/한글노트.md
-│   └── code-block.md          # v0.2 대비
-├── edge/                       # 엣지 케이스
-│   ├── broken-frontmatter.md
-│   ├── utf8-bom.md
-│   ├── empty.md
-│   ├── no-frontmatter.md
-│   └── binary.png
-├── security/                   # 보안
-│   ├── traversal/
-│   └── private/secret.md
-└── real/                       # 실제 vault 서브셋
-    └── (구현 전 준비)
-```
+### Integration (U9)
+- Backlog run → N pages/rows/`success`. Incremental run digests only the new file
+  with `run_origin` from `--scheduled`. Ratelimit on one file → that file `failed`
+  attempts 0, others succeed, exit 0. Concurrent serve+ingest → no "database is
+  locked" (busy_timeout effective).
