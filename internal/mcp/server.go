@@ -96,7 +96,7 @@ func wikiScanTool() mcp.Tool {
 func wikiParseTool() mcp.Tool {
 	return mcp.NewTool("wiki_parse",
 		mcp.WithDescription("Parse a markdown file and extract metadata: title, frontmatter, links, tags, aliases, etc."),
-		mcp.WithString("path", mcp.Required(), mcp.Description("Vault root-relative .md file path")),
+		mcp.WithString("path", mcp.Required(), mcp.Description("Wiki root-relative .md file path")),
 		mcp.WithBoolean("include_content", mcp.Description("Include full file content in response (default: false)")),
 	)
 }
