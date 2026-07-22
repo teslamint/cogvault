@@ -2,3 +2,6 @@
 .entirecontext/
 .codex/
 /cogvault
+
+# release-loop local state
+.release-loop/
