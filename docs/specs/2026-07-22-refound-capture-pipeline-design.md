@@ -99,10 +99,10 @@ sources[].path ──scan──▶ stability gate ──▶ content hash ──n
 CLI:
 
 ```
-cogvault ingest [--config <path>] [--dry-run] [--limit N] [--source <dir>]
+cogvault ingest [--config <path>] [--dry-run] [--limit N]
 ```
 
-`--dry-run` lists what would be digested; `--limit` bounds a run (backlog batching / quota control); `--source` restricts to one configured source. Exit code is nonzero only on run-level failure, not per-file failures (those are in the report and ledger).
+`--dry-run` lists what would be digested; `--limit` bounds a run (backlog batching / quota control). A `--source` filter is deliberately omitted (YAGNI: Phase 1 has one source; add it with the phone-capture phase). Exit code is nonzero only on run-level failure, not per-file failures (those are in the report and ledger).
 
 Config (v2 standalone mode, exact key names finalized in planning):
 
@@ -111,7 +111,7 @@ wiki_dir: /Users/…/Mobile Documents/com~apple~CloudDocs/cogvault-wiki  # absol
 db_path: ~/.local/state/cogvault/cogvault.db                           # absolute, outside synced folder
 sources:
   - path: ~/Downloads/_Articles
-    types: [pdf, md, txt]
+    types: [pdf]        # Phase 1 digests PDFs only (the real corpus); the filter itself is needed to skip e.g. .webp
 llm:
   backend: claudecode          # interface admits future: local
   timeout: 300s
