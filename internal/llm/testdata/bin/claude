@@ -1,17 +1,34 @@
 #!/bin/sh
 # Fake `claude` CLI for internal/llm tests. Behavior selected by CLAUDE_FAKE_MODE.
 # Records argv and stdin to files named by CLAUDE_FAKE_ARGV_FILE / CLAUDE_FAKE_STDIN_FILE.
+#
+# Optional per-file override: CLAUDE_FAKE_MODE_MATCH="<substring>=<mode>". When set
+# and the stdin prompt contains <substring>, that <mode> is used instead of
+# CLAUDE_FAKE_MODE. The prompt carries the absolute source path, so a distinctive
+# filename substring selects a single file — letting one run mix outcomes across
+# files without disturbing CLAUDE_FAKE_MODE for the rest.
 
 if [ -n "$CLAUDE_FAKE_ARGV_FILE" ]; then
 	printf '%s' "$*" >"$CLAUDE_FAKE_ARGV_FILE"
 fi
+
+stdin=$(cat)
 if [ -n "$CLAUDE_FAKE_STDIN_FILE" ]; then
-	cat >"$CLAUDE_FAKE_STDIN_FILE"
-else
-	cat >/dev/null
+	printf '%s' "$stdin" >"$CLAUDE_FAKE_STDIN_FILE"
 fi
 
-case "$CLAUDE_FAKE_MODE" in
+mode="$CLAUDE_FAKE_MODE"
+if [ -n "$CLAUDE_FAKE_MODE_MATCH" ]; then
+	match_sub=${CLAUDE_FAKE_MODE_MATCH%%=*}
+	match_mode=${CLAUDE_FAKE_MODE_MATCH#*=}
+	case "$stdin" in
+	*"$match_sub"*)
+		mode="$match_mode"
+		;;
+	esac
+fi
+
+case "$mode" in
 ok)
 	printf '%s' '[{"type":"system","subtype":"init"},{"type":"result","subtype":"success","is_error":false,"result":"---\ntitle: Test Page\ntype: source\noriginal: notes/x.pdf\n---\n\n# Test Page\n\nBody text."}]'
 	;;
@@ -34,7 +51,7 @@ sleep)
 	sleep 10
 	;;
 *)
-	printf 'fake claude: unknown mode %s\n' "$CLAUDE_FAKE_MODE" >&2
+	printf 'fake claude: unknown mode %s\n' "$mode" >&2
 	exit 2
 	;;
 esac

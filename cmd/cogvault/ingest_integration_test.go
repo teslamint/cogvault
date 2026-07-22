@@ -217,31 +217,95 @@ func TestE2EIncrementalRun(t *testing.T) {
 	}
 }
 
-func TestE2ERateLimitFailure(t *testing.T) {
-	// Covers S2 (per-file failure isolation).
+func TestE2EMixedFailureIsolation(t *testing.T) {
+	// Covers S2 (per-file failure isolation): in ONE run, a single file fails
+	// (rate limit → transient, attempts 0) while the others succeed and the run
+	// still exits 0. A follow-up run retries the failed file successfully.
+	//
+	// CLAUDE_FAKE_MODE is run-global, so the fake CLI's per-file override
+	// (CLAUDE_FAKE_MODE_MATCH="<substring>=<mode>") selects ratelimit for the one
+	// file whose prompt carries the matching source path.
 	fakeClaudeOnPath(t)
-	t.Setenv("CLAUDE_FAKE_MODE", "ratelimit")
-	configPath, srcDir, _, dbPath := setupIngestVault(t)
+	t.Setenv("CLAUDE_FAKE_MODE", "ok")
+	t.Setenv("CLAUDE_FAKE_MODE_MATCH", "bravo.pdf=ratelimit")
+	configPath, srcDir, wikiDir, dbPath := setupIngestVault(t)
 
-	writeAgedSource(t, srcDir, "busy.pdf", "content that hits rate limit")
+	for _, n := range []string{"alpha.pdf", "bravo.pdf", "charlie.pdf"} {
+		writeAgedSource(t, srcDir, n, "content of "+n)
+	}
 
 	stdout, _, err := executeCommand("ingest", "--config", configPath)
 	if err != nil {
 		t.Fatalf("ingest should exit 0 despite per-file failure: %v", err)
 	}
+	if !strings.Contains(stdout, "digested=2") {
+		t.Errorf("expected digested=2 in report, got: %q", stdout)
+	}
 	if !strings.Contains(stdout, "failed=1") {
 		t.Errorf("expected failed=1 in report, got: %q", stdout)
 	}
 
+	// Succeeding files produced pages; the failed file did not.
+	for _, base := range []string{"alpha", "charlie"} {
+		if _, err := os.Stat(filepath.Join(wikiDir, "sources", base+".md")); err != nil {
+			t.Errorf("expected page for %s: %v", base, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(wikiDir, "sources", "bravo.md")); !os.IsNotExist(err) {
+		t.Errorf("expected no page for failed bravo, stat err: %v", err)
+	}
+
+	bravoPath := filepath.Join(srcDir, "bravo.pdf")
 	rows := readLedger(t, dbPath)
-	if len(rows) != 1 {
-		t.Fatalf("expected 1 ledger row, got %d", len(rows))
+	if len(rows) != 3 {
+		t.Fatalf("expected 3 ledger rows, got %d", len(rows))
 	}
-	if rows[0].status != "failed" {
-		t.Errorf("expected status failed, got %s", rows[0].status)
+	var success int
+	for _, r := range rows {
+		if r.sourcePath == bravoPath {
+			if r.status != "failed" {
+				t.Errorf("expected bravo status failed, got %s", r.status)
+			}
+			if r.attempts != 0 {
+				t.Errorf("expected attempts=0 for transient failure, got %d", r.attempts)
+			}
+			continue
+		}
+		if r.status == "success" {
+			success++
+		} else {
+			t.Errorf("expected success for %s, got %s", r.sourcePath, r.status)
+		}
 	}
-	if rows[0].attempts != 0 {
-		t.Errorf("expected attempts=0 for transient failure, got %d", rows[0].attempts)
+	if success != 2 {
+		t.Errorf("expected 2 success rows, got %d", success)
+	}
+
+	// Follow-up run with the override removed: the failed file retries and
+	// succeeds; the already-succeeded files are unchanged.
+	t.Setenv("CLAUDE_FAKE_MODE_MATCH", "")
+	stdout, _, err = executeCommand("ingest", "--config", configPath)
+	if err != nil {
+		t.Fatalf("retry ingest failed: %v", err)
+	}
+	if !strings.Contains(stdout, "digested=1") {
+		t.Errorf("expected digested=1 on retry, got: %q", stdout)
+	}
+	if !strings.Contains(stdout, "unchanged=2") {
+		t.Errorf("expected unchanged=2 on retry, got: %q", stdout)
+	}
+	if _, err := os.Stat(filepath.Join(wikiDir, "sources", "bravo.md")); err != nil {
+		t.Errorf("expected bravo page after retry: %v", err)
+	}
+
+	rows = readLedger(t, dbPath)
+	if len(rows) != 3 {
+		t.Fatalf("expected 3 ledger rows after retry, got %d", len(rows))
+	}
+	for _, r := range rows {
+		if r.status != "success" {
+			t.Errorf("expected success for %s after retry, got %s", r.sourcePath, r.status)
+		}
 	}
 }
 
