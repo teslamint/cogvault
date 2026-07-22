@@ -2,7 +2,7 @@
 schema: plan/v1
 title: cogvault v2 Phase 1 — single-mode refactor + LLM ingest pipeline
 type: feat
-status: draft
+status: approved
 date: 2026-07-22
 execution: code
 origin: docs/specs/2026-07-22-refound-capture-pipeline-design.md
