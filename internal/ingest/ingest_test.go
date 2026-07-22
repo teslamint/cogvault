@@ -536,6 +536,36 @@ func TestRunContextCanceled(t *testing.T) {
 	}
 }
 
+func TestRunSourceDirReadError(t *testing.T) {
+	h := newHarness(t, []string{"md"}, okLLM())
+	h.write(t, "note.md", "content")
+
+	// Prepend a nonexistent source dir; the valid one must still process and the
+	// read failure must surface in the report while the run exits without error.
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+	h.runner.cfg.Sources = append([]config.SourceDir{{Path: missing, Types: []string{"md"}}}, h.runner.cfg.Sources...)
+
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "scheduled"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.SourceErrors != 1 {
+		t.Fatalf("SourceErrors = %d, want 1", rep.SourceErrors)
+	}
+	if rep.Digested != 1 {
+		t.Fatalf("Digested = %d, want 1 (other sources must still process)", rep.Digested)
+	}
+	var found bool
+	for _, f := range rep.PerFile {
+		if f.Action == actionSourceError && f.Path == missing && f.Error != "" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no source-error entry for %s in %+v", missing, rep.PerFile)
+	}
+}
+
 func mustRead(t *testing.T, p string) []byte {
 	t.Helper()
 	b, err := os.ReadFile(p)

@@ -162,6 +162,8 @@ func (r *Runner) scan(report *Report) []scanEntry {
 		types := src.Types
 		dirEntries, err := os.ReadDir(dir)
 		if err != nil {
+			report.SourceErrors++
+			report.PerFile = append(report.PerFile, FileResult{Path: dir, Action: actionSourceError, Error: err.Error()})
 			continue
 		}
 		for _, de := range dirEntries {
