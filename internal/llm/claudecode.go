@@ -54,6 +54,9 @@ func (c *ClaudeCode) digest(ctx context.Context, req DigestRequest) (*DigestResu
 		return nil, fmt.Errorf("timeout after %s: %w", timeout, ErrTransient)
 	}
 	if runErr != nil {
+		if isRefusalText(stdout.String()) || isRefusalText(stderr.String()) {
+			return nil, fmt.Errorf("claude policy refusal: %w", ErrRefused)
+		}
 		// Both a failed process launch and a nonzero exit are transport/quota
 		// class; never inspect the exit code for digestion success (U1 spike).
 		msg := strings.TrimSpace(stderr.String())
@@ -71,10 +74,16 @@ func (c *ClaudeCode) digest(ctx context.Context, req DigestRequest) (*DigestResu
 }
 
 type resultEvent struct {
-	Type    string `json:"type"`
-	Subtype string `json:"subtype"`
-	IsError bool   `json:"is_error"`
-	Result  string `json:"result"`
+	Type           string `json:"type"`
+	Subtype        string `json:"subtype"`
+	IsError        bool   `json:"is_error"`
+	Result         string `json:"result"`
+	TerminalReason string `json:"terminal_reason"`
+}
+
+func isRefusalText(s string) bool {
+	s = strings.TrimSpace(s)
+	return strings.HasPrefix(s, "API Error:") || strings.Contains(s, "safeguards flagged")
 }
 
 func parseResult(stdout []byte) (string, error) {
@@ -86,6 +95,9 @@ func parseResult(stdout []byte) (string, error) {
 	final, ok := lastResultEvent(events)
 	if !ok {
 		return "", errors.New("no result event in claude output")
+	}
+	if final.TerminalReason == "api_error" || isRefusalText(final.Result) {
+		return "", fmt.Errorf("claude policy refusal: %w", ErrRefused)
 	}
 	if final.IsError || final.Subtype == "error_during_execution" {
 		return "", fmt.Errorf("claude execution error (subtype=%q): %w", final.Subtype, ErrTransient)

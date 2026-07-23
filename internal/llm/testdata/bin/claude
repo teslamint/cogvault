@@ -47,6 +47,21 @@ ratelimit)
 garbage)
 	printf '%s' 'this is not json at all {'
 	;;
+refusal_exit0)
+	printf '%s' '[{"type":"system","subtype":"init"},{"type":"result","subtype":"success","is_error":false,"terminal_reason":"api_error","result":"API Error: Fable 5'"'"'s safeguards flagged this message..."}]'
+	exit 0
+	;;
+refusal_exitN)
+	printf '%s\n' 'API Error: refused'
+	exit 1
+	;;
+refusal_exitN_stderr)
+	printf '%s\n' 'API Error: refused' >&2
+	exit 1
+	;;
+notrefusal_success)
+	printf '%s' '[{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","result":"---\ntitle: Safeguards Overview\ntype: source\nsource_path: notes/x.pdf\ningested_at: 2024-01-15\n---\n\n# Safeguards Overview\n\nThis page discusses api error handling and safeguards in general."}]'
+	;;
 sleep)
 	sleep 10
 	;;

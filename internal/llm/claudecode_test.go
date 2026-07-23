@@ -145,6 +145,63 @@ func TestDigestTimeoutTransient(t *testing.T) {
 	}
 }
 
+func TestDigestRefusalExit0(t *testing.T) {
+	c, _, _ := newFake(t, "refusal_exit0")
+
+	_, err := c.Digest(context.Background(), DigestRequest{SourcePath: "notes/x.pdf"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, ErrRefused) {
+		t.Errorf("api_error/safeguards refusal should be ErrRefused, got %v", err)
+	}
+	if errors.Is(err, ErrTransient) {
+		t.Errorf("refusal must not be transient: %v", err)
+	}
+}
+
+func TestDigestRefusalExitNStdout(t *testing.T) {
+	c, _, _ := newFake(t, "refusal_exitN")
+
+	_, err := c.Digest(context.Background(), DigestRequest{SourcePath: "notes/x.pdf"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, ErrRefused) {
+		t.Errorf("nonzero-exit refusal on stdout should be ErrRefused, got %v", err)
+	}
+	if errors.Is(err, ErrTransient) {
+		t.Errorf("refusal must not be transient: %v", err)
+	}
+}
+
+func TestDigestRefusalExitNStderr(t *testing.T) {
+	c, _, _ := newFake(t, "refusal_exitN_stderr")
+
+	_, err := c.Digest(context.Background(), DigestRequest{SourcePath: "notes/x.pdf"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, ErrRefused) {
+		t.Errorf("nonzero-exit refusal on stderr should be ErrRefused, got %v", err)
+	}
+	if errors.Is(err, ErrTransient) {
+		t.Errorf("refusal must not be transient: %v", err)
+	}
+}
+
+func TestDigestSuccessBodyNotRefused(t *testing.T) {
+	c, _, _ := newFake(t, "notrefusal_success")
+
+	res, err := c.Digest(context.Background(), DigestRequest{SourcePath: "notes/x.pdf"})
+	if err != nil {
+		t.Fatalf("ordinary body must not be flagged as refusal: %v", err)
+	}
+	if !strings.HasPrefix(res.PageContent, "---") {
+		t.Errorf("expected a page, got %q", res.PageContent)
+	}
+}
+
 func TestDigestWrapsSourcePath(t *testing.T) {
 	c, _, _ := newFake(t, "garbage")
 

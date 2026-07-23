@@ -23,3 +23,7 @@ type Adapter interface {
 // ErrTransient marks failures worth retrying (quota/rate limit, timeout, CLI
 // transport, or execution errors). Everything else is a permanent failure.
 var ErrTransient = errors.New("transient llm failure")
+
+// ErrRefused marks an Acceptable Use Policy / provider policy refusal. Unlike
+// ErrTransient, retrying will not help; the file is a permanent failure.
+var ErrRefused = errors.New("claude policy refusal")
