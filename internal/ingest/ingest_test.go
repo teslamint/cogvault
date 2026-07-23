@@ -439,6 +439,44 @@ func TestRunRefusedReattemptedOnModelChange(t *testing.T) {
 	}
 }
 
+func TestRunRefusedRowRecordsConfiguredModel(t *testing.T) {
+	m := &mockLLM{fn: func(req llm.DigestRequest) (*llm.DigestResult, error) {
+		return nil, llm.ErrRefused
+	}}
+	h := newHarness(t, []string{"md"}, m)
+	h.runner.cfg.LLM.Model = "opus"
+	src := h.write(t, "a.md", "one")
+	hash := contentHash([]byte("one"))
+
+	// First run under "opus": the refusal upsert must thread the configured model
+	// into the ledger row (attempts=0, terminal-under-same-model).
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "scheduled"})
+	if err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	if rep.Refused != 1 || rep.Failed != 0 {
+		t.Fatalf("counts = %+v, want refused=1 failed=0", rep)
+	}
+	row, found, _ := h.runner.ledger.lookup(src, hash)
+	if !found || row.status != "refused" || row.attempts != 0 || row.llmModel != "opus" {
+		t.Fatalf("row = %+v found=%v, want refused attempts=0 llmModel=opus", row, found)
+	}
+
+	// Second run, still under "opus": the stored model matches the configured
+	// model, so the refused file is skipped before the LLM runs (no new calls).
+	callsBefore := len(m.requests)
+	rep2, err := h.runner.Run(context.Background(), RunOptions{Origin: "scheduled"})
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if len(m.requests) != callsBefore {
+		t.Fatal("refused file re-digested despite matching model")
+	}
+	if rep2.Refused != 0 || rep2.Skipped != 1 {
+		t.Fatalf("counts = %+v, want refused=0 skipped=1", rep2)
+	}
+}
+
 func TestRunSuccessNotReattemptedOnModelChange(t *testing.T) {
 	h := newHarness(t, []string{"md"}, okLLM())
 	h.write(t, "a.md", "one")

@@ -428,7 +428,7 @@ func TestE2ERefusalTerminal(t *testing.T) {
 }
 
 func TestE2ERefusalNotRetried(t *testing.T) {
-	// Covers S4.
+	// Covers S1.
 	fakeClaudeOnPath(t)
 	t.Setenv("CLAUDE_FAKE_MODE", "ok")
 	t.Setenv("CLAUDE_FAKE_MODE_MATCH", "bravo.pdf=refusal_exit0")
@@ -533,7 +533,7 @@ func TestE2EModelChangeRecoversRefused(t *testing.T) {
 }
 
 func TestE2EModelUnchangedKeepsRefused(t *testing.T) {
-	// Covers S4.
+	// Covers S1.
 	fakeClaudeOnPath(t)
 	t.Setenv("CLAUDE_FAKE_MODE", "ok")
 	t.Setenv("CLAUDE_FAKE_MODE_MATCH", "bravo.pdf=refusal_exit0")

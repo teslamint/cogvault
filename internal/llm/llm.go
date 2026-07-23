@@ -24,6 +24,7 @@ type Adapter interface {
 // transport, or execution errors). Everything else is a permanent failure.
 var ErrTransient = errors.New("transient llm failure")
 
-// ErrRefused marks an Acceptable Use Policy / provider policy refusal. Unlike
-// ErrTransient, retrying will not help; the file is a permanent failure.
+// ErrRefused signals a provider policy/AUP refusal — terminal under the same
+// model, re-attempted only when the configured model changes, and never
+// consuming a retry attempt (unlike a permanent failure, which does).
 var ErrRefused = errors.New("claude policy refusal")
