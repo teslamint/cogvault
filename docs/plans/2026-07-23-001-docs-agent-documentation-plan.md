@@ -16,7 +16,7 @@ Make the repository's documentation hierarchy match decisions 0003 and 0012: neu
 ## Architecture notes
 
 - Keep `SPEC.md`, `DESIGN.md`, and `docs/decisions/` as the existing canonical contract, architecture, and decision surfaces. This plan does not change product behavior or reassign those responsibilities.
-- Create `docs/context/project-background.md` for useful non-canonical history now embedded in `CLAUDE.md`: project origin, technology choice, prior-art analysis, rejected early alternatives, and historical v1 usage context. A neutral background document is preferred over retaining long project history in a Claude-specific entrypoint.
+- Create `docs/context/project-background.md` for useful non-canonical context now embedded in `CLAUDE.md`: project origin, technology choice, prior-art analysis, rejected early alternatives, review-established principles, future directions, risk/pivot details, and historical v1 usage context. A neutral background document is preferred over retaining long context in a Claude-specific entrypoint.
 - Create `docs/decisions/0022-repository-working-conventions.md` for durable repository-wide development and verification conventions currently defined only in `CLAUDE.md` section 7. This applies decision 0012 D1 instead of inventing a new agent-only rule source.
 - Decision 0022 may use `Status: accepted` only after this plan is approved because it relocates already-active conventions without changing their meaning. If implementation discovers a semantic policy change, stop U1 and separate that change from this cleanup instead of silently accepting it.
 - Rewrite `CLAUDE.md` as a high-signal working brief followed by a concise route map. Its first substantive section must summarize repository-specific invariants that are easy to miss: the v2 single-mode boundary (`wiki_dir` vs read-only `sources`), contract-bearing `internal/schema/default_schema.md`, ingest failure/attempt semantics, SQLite DSN and `BUSY_SNAPSHOT` constraints, the single-writer ingest lock, the no-delete safety boundary, and the canon-over-plan precedence. Every summary links to its neutral owner.
@@ -34,13 +34,32 @@ No origin spec; no approved live assumptions to recheck.
 
 ## File structure
 
-- `docs/context/project-background.md` — neutral, non-canonical project history and superseded v1 background. Create.
+- `docs/context/project-background.md` — neutral, non-canonical project history, future/risk context, superseded v1 background, and an auditable source-to-destination migration inventory. Create.
 - `docs/decisions/0022-repository-working-conventions.md` — durable repository-wide coding, dependency, test, and documentation-maintenance conventions. Create.
 - `CLAUDE.md` — high-signal shared working brief, Claude-facing route map, and current-state orientation. Rewrite.
 - `AGENTS.md` — prioritized Codex/Gemini “before editing” checklist plus pointer-and-delta entrypoint with direct canonical links. Modify.
 - `README.md` — project documentation map for human readers. Modify.
 - `docs/specs/2026-07-22-refound-capture-pipeline-design.md` — replace the live `CLAUDE.md` section-number risk reference with its canonical decision reference. Modify.
 - `docs/research/o1-headless-pdf-verification.md` — remove the live `CLAUDE.md` section-number dependency while preserving the research conclusion. Modify.
+
+## Content preservation map
+
+| Current `CLAUDE.md` section | Destination after cleanup |
+|---|---|
+| 0. Canonical Context | `CLAUDE.md` working context/document map; canon/plan/agent-file ownership backed by decisions 0003 and 0012; the “update README and convention references after a completed step” obligation owned by decision 0022 |
+| 1. 프로젝트 기원 | `docs/context/project-background.md` |
+| 2. 왜 Go인가 | `docs/context/project-background.md` |
+| 3. 선행 구현 분석 | `docs/context/project-background.md` |
+| 4. 기각된 대안과 이유 | `docs/context/project-background.md`, with links to accepted decisions where they now own the outcome |
+| 5. 리뷰에서 확립된 원칙 | concise working-context items in `CLAUDE.md`; full rationale in `docs/context/project-background.md`; durable rules linked to existing decisions or decision 0022 |
+| 6. Roadmap (v2) | current-state summary in `CLAUDE.md`; full future-direction list in `docs/context/project-background.md`; accepted boundaries linked to decisions 0014 and 0021 plus `docs/research/v2-follow-ups.md` |
+| 7. 코딩 컨벤션 | decision 0022, linking the existing specialized decisions |
+| 8. Known risks and pivot paths | highest-impact operational traps in the `CLAUDE.md` working context; complete risk/pivot table in `docs/context/project-background.md` with canonical references |
+| 9. 에이전트 사용 시나리오 | `docs/context/project-background.md`, explicitly labeled v1 historical behavior |
+| 10. 프로젝트명 | `docs/context/project-background.md`, explicitly labeled historical decision context |
+| 11. 구현 시작 체크리스트 | `docs/context/project-background.md`, explicitly labeled completed/superseded v1 setup history |
+
+Implementation must inventory every heading, table row, checklist item, and unique bullet in the current file against this map. The final `docs/context/project-background.md` must retain that item-level inventory as a migration appendix with each source item, final destination, and disposition (`moved`, `summarized with canonical link`, or `retained in agent briefing`). Text already owned verbatim by canon may become a link, but no unique rule, rationale, risk, future direction, or historical fact may disappear without being listed under Deferred to Follow-Up Work.
 
 ## Scenario coverage map
 
@@ -52,11 +71,12 @@ No origin spec exists and therefore there are no User Scenario IDs to map. Obser
 Files:
   Create/Modify: `docs/context/project-background.md`, `docs/decisions/0022-repository-working-conventions.md`
 Steps:
-  1. Write `docs/context/project-background.md` with the still-useful origin, Go choice, prior-art analysis, rejected early alternatives, and explicitly labeled v1 historical context from the current `CLAUDE.md`.
-  2. After this plan is approved, write accepted decision 0022 with the repository-wide coding, dependency, verification, and documentation-maintenance conventions currently carried by `CLAUDE.md` section 7, linking existing specialized decisions rather than duplicating their full contents; stop and separate the work if relocation would change policy meaning.
-  3. Self-review both documents against decisions 0003 and 0012; confirm background is labeled non-canonical and every durable rule has a neutral owner.
-  4. Commit: `docs(context): give project history and working rules neutral owners`
-Acceptance: `docs/context/project-background.md` labels superseded v1 material as historical; decision 0022 is `Status: accepted` and maps every current `CLAUDE.md` section 7 convention to either its own text or an existing specialized decision without adding a new policy.
+  1. Inventory every heading, table row, checklist item, and unique bullet in the current `CLAUDE.md` against the plan's Content preservation map before rewriting the source file.
+  2. Write `docs/context/project-background.md` with the still-useful origin, Go choice, prior-art analysis, rejected early alternatives, review-established principles, future directions, complete risk/pivot details, and explicitly labeled v1 historical context from the current `CLAUDE.md`; add a migration-inventory appendix recording every inventoried source item, final destination, and disposition.
+  3. After this plan is approved, write accepted decision 0022 with the repository-wide coding, dependency, verification, and documentation-maintenance conventions currently carried by `CLAUDE.md` section 7, linking existing specialized decisions rather than duplicating their full contents; stop and separate the work if relocation would change policy meaning.
+  4. Self-review both documents against decisions 0003 and 0012; confirm background is labeled non-canonical, the section 0 documentation-maintenance obligation is owned by decision 0022, every durable rule has a neutral owner, and every inventoried source item appears in the migration appendix with a destination and disposition.
+  5. Commit: `docs(context): give project history and working rules neutral owners`
+Acceptance: `docs/context/project-background.md` labels superseded v1 material as historical and contains every unique context item assigned to it by the preservation map; its migration appendix has one auditable entry for every current heading, table row, checklist item, and unique bullet with zero blank destinations or dispositions; decision 0022 is `Status: accepted`, owns the section 0 documentation-maintenance obligation, and maps every current `CLAUDE.md` section 7 convention to either its own text or an existing specialized decision without adding a new policy.
 
 ## U2: Prioritize non-obvious working context in agent entrypoints
 Files:
@@ -78,7 +98,7 @@ Steps:
   2. Run a repository-wide check over every tracked Markdown file: ignore external URLs and in-page anchors, resolve each repository-relative link from its source file, and require zero missing file targets; inspect the final diff for duplicated guidance and accidental product-contract changes.
   3. Run the docs-specific ownership, line-count, stale-section-reference, and repository-wide link checks before running `go test -race ./...` as a secondary regression gate for embedded Markdown assets and repository behavior.
   4. Commit: `docs(readme): expose the documentation ownership map`
-Acceptance: the repository-wide Markdown link check reports zero missing file targets; `rg -n '^## (프로젝트 기원|왜 Go인가|선행 구현 분석|코딩 컨벤션|에이전트 사용 시나리오)' CLAUDE.md` returns no matches; the U1/U2 ownership and line-count checks pass; `go test -race ./...` passes after the documentation checks are green.
+Acceptance: the repository-wide Markdown link check reports zero missing file targets; `rg -n '^## (프로젝트 기원|왜 Go인가|선행 구현 분석|코딩 컨벤션|에이전트 사용 시나리오)' CLAUDE.md` returns no matches; every row in the Content preservation map is satisfied and the migration appendix has zero source items without a final destination/disposition; the U1/U2 ownership and line-count checks pass; `go test -race ./...` passes after the documentation checks are green.
 
 ## Mutation/failure-state matrix
 
