@@ -11,7 +11,7 @@ execution: non-code
 
 ## Goal
 
-Make the repository's documentation hierarchy match decisions 0003 and 0012: neutral repository documents own durable context and working conventions, while `CLAUDE.md` and `AGENTS.md` remain short agent entrypoints. Preserve useful historical context, remove stale section-number coupling, and leave every repository-local Markdown link resolvable.
+Make the repository's documentation hierarchy match decisions 0003 and 0012: neutral repository documents own durable context and working conventions, while `CLAUDE.md` and `AGENTS.md` lead with the non-obvious knowledge an agent needs to change this repository safely. Preserve useful historical context, remove stale section-number coupling, and leave every repository-local Markdown link resolvable.
 
 ## Architecture notes
 
@@ -19,7 +19,8 @@ Make the repository's documentation hierarchy match decisions 0003 and 0012: neu
 - Create `docs/context/project-background.md` for useful non-canonical history now embedded in `CLAUDE.md`: project origin, technology choice, prior-art analysis, rejected early alternatives, and historical v1 usage context. A neutral background document is preferred over retaining long project history in a Claude-specific entrypoint.
 - Create `docs/decisions/0022-repository-working-conventions.md` for durable repository-wide development and verification conventions currently defined only in `CLAUDE.md` section 7. This applies decision 0012 D1 instead of inventing a new agent-only rule source.
 - Decision 0022 may use `Status: accepted` only after this plan is approved because it relocates already-active conventions without changing their meaning. If implementation discovers a semantic policy change, stop U1 and separate that change from this cleanup instead of silently accepting it.
-- Reduce `CLAUDE.md` to a concise route map with current-state orientation, canonical document links, and Claude-specific differences only when they exist. Reduce coupling further by making `AGENTS.md` point directly to canonical paths instead of `CLAUDE.md` section numbers.
+- Rewrite `CLAUDE.md` as a high-signal working brief followed by a concise route map. Its first substantive section must summarize repository-specific invariants that are easy to miss: the v2 single-mode boundary (`wiki_dir` vs read-only `sources`), contract-bearing `internal/schema/default_schema.md`, ingest failure/attempt semantics, SQLite DSN and `BUSY_SNAPSHOT` constraints, the single-writer ingest lock, the no-delete safety boundary, and the canon-over-plan precedence. Every summary links to its neutral owner.
+- Keep `AGENTS.md` as the pointer/delta document required by decision 0012 D4, but lead with an action-oriented “before editing” checklist that directs Codex/Gemini to the shared working brief and the exact canon for the touched boundary. It may summarize agent actions with canonical citations, but must not reproduce the full explanatory facts from `CLAUDE.md`.
 - Any route to `docs/plans/` must label plans as provisional working notes that may become stale and never override `SPEC.md`, `DESIGN.md`, or accepted decisions.
 - Update live cross-references that currently depend on `CLAUDE.md` section numbers. Preserve retrospective statements as historical evidence when the statement describes what happened at that time.
 - Rejected: mirror the full guidance in both agent files. Decision 0012 D4 already rejects this because synchronization drift is structural.
@@ -35,8 +36,8 @@ No origin spec; no approved live assumptions to recheck.
 
 - `docs/context/project-background.md` — neutral, non-canonical project history and superseded v1 background. Create.
 - `docs/decisions/0022-repository-working-conventions.md` — durable repository-wide coding, dependency, test, and documentation-maintenance conventions. Create.
-- `CLAUDE.md` — short Claude-facing route map and current-state orientation. Rewrite.
-- `AGENTS.md` — short Codex/Gemini pointer-and-delta entrypoint with direct canonical links. Modify.
+- `CLAUDE.md` — high-signal shared working brief, Claude-facing route map, and current-state orientation. Rewrite.
+- `AGENTS.md` — prioritized Codex/Gemini “before editing” checklist plus pointer-and-delta entrypoint with direct canonical links. Modify.
 - `README.md` — project documentation map for human readers. Modify.
 - `docs/specs/2026-07-22-refound-capture-pipeline-design.md` — replace the live `CLAUDE.md` section-number risk reference with its canonical decision reference. Modify.
 - `docs/research/o1-headless-pdf-verification.md` — remove the live `CLAUDE.md` section-number dependency while preserving the research conclusion. Modify.
@@ -57,16 +58,17 @@ Steps:
   4. Commit: `docs(context): give project history and working rules neutral owners`
 Acceptance: `docs/context/project-background.md` labels superseded v1 material as historical; decision 0022 is `Status: accepted` and maps every current `CLAUDE.md` section 7 convention to either its own text or an existing specialized decision without adding a new policy.
 
-## U2: Make agent files concise route maps and repair live references
+## U2: Prioritize non-obvious working context in agent entrypoints
 Files:
   Create/Modify: `CLAUDE.md`, `AGENTS.md`, `docs/specs/2026-07-22-refound-capture-pipeline-design.md`, `docs/research/o1-headless-pdf-verification.md`
 Steps:
-  1. Rewrite `CLAUDE.md` as a concise route map to `SPEC.md`, `DESIGN.md`, `CONCEPTS.md`, decisions, research, solutions, plans, the v2 design, project background, and repository working conventions; label plans as non-canonical working notes that may become stale, and retain only current-state orientation and actual Claude-specific deltas.
-  2. Update `AGENTS.md` to point directly to canonical documents and decision 0022, keeping the agent-difference section explicit without referring to numbered `CLAUDE.md` sections.
-  3. Replace live `CLAUDE.md` section-number references in the approved v2 design and O1 research note with canonical decision references or self-contained wording. Leave retrospective prose unchanged when it records a historical action.
-  4. Self-review against decision 0012 D3-D4 and verify that neither agent file becomes a second copy of product canon or working conventions.
-  5. Commit: `docs(agents): make entrypoints direct and drift-resistant`
-Acceptance: `CLAUDE.md` is at most 100 lines; `AGENTS.md` is at most 30 lines; both identify `docs/plans/` as non-canonical working notes; `rg -n 'CLAUDE\.md (Section|section|§)|CLAUDE\.md와의' CLAUDE.md AGENTS.md docs/specs docs/research` reports no live section-number coupling outside explicitly historical records; no repository-wide working convention remains solely owned by an agent-specific file.
+  1. Rewrite `CLAUDE.md` so its first substantive section is a compact “working context” briefing covering the v2 path/trust boundary, runtime schema asset, ingest error/attempt semantics, SQLite concurrency traps, ingest lock, no-delete safety rule, and canon-over-plan precedence with a canonical reference beside every item.
+  2. Follow the working context with a route map to `SPEC.md`, `DESIGN.md`, `CONCEPTS.md`, decisions, research, solutions, plans, the v2 design, project background, and repository working conventions; label plans as non-canonical working notes that may become stale, and retain only current-state orientation and actual Claude-specific deltas.
+  3. Update `AGENTS.md` so its first substantive section tells Codex/Gemini to read the shared working context before editing and gives an action-oriented checklist for choosing the contract owner, checking the runtime schema asset on contract changes, and applying the concurrency/failure-semantic references when those boundaries are touched; keep the agent-difference section explicit without copying the full `CLAUDE.md` briefing or referring to numbered sections.
+  4. Replace live `CLAUDE.md` section-number references in the approved v2 design and O1 research note with canonical decision references or self-contained wording. Leave retrospective prose unchanged when it records a historical action.
+  5. Self-review against decision 0012 D3-D4 and verify that each non-obvious briefing item has a neutral owner, the action checklist is not a duplicated handbook, and neither agent file becomes a second product canon.
+  6. Commit: `docs(agents): prioritize repository-specific working context`
+Acceptance: `CLAUDE.md` is at most 140 lines and presents all seven named non-obvious invariants before the general documentation map; `AGENTS.md` is at most 60 lines and presents the before-editing checklist before general pointers; both identify `docs/plans/` as non-canonical working notes; `rg -n 'CLAUDE\.md (Section|section|§)|CLAUDE\.md와의' CLAUDE.md AGENTS.md docs/specs docs/research` reports no live section-number coupling outside explicitly historical records; no repository-wide working convention remains solely owned by an agent-specific file.
 
 ## U3: Publish the documentation map and verify the repository
 Files:
