@@ -2,7 +2,7 @@
 schema: plan/v1
 title: F6 — AUP-refusal error class + llm.model option
 type: feat
-status: draft
+status: approved
 date: 2026-07-23
 execution: code
 origin: docs/specs/2026-07-23-aup-error-class-and-model-option-design.md
