@@ -353,6 +353,156 @@ func TestRunPermanentErrorExhausts(t *testing.T) {
 	}
 }
 
+func TestRunRefusedTerminalNoAttempt(t *testing.T) {
+	m := &mockLLM{fn: func(req llm.DigestRequest) (*llm.DigestResult, error) {
+		return nil, llm.ErrRefused
+	}}
+	h := newHarness(t, []string{"md"}, m)
+	src := h.write(t, "a.md", "one")
+
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "scheduled"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Refused != 1 || rep.Failed != 0 {
+		t.Fatalf("counts = %+v, want refused=1 failed=0", rep)
+	}
+	row, found, _ := h.runner.ledger.lookup(src, contentHash([]byte("one")))
+	if !found || row.status != "refused" || row.attempts != 0 {
+		t.Fatalf("row = %+v, want refused attempts=0", row)
+	}
+	if len(rep.PerFile) != 1 || rep.PerFile[0].Action != actionRefused {
+		t.Fatalf("perfile = %+v, want refused action", rep.PerFile)
+	}
+}
+
+func TestRunRefusedSkippedWhenModelMatches(t *testing.T) {
+	m := &mockLLM{fn: func(req llm.DigestRequest) (*llm.DigestResult, error) {
+		return nil, llm.ErrRefused
+	}}
+	h := newHarness(t, []string{"md"}, m)
+	h.write(t, "a.md", "one")
+
+	// First run with default model "" -> refused row llmModel="".
+	if _, err := h.runner.Run(context.Background(), RunOptions{Origin: "scheduled"}); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	callsBefore := len(m.requests)
+
+	// Second run, same model "" -> skip, no new llm call.
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "scheduled"})
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if len(m.requests) != callsBefore {
+		t.Fatal("refused file re-digested despite matching model")
+	}
+	if rep.Refused != 0 || rep.Skipped != 1 {
+		t.Fatalf("counts = %+v, want refused=0 skipped=1", rep)
+	}
+}
+
+func TestRunRefusedReattemptedOnModelChange(t *testing.T) {
+	m := &mockLLM{fn: func(req llm.DigestRequest) (*llm.DigestResult, error) {
+		return nil, llm.ErrRefused
+	}}
+	h := newHarness(t, []string{"md"}, m)
+	src := h.write(t, "a.md", "one")
+
+	// First run with default model "" -> refused row llmModel="".
+	if _, err := h.runner.Run(context.Background(), RunOptions{Origin: "scheduled"}); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+
+	// Switch to a passing digest on a new model.
+	m.mu.Lock()
+	m.fn = func(req llm.DigestRequest) (*llm.DigestResult, error) {
+		return &llm.DigestResult{PageContent: validPage(req.PageSlug)}, nil
+	}
+	m.mu.Unlock()
+	h.runner.cfg.LLM.Model = "opus"
+	callsBefore := len(m.requests)
+
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "scheduled"})
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if len(m.requests) == callsBefore {
+		t.Fatal("refused file not re-attempted on model change")
+	}
+	if rep.Digested != 1 {
+		t.Fatalf("digested = %d, want 1 (re-attempt succeeded)", rep.Digested)
+	}
+	row, _, _ := h.runner.ledger.lookup(src, contentHash([]byte("one")))
+	if row.status != "success" || row.llmModel != "opus" {
+		t.Fatalf("row = %+v, want success llmModel=opus", row)
+	}
+}
+
+func TestRunSuccessNotReattemptedOnModelChange(t *testing.T) {
+	h := newHarness(t, []string{"md"}, okLLM())
+	h.write(t, "a.md", "one")
+	if _, err := h.runner.Run(context.Background(), RunOptions{Origin: "scheduled"}); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	callsBefore := len(h.llm.requests)
+
+	h.runner.cfg.LLM.Model = "opus"
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "scheduled"})
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if rep.Unchanged != 1 || rep.Digested != 0 {
+		t.Fatalf("counts = %+v, want unchanged=1 digested=0", rep)
+	}
+	if len(h.llm.requests) != callsBefore {
+		t.Fatal("success file re-digested on model change")
+	}
+}
+
+func TestRunExhaustedReattemptedOnModelChange(t *testing.T) {
+	m := &mockLLM{fn: func(req llm.DigestRequest) (*llm.DigestResult, error) {
+		return nil, errPermanent
+	}}
+	h := newHarness(t, []string{"md"}, m)
+	src := h.write(t, "a.md", "one")
+	hash := contentHash([]byte("one"))
+
+	for i := 0; i < 3; i++ {
+		if _, err := h.runner.Run(context.Background(), RunOptions{Origin: "scheduled"}); err != nil {
+			t.Fatalf("run %d: %v", i, err)
+		}
+	}
+	row, _, _ := h.runner.ledger.lookup(src, hash)
+	if row.attempts != 3 {
+		t.Fatalf("attempts = %d, want 3", row.attempts)
+	}
+
+	// Same model -> exhausted skip, no new llm call.
+	callsBefore := len(m.requests)
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "scheduled"})
+	if err != nil {
+		t.Fatalf("run 4: %v", err)
+	}
+	if len(m.requests) != callsBefore || rep.Skipped != 1 {
+		t.Fatalf("run 4: calls changed or not skipped, rep=%+v", rep)
+	}
+
+	// Model change -> re-attempt.
+	h.runner.cfg.LLM.Model = "opus"
+	callsBefore = len(m.requests)
+	rep2, err := h.runner.Run(context.Background(), RunOptions{Origin: "scheduled"})
+	if err != nil {
+		t.Fatalf("run 5: %v", err)
+	}
+	if len(m.requests) == callsBefore {
+		t.Fatal("exhausted file not re-attempted on model change")
+	}
+	if rep2.Failed != 1 {
+		t.Fatalf("run 5 failed = %d, want 1 (re-attempt failed permanent)", rep2.Failed)
+	}
+}
+
 func TestRunUnparsableFrontmatterPermanentNoWrite(t *testing.T) {
 	m := &mockLLM{fn: func(req llm.DigestRequest) (*llm.DigestResult, error) {
 		return &llm.DigestResult{PageContent: "plain text, no frontmatter, no title"}, nil

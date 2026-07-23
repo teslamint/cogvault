@@ -1,6 +1,7 @@
 package ingest
 
 import (
+	"database/sql"
 	"path/filepath"
 	"testing"
 )
@@ -56,6 +57,63 @@ func TestLedgerUpsertLookupRoundTrip(t *testing.T) {
 	}
 	if got.status != "success" || got.wikiPage != "sources/a.md" || got.runOrigin != "scheduled" {
 		t.Fatalf("row mismatch: %+v", got)
+	}
+}
+
+func TestLedgerModelRoundTrip(t *testing.T) {
+	l := newTestLedger(t)
+	want := ledgerRow{
+		sourcePath: "/src/m.md", contentHash: "h1", status: "success",
+		wikiPage: "sources/m.md", runOrigin: "scheduled", llmModel: "opus",
+	}
+	if err := l.upsert(want); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	got, found, err := l.lookup("/src/m.md", "h1")
+	if err != nil || !found {
+		t.Fatalf("lookup: found=%v err=%v", found, err)
+	}
+	if got.llmModel != "opus" {
+		t.Fatalf("llmModel = %q, want opus", got.llmModel)
+	}
+}
+
+func TestOpenLedgerMigratesLLMModelColumn(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "old.db")
+
+	// Pre-create with the OLD 9-column schema (no llm_model) + a row.
+	raw, err := sql.Open("sqlite", dsnWithPragmas(dbPath))
+	if err != nil {
+		t.Fatalf("open raw: %v", err)
+	}
+	if _, err := raw.Exec(`CREATE TABLE ingest_ledger (
+		source_path TEXT, content_hash TEXT, source_dir TEXT, digested_at TEXT,
+		wiki_page TEXT, status TEXT, attempts INTEGER, last_error TEXT, run_origin TEXT,
+		PRIMARY KEY (source_path, content_hash))`); err != nil {
+		t.Fatalf("create old table: %v", err)
+	}
+	if _, err := raw.Exec(`INSERT INTO ingest_ledger
+		(source_path, content_hash, source_dir, digested_at, wiki_page, status, attempts, last_error, run_origin)
+		VALUES ('/src/old.md','h1','/src','2026-07-22T00:00:00Z','sources/old.md','success',0,'','scheduled')`); err != nil {
+		t.Fatalf("insert old row: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close raw: %v", err)
+	}
+
+	// openLedger must add the column and preserve the row.
+	l, err := openLedger(dbPath)
+	if err != nil {
+		t.Fatalf("openLedger: %v", err)
+	}
+	t.Cleanup(func() { l.close() })
+
+	got, found, err := l.lookup("/src/old.md", "h1")
+	if err != nil || !found {
+		t.Fatalf("lookup: found=%v err=%v", found, err)
+	}
+	if got.status != "success" || got.llmModel != "" {
+		t.Fatalf("row = %+v, want success llmModel=\"\"", got)
 	}
 }
 
