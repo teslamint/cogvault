@@ -354,6 +354,112 @@ func TestE2ESupersedeOnContentChange(t *testing.T) {
 	}
 }
 
+func TestE2ERefusalTerminal(t *testing.T) {
+	// Covers S1, S4.
+	fakeClaudeOnPath(t)
+	t.Setenv("CLAUDE_FAKE_MODE", "ok")
+	t.Setenv("CLAUDE_FAKE_MODE_MATCH", "bravo.pdf=refusal_exit0")
+	configPath, srcDir, wikiDir, dbPath := setupIngestVault(t)
+
+	for _, n := range []string{"alpha.pdf", "bravo.pdf", "charlie.pdf"} {
+		writeAgedSource(t, srcDir, n, "content of "+n)
+	}
+
+	stdout, _, err := executeCommand("ingest", "--config", configPath)
+	if err != nil {
+		t.Fatalf("ingest should exit 0 despite refusal: %v", err)
+	}
+	if !strings.Contains(stdout, "refused=1") {
+		t.Errorf("expected refused=1 in report, got: %q", stdout)
+	}
+	if !strings.Contains(stdout, "failed=0") {
+		t.Errorf("expected failed=0 in report, got: %q", stdout)
+	}
+
+	for _, base := range []string{"alpha", "charlie"} {
+		if _, err := os.Stat(filepath.Join(wikiDir, "sources", base+".md")); err != nil {
+			t.Errorf("expected page for %s: %v", base, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(wikiDir, "sources", "bravo.md")); !os.IsNotExist(err) {
+		t.Errorf("expected no page for refused bravo, stat err: %v", err)
+	}
+
+	bravoPath := filepath.Join(srcDir, "bravo.pdf")
+	rows := readLedger(t, dbPath)
+	if len(rows) != 3 {
+		t.Fatalf("expected 3 ledger rows, got %d", len(rows))
+	}
+	var success int
+	for _, r := range rows {
+		if r.sourcePath == bravoPath {
+			if r.status != "refused" {
+				t.Errorf("expected bravo status refused, got %s", r.status)
+			}
+			if r.attempts != 0 {
+				t.Errorf("expected attempts=0 for refusal, got %d", r.attempts)
+			}
+			continue
+		}
+		if r.status == "success" {
+			success++
+		} else {
+			t.Errorf("expected success for %s, got %s", r.sourcePath, r.status)
+		}
+	}
+	if success != 2 {
+		t.Errorf("expected 2 success rows, got %d", success)
+	}
+}
+
+func TestE2ERefusalNotRetried(t *testing.T) {
+	// Covers S4.
+	fakeClaudeOnPath(t)
+	t.Setenv("CLAUDE_FAKE_MODE", "ok")
+	t.Setenv("CLAUDE_FAKE_MODE_MATCH", "bravo.pdf=refusal_exit0")
+	argvFile := filepath.Join(t.TempDir(), "claude-argv")
+	t.Setenv("CLAUDE_FAKE_ARGV_FILE", argvFile)
+	configPath, srcDir, _, dbPath := setupIngestVault(t)
+
+	for _, n := range []string{"alpha.pdf", "bravo.pdf", "charlie.pdf"} {
+		writeAgedSource(t, srcDir, n, "content of "+n)
+	}
+	if _, _, err := executeCommand("ingest", "--config", configPath); err != nil {
+		t.Fatalf("first ingest failed: %v", err)
+	}
+
+	bravoPath := filepath.Join(srcDir, "bravo.pdf")
+	var bravoBefore string
+	for _, r := range readLedger(t, dbPath) {
+		if r.sourcePath == bravoPath {
+			bravoBefore = r.digestedAt
+		}
+	}
+
+	// Second run, same model: the refused file is skipped before the LLM runs and
+	// the two prior successes are unchanged, so nothing invokes the fake claude —
+	// its argv record is never written.
+	if err := os.Remove(argvFile); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	stdout, _, err := executeCommand("ingest", "--config", configPath)
+	if err != nil {
+		t.Fatalf("second ingest failed: %v", err)
+	}
+	if !strings.Contains(stdout, "digested=0") {
+		t.Errorf("expected digested=0 on rerun, got: %q", stdout)
+	}
+	if _, err := os.Stat(argvFile); !os.IsNotExist(err) {
+		t.Errorf("expected zero LLM calls on rerun (argv file absent), stat err: %v", err)
+	}
+
+	for _, r := range readLedger(t, dbPath) {
+		if r.sourcePath == bravoPath && r.digestedAt != bravoBefore {
+			t.Errorf("refused bravo re-digested: %q -> %q", bravoBefore, r.digestedAt)
+		}
+	}
+}
+
 func TestE2EConcurrentIndexWriteDuringRead(t *testing.T) {
 	// Covers the contention smoke: an index write path (ingest) coexists with a
 	// concurrent reader (serve/search) on the same DB file without "database is
