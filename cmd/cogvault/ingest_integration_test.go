@@ -39,6 +39,21 @@ func setupIngestVault(t *testing.T) (configPath, srcDir, wikiDir, dbPath string)
 	return configPath, srcDir, wikiDir, dbPath
 }
 
+func writeIngestConfigWithModel(t *testing.T, configPath, wikiDir, dbPath, srcDir, model string) {
+	t.Helper()
+	var b strings.Builder
+	fmt.Fprintf(&b, "wiki_dir: %s\n", wikiDir)
+	fmt.Fprintf(&b, "db_path: %s\n", dbPath)
+	b.WriteString("adapter: obsidian\n")
+	fmt.Fprintf(&b, "sources:\n  - path: %s\n    types: [pdf]\n", srcDir)
+	if model != "" {
+		fmt.Fprintf(&b, "llm:\n  model: %s\n", model)
+	}
+	if err := os.WriteFile(configPath, []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func writeAgedSource(t *testing.T, dir, name, body string) string {
 	t.Helper()
 	p := filepath.Join(dir, name)
@@ -456,6 +471,110 @@ func TestE2ERefusalNotRetried(t *testing.T) {
 	for _, r := range readLedger(t, dbPath) {
 		if r.sourcePath == bravoPath && r.digestedAt != bravoBefore {
 			t.Errorf("refused bravo re-digested: %q -> %q", bravoBefore, r.digestedAt)
+		}
+	}
+}
+
+func TestE2EModelChangeRecoversRefused(t *testing.T) {
+	// Covers S2, S3.
+	fakeClaudeOnPath(t)
+	t.Setenv("CLAUDE_FAKE_MODE", "ok")
+	t.Setenv("CLAUDE_FAKE_MODE_MATCH", "bravo.pdf=refusal_exit0")
+	argvFile := filepath.Join(t.TempDir(), "claude-argv")
+	t.Setenv("CLAUDE_FAKE_ARGV_FILE", argvFile)
+	configPath, srcDir, wikiDir, dbPath := setupIngestVault(t)
+
+	for _, n := range []string{"alpha.pdf", "bravo.pdf", "charlie.pdf"} {
+		writeAgedSource(t, srcDir, n, "content of "+n)
+	}
+	if _, _, err := executeCommand("ingest", "--config", configPath); err != nil {
+		t.Fatalf("first ingest failed: %v", err)
+	}
+
+	bravoPath := filepath.Join(srcDir, "bravo.pdf")
+	for _, r := range readLedger(t, dbPath) {
+		if r.sourcePath == bravoPath && r.status != "refused" {
+			t.Fatalf("expected bravo refused after first run, got %s", r.status)
+		}
+	}
+
+	// Change the configured model and let the fake succeed for bravo: the
+	// previously-refused file is re-attempted only because the model changed.
+	writeIngestConfigWithModel(t, configPath, wikiDir, dbPath, srcDir, "opus")
+	t.Setenv("CLAUDE_FAKE_MODE_MATCH", "")
+	if err := os.Remove(argvFile); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+
+	stdout, _, err := executeCommand("ingest", "--config", configPath)
+	if err != nil {
+		t.Fatalf("second ingest failed: %v", err)
+	}
+	if !strings.Contains(stdout, "digested=1") {
+		t.Errorf("expected digested=1 after model change, got: %q", stdout)
+	}
+
+	if _, err := os.Stat(filepath.Join(wikiDir, "sources", "bravo.md")); err != nil {
+		t.Errorf("expected bravo page after model-change recovery: %v", err)
+	}
+	for _, r := range readLedger(t, dbPath) {
+		if r.sourcePath == bravoPath && r.status != "success" {
+			t.Errorf("expected bravo success after model change, got %s", r.status)
+		}
+	}
+
+	argv, err := os.ReadFile(argvFile)
+	if err != nil {
+		t.Fatalf("expected the re-attempt to invoke the fake claude: %v", err)
+	}
+	if !strings.Contains(string(argv), "--model opus") {
+		t.Errorf("expected --model opus in re-attempt argv, got: %q", string(argv))
+	}
+}
+
+func TestE2EModelUnchangedKeepsRefused(t *testing.T) {
+	// Covers S4.
+	fakeClaudeOnPath(t)
+	t.Setenv("CLAUDE_FAKE_MODE", "ok")
+	t.Setenv("CLAUDE_FAKE_MODE_MATCH", "bravo.pdf=refusal_exit0")
+	argvFile := filepath.Join(t.TempDir(), "claude-argv")
+	t.Setenv("CLAUDE_FAKE_ARGV_FILE", argvFile)
+	configPath, srcDir, _, dbPath := setupIngestVault(t)
+
+	for _, n := range []string{"alpha.pdf", "bravo.pdf", "charlie.pdf"} {
+		writeAgedSource(t, srcDir, n, "content of "+n)
+	}
+	if _, _, err := executeCommand("ingest", "--config", configPath); err != nil {
+		t.Fatalf("first ingest failed: %v", err)
+	}
+
+	bravoPath := filepath.Join(srcDir, "bravo.pdf")
+	var bravoBefore string
+	for _, r := range readLedger(t, dbPath) {
+		if r.sourcePath == bravoPath {
+			bravoBefore = r.digestedAt
+		}
+	}
+
+	// Second run, same configured model: the refused row is not re-attempted, so
+	// nothing invokes the fake claude and bravo's digested_at is unchanged.
+	if err := os.Remove(argvFile); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	stdout, _, err := executeCommand("ingest", "--config", configPath)
+	if err != nil {
+		t.Fatalf("second ingest failed: %v", err)
+	}
+	if !strings.Contains(stdout, "digested=0") {
+		t.Errorf("expected digested=0 on unchanged-model rerun, got: %q", stdout)
+	}
+	if _, err := os.Stat(argvFile); !os.IsNotExist(err) {
+		t.Errorf("expected zero LLM calls on unchanged-model rerun (argv file absent), stat err: %v", err)
+	}
+
+	for _, r := range readLedger(t, dbPath) {
+		if r.sourcePath == bravoPath && r.digestedAt != bravoBefore {
+			t.Errorf("refused bravo re-digested on unchanged model: %q -> %q", bravoBefore, r.digestedAt)
 		}
 	}
 }
