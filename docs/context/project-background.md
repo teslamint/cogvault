@@ -5,11 +5,11 @@ Last updated: 2026-07-23
 
 This document preserves repository background, historical rationale, and superseded v1 context that should remain searchable after `CLAUDE.md` is slimmed down. Canonical product behavior, architecture, and durable project rules still live in `SPEC.md`, `DESIGN.md`, and accepted decisions under `docs/decisions/` per [0003](../decisions/0003-canonical-context-locations.md) and [0012](../decisions/0012-agent-documentation-governance.md).
 
-## Project Origin
+## Project Origin (Historical v1 Context)
 
 Karpathy의 LLM Wiki 패턴(https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)에서 출발. 핵심 아이디어: RAG 대신 LLM이 마크다운 위키를 점진적으로 빌드하여 지식이 누적되는 구조. 2026-04-04 공개, 2일 만에 2,900+ star.
 
-이 프로젝트는 해당 패턴을 Go 싱글 바이너리 + MCP 서버로 구현하되, **기존 Obsidian vault와 하이브리드 통합**하는 데 초점을 둔다.
+The original v1 project focused on implementing that pattern as a Go single binary plus MCP server with **hybrid integration into an existing Obsidian vault**. The v2 refounding later removed the vault model; [0021](../decisions/0021-v2-refounding.md) owns the current boundary.
 
 ## Why Go
 
@@ -23,7 +23,9 @@ The original language choice optimized for large-file handling and a locally dep
 
 The project also judged that MCP itself was simple enough that a slightly less mature Go SDK was acceptable.
 
-## Prior-Art Analysis
+The original `sage-wiki` comparison used `mcp-go` v0.46.0 as a reference and deferred the actual dependency choice until implementation. `go.mod` is authoritative for the current selected version; committed `go.sum` provides integrity metadata.
+
+## Prior-Art Analysis (Historical v1 Context)
 
 sage-wiki(https://github.com/xoai/sage-wiki)가 가장 직접적인 선행 구현. It was useful mainly as a feasibility and tradeoff baseline, not as a template to copy wholesale.
 
@@ -34,11 +36,11 @@ sage-wiki(https://github.com/xoai/sage-wiki)가 가장 직접적인 선행 구�
 - MCP stdio/SSE 이중 전송 패턴
 - compile --watch 모드 (우리는 v0.2)
 
-### What This Repository Deliberately Changed
+### What the v1 Repository Deliberately Changed
 
-- sage-wiki는 API 직접 호출만 지원. 우리는 **LLM 어댑터 패턴** — Claude Code CLI subprocess로 구독 요금제 활용 가능 (v0.2).
-- sage-wiki는 vault 위에 오버레이. 우리는 vault 내 설정된 `wiki_dir/` 디렉토리 **하이브리드** — Obsidian 그래프 뷰에서 원본↔위키 연결 시각화.
-- sage-wiki는 5-pass 컴파일러를 처음부터 내장. 우리는 **passthrough 우선** — 에이전트가 도구를 직접 조합. 컴파일러는 반복 패턴이 확인된 후 v0.2에서.
+- sage-wiki는 API 직접 호출만 지원. v1은 **LLM 어댑터 패턴**을 선택해 Claude Code CLI subprocess로 구독 요금제를 활용하려 했다.
+- sage-wiki는 vault 위에 오버레이. v1은 vault 내 설정된 `wiki_dir/` 디렉토리를 **하이브리드**로 사용해 Obsidian 그래프 뷰에서 원본↔위키 연결을 시각화했다.
+- sage-wiki는 5-pass 컴파일러를 처음부터 내장. v1은 **passthrough 우선**으로 에이전트가 도구를 직접 조합하게 하고, 컴파일러는 반복 패턴이 확인된 뒤로 미뤘다.
 - sage-wiki의 온톨로지 그래프(엔티티-관계 BFS)를 분석했으나, MVP에서는 과잉으로 판단하여 제거.
 
 ### Additional Lessons from the Early Discussion
@@ -59,7 +61,7 @@ This section records background rationale. Where an accepted decision now owns t
 | 온톨로지 그래프 (엔티티-관계 BFS, 사이클 감지) | Rejected early | `[[wikilink]]` + FTS5로 대부분 커버. "A와 B가 모순"같은 메타 관계는 Lint에서 LLM이 판단하는 게 더 정확. 복잡도 대비 가치 불분명. | Historical only |
 | `_index.md` 수동 유지 | Rejected early | 에이전트가 페이지 쓰고 인덱스 갱신하는 사이에 크래시하면 불일치. `wiki_list` + FTS5가 항상 정합적인 인덱스 역할. | Historical only |
 | `_log.md` 에이전트 관리 | Rejected early | Ingest 워크플로우에 read→modify→write 패턴이 들어가서 동시성 문제 + 호출 수 증가. MVP에서 제거. v0.2에서 서버 측 자동 로깅 검토. | Historical only |
-| `wiki_delete` 도구 | Deferred | auto-commit 없는 MVP에서 에이전트 실수로 위키 손실 위험. v0.2로 연기. | Still reflected in [0021](../decisions/0021-v2-refounding.md) follow-up boundaries |
+| `wiki_delete` 도구 | Deferred | auto-commit 없는 MVP에서 에이전트 실수로 위키 손실 위험. v0.2로 연기. | Current exclusion is in `SPEC.md` Scope Out and the [approved v2 design](../specs/2026-07-22-refound-capture-pipeline-design.md) |
 | 페이지 타입 4개 강제 (entity, concept, source, synthesis) | Rejected early | 1주 검증에서 실제로 쓰는 건 source뿐. synthesis는 query file-back인데 MVP 범위 밖. source만 강제, 나머지 자유. | Historical only |
 
 ### Consistency Model
@@ -76,7 +78,7 @@ This section records background rationale. Where an accepted decision now owns t
 |---|---|---|---|
 | unicode61 토크나이저 | Rejected early | CJK 토큰화 불완전. 한국어 검색 품질 보장 불가. | Historical only |
 | ICU 토크나이저 | Rejected early | Pure Go SQLite(modernc.org)에서 지원 불확실. 외부 의존 증가. | Historical only |
-| 벡터 검색 (sqlite-vec) | Deferred | API 호출 필요 (임베딩). passthrough 모드에서 API 없이 동작해야 함. v0.3 이후. | Future follow-up per [0021](../decisions/0021-v2-refounding.md) |
+| 벡터 검색 (sqlite-vec) | Deferred | API 호출 필요 (임베딩). passthrough 모드에서 API 없이 동작해야 함. v0.3 이후. | Current exclusion is in `SPEC.md`; future hybrid-retrieval boundaries are in [0014](../decisions/0014-roadmap-adoption-boundaries.md) D3 |
 | RRF (Reciprocal Rank Fusion) | Rejected early | 벡터 검색 없이는 의미 없음. v0.3 이후. | Historical only |
 | **채택: trigram** | Chosen for MVP | 3-gram 기반. 한국어 동작. 추가 의존 없음. 2글자 이하 LIKE fallback. | Current implementation rationale is preserved in `DESIGN.md` and refounding records |
 
@@ -98,9 +100,9 @@ This section records background rationale. Where an accepted decision now owns t
 | 에이전트가 직접 파일시스템 조작 (MCP 없이) | Rejected early | 경로 보안 없음, FTS5 검색 없음, Obsidian 문법 파싱 없음, 스키마 강제 없음. | Historical only |
 | **채택: passthrough 모드** | Chosen for MVP | 엔진은 도구만 제공, 에이전트가 오케스트레이션. 구독 요금제로 커버. | Historical only after the v2 refounding, but still useful background |
 
-## Review-Established Principles
+## Review-Established Principles (Historical v1 Context)
 
-4차례 스펙 리뷰 + 1차 설계 리뷰를 거쳤다. 확립된 원칙:
+The v1 work went through four specification reviews and one design review. The principles established at that time were:
 
 1. **습관 형성 > 기능 완성**: MVP 성공 기준은 "위키 페이지를 만들 수 있는가"가 아니라 "1주간 매일 쓰고 유용했는가".
 2. **passthrough가 기본**: 에이전트 + _schema.md + 저수준 도구만으로 위키 빌드가 가능해야 함. 컴파일러는 편의 기능.
@@ -111,11 +113,13 @@ This section records background rationale. Where an accepted decision now owns t
 7. **eventual consistency**: 완벽한 원자성보다 단순한 best-effort + 자동 복구.
 8. **bounded staleness**: 매 호출마다 정합성 체크는 과잉. 최소 간격(기본 5초)으로 비용 제어.
 
-The durable rule owners for active repository-wide conventions now live in [0022](../decisions/0022-repository-working-conventions.md) and the linked specialized decisions.
+These bullets preserve v1 review history; they are not a current rule index. Current product, security, and architecture boundaries live in `SPEC.md`, `DESIGN.md`, and [0021](../decisions/0021-v2-refounding.md). Current repository working conventions and their qualified legacy references live in [0022](../decisions/0022-repository-working-conventions.md).
 
 ## Future Directions and Current Roadmap Context
 
-The canonical v2 product and architecture state lives in [0021](../decisions/0021-v2-refounding.md), `SPEC.md`, `DESIGN.md`, and `docs/specs/2026-07-22-refound-capture-pipeline-design.md`. The list below preserves the broader historical and forward-looking context that used to sit inside `CLAUDE.md`.
+Canonical v2 product and architecture state lives in `SPEC.md`, `DESIGN.md`, and [0021](../decisions/0021-v2-refounding.md). The [approved v2 design](../specs/2026-07-22-refound-capture-pipeline-design.md) is complementary implementation context, not another canonical owner. [0014](../decisions/0014-roadmap-adoption-boundaries.md) preserves pre-refounding roadmap-adoption rationale, while [v2 follow-ups](../research/v2-follow-ups.md) tracks current post-refounding work. The list below preserves the broader historical and forward-looking context that used to sit inside `CLAUDE.md`.
+
+The v2 refounding moved the canonical documents to English; the earlier Korean material retained above remains historical.
 
 ### v2 Phase 1 — done (this work)
 
@@ -149,7 +153,7 @@ The canonical v2 product and architecture state lives in [0021](../decisions/002
 
 ## Risks and Pivot Paths
 
-The current canonical product state lives elsewhere; this table preserves the broader risk and mitigation context from the agent-facing background.
+The current canonical product state lives elsewhere; this table preserves the broader risk and mitigation context from the agent-facing background. The refounding intentionally dropped two solved risk rows: v2 auto-digestion made the passthrough-value-versus-filesystem-access question moot, and [0021](../decisions/0021-v2-refounding.md) removed per-item ingest friction and the inability to run standalone.
 
 | Risk | Potential impact | Historical pivot path |
 |---|---|---|
@@ -236,9 +240,9 @@ This checklist is completed or superseded. It is retained only as a record of wh
 - [ ] SPEC.md, DESIGN.md, CLAUDE.md를 프로젝트 루트에 배치
 - [ ] DESIGN.md Step 1부터 시작
 
-## Appendix A: Migration Inventory From the Current `CLAUDE.md`
+## Appendix A: Migration Inventory From the Pre-Cleanup `CLAUDE.md`
 
-Every current heading, table row, checklist item, and unique bullet from `CLAUDE.md` is listed below with a destination and one disposition: `moved`, `summarized with canonical link`, or `retained in agent briefing`.
+The auditable source is the 312-line `CLAUDE.md` at pre-cleanup commit `fc605e9`. Every heading, table row, checklist item, and unique bullet from that revision is listed below with a destination and one disposition: `moved`, `summarized with canonical link`, or `retained in agent briefing`.
 
 | Source item | Final destination | Disposition |
 |---|---|---|
@@ -257,7 +261,7 @@ Every current heading, table row, checklist item, and unique bullet from `CLAUDE
 | principle bullet: decisions only in `CLAUDE.md` are not canonical | `CLAUDE.md` working brief + [0012](../decisions/0012-agent-documentation-governance.md) | retained in agent briefing |
 | maintenance bullet: plans are working notes and become stale when canon changes | `CLAUDE.md` working brief + [0012](../decisions/0012-agent-documentation-governance.md) + `docs/plans/2026-07-23-001-docs-agent-documentation-plan.md` | retained in agent briefing |
 | maintenance bullet: `AGENTS.md` is a pointer document and must not mirror the body | `CLAUDE.md` working brief + [0012](../decisions/0012-agent-documentation-governance.md) | retained in agent briefing |
-| maintenance bullet: after a completed step, update README progress and convention references | [0022](../decisions/0022-repository-working-conventions.md) | summarized with canonical link |
+| maintenance bullet: after a completed step, update README progress and convention references | [0022](../decisions/0022-repository-working-conventions.md) + [0023](../decisions/0023-stale-agent-convention-reconciliation.md) | summarized with canonical link |
 | `## 1. 프로젝트 기원` | `docs/context/project-background.md` | moved |
 | `## 2. 왜 Go인가` | `docs/context/project-background.md` | moved |
 | language table row: Go chosen for streaming I/O, goroutines, single binary, and Pure Go SQLite | `docs/context/project-background.md` | moved |
@@ -313,6 +317,7 @@ Every current heading, table row, checklist item, and unique bullet from `CLAUDE
 | principle item 7: eventual consistency beats premature atomicity | `docs/context/project-background.md` | moved |
 | principle item 8: bounded staleness over per-call full checks | `docs/context/project-background.md` | moved |
 | `## 6. Roadmap (v2)` | `docs/context/project-background.md` + [0021](../decisions/0021-v2-refounding.md) + [0014](../decisions/0014-roadmap-adoption-boundaries.md) | summarized with canonical link |
+| roadmap introduction: v2 moved canonical documents to English while earlier Korean sections stayed historical | `docs/context/project-background.md` | moved |
 | heading: v2 Phase 1 done | `docs/context/project-background.md` | moved |
 | roadmap bullet: single mode around `wiki_dir` and `sources[]` | `docs/context/project-background.md` | moved |
 | roadmap bullet: `cogvault ingest` pipeline | `docs/context/project-background.md` | moved |
@@ -342,10 +347,10 @@ Every current heading, table row, checklist item, and unique bullet from `CLAUDE
 | convention bullet: standard Go layout (`cmd/`, `internal/`) | [0022](../decisions/0022-repository-working-conventions.md) | moved |
 | convention bullet: interface-driven design for Storage/Index/Adapter and mockable tests | [0022](../decisions/0022-repository-working-conventions.md) | moved |
 | convention bullet: error wrapping with `%w` and `errors.Is()` at call sites | [0022](../decisions/0022-repository-working-conventions.md) | moved |
-| convention bullet: `context.Context` for I/O and LLM calls | [0022](../decisions/0022-repository-working-conventions.md) | moved |
+| convention bullet: `context.Context` for I/O and LLM calls | [0022](../decisions/0022-repository-working-conventions.md) + [0023](../decisions/0023-stale-agent-convention-reconciliation.md) | summarized with canonical link |
 | convention bullet: structured logging with `log/slog` and `slog.Debug` | [0022](../decisions/0022-repository-working-conventions.md) | moved |
 | convention bullet: verify with `go test -race ./...`, mocks, and fixtures | [0022](../decisions/0022-repository-working-conventions.md) | moved |
-| convention bullet: exact dependency versions, commit `go.sum`, `mcp-go` version fixed at implementation time | [0022](../decisions/0022-repository-working-conventions.md) | moved |
+| convention bullet: exact dependency versions, commit `go.sum`, `mcp-go` version fixed at implementation time | `docs/context/project-background.md` + [0022](../decisions/0022-repository-working-conventions.md) | summarized with canonical link |
 | convention bullet: config validation boundary | [0022](../decisions/0022-repository-working-conventions.md) + [0001](../decisions/0001-config-validation.md) | summarized with canonical link |
 | convention bullet: storage write serialization | [0022](../decisions/0022-repository-working-conventions.md) + [0006](../decisions/0006-storage-write-serialization.md) | summarized with canonical link |
 | convention bullet: storage error mapping | [0022](../decisions/0022-repository-working-conventions.md) + [0007](../decisions/0007-storage-error-mapping.md) | summarized with canonical link |
@@ -354,6 +359,7 @@ Every current heading, table row, checklist item, and unique bullet from `CLAUDE
 | convention bullet: CLI implementation decisions | [0022](../decisions/0022-repository-working-conventions.md) + [0015](../decisions/0015-step6-cmd-decisions.md) | summarized with canonical link |
 | convention bullet: Step 6 deferred items | [0022](../decisions/0022-repository-working-conventions.md) + [0016](../decisions/0016-step6-deferred-items.md) | summarized with canonical link |
 | `## 8. Known risks and pivot paths` | `docs/context/project-background.md` | moved |
+| risk-table introduction: refounding dropped the solved passthrough-value and per-item-friction rows | `docs/context/project-background.md` + [0021](../decisions/0021-v2-refounding.md) | summarized with canonical link |
 | risk row: trigram tokenizer Korean quality | `docs/context/project-background.md` | moved |
 | risk row: Claude Code CLI change risk | `docs/context/project-background.md` | moved |
 | risk row: `_schema.md` ignored by the digestion model | `docs/context/project-background.md` | moved |

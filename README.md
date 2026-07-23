@@ -145,7 +145,7 @@ go test -race ./...
 ## Project docs
 
 - [SPEC.md](SPEC.md) — public behavior and contract canon
-- [DESIGN.md](DESIGN.md) — architecture, package boundaries, and runtime canon
+- [DESIGN.md](DESIGN.md) — architecture, package boundaries, and component boundaries
 - [CONCEPTS.md](CONCEPTS.md) — shared terminology
 - [docs/decisions/](docs/decisions/) — durable project decision records
 - [docs/specs/2026-07-22-refound-capture-pipeline-design.md](docs/specs/2026-07-22-refound-capture-pipeline-design.md)
@@ -154,6 +154,8 @@ go test -race ./...
 - [CLAUDE.md](CLAUDE.md) and [AGENTS.md](AGENTS.md) — agent entrypoints and routing guides, not product canon
 - [docs/decisions/0022-repository-working-conventions.md](docs/decisions/0022-repository-working-conventions.md)
   — repository-wide working and verification conventions
+- [docs/decisions/0023-stale-agent-convention-reconciliation.md](docs/decisions/0023-stale-agent-convention-reconciliation.md)
+  — current documentation-maintenance and context-propagation boundaries
 - [docs/plans/](docs/plans/) — non-canonical working notes that may become stale
 
 ## License
