@@ -1,6 +1,6 @@
 ---
 title: Ingest AUP-refusal error class + LLM model option
-status: draft
+status: approved
 date: 2026-07-23
 schema: spec/v1
 ---
@@ -113,5 +113,5 @@ Backend: new exported `var ErrRefused = errors.New(...)`, sibling to `ErrTransie
 
 ## Open Decisions
 
-- **O1 — Refusal signature breadth**: treat any `terminal_reason == "api_error"` as `refused` (broad, simple; risks masking a transient API error), or require the body signature ("API Error:" / "safeguards flagged") in addition (narrow, risks missing a reworded refusal). Proposal: `api_error` terminal OR body signature → refused; the model-change re-attempt and manual re-run bound the downside. Owner: user, at approval.
-- **O2 — Old terminal rows on first configured-model run**: once `llm.model` is set, every pre-existing terminal row (empty recorded model ≠ configured model) is re-attempted once. For `refused` rows this is desired; for genuinely-`failed` (malformed) rows it costs one extra call each. Proposal: accept (one-time, bounded, and a fresh attempt may well succeed). Owner: user, at approval.
+- **O1 — resolved 2026-07-23 (user)**: refusal detection fires when the final result event's `terminal_reason == "api_error"` **OR** the body/output matches the refusal signature ("API Error:" prefix or "safeguards flagged"). Either signal suffices. The model-change re-attempt and manual re-run bound the downside of masking a transient api_error.
+- **O2 — resolved 2026-07-23 (user)**: accepted. On the first run after `llm.model` is set, every pre-existing terminal row (recorded model `''` ≠ configured model) is re-attempted once — desired for `refused`, one wasted call for a genuinely-`failed` row, bounded and possibly recovering.
