@@ -17,7 +17,7 @@ This is a short pointer/delta file for Codex and Gemini. Read `CLAUDE.md` first 
 
 ## Pointers
 
-- Core canon: `SPEC.md`, `DESIGN.md`, `CONCEPTS.md`, `docs/decisions/`
+- Core contract/design/decision docs: `SPEC.md`, `DESIGN.md`, `docs/decisions/`; shared vocabulary: `CONCEPTS.md`
 - Shared agent briefing: `CLAUDE.md`
 - Background and historical context: `docs/context/project-background.md`
 - Research notes: `docs/research/`
