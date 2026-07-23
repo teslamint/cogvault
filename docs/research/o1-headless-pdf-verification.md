@@ -16,7 +16,7 @@ One Korean-language article PDF from the real corpus, 53,968 bytes, sha256 prefi
 /Users/teslamint/.local/bin/claude --print --output-format json --allowedTools "Read"
 ```
 
-- Prompt goes on **stdin** (avoids ARG_MAX, per CLAUDE.md §6 guidance). The prompt names the absolute PDF path and instructs "output ONLY a markdown wiki page" with the frontmatter shape.
+- Prompt goes on **stdin** to avoid ARG_MAX pressure. The prompt names the absolute PDF path and instructs "output ONLY a markdown wiki page" with the frontmatter shape.
 - `--allowedTools "Read"` is sufficient permission for the CLI to read the PDF; no `--permission-mode` flag was needed.
 - Output is a JSON **array** of events; the last element has `"type":"result"`. On success: `"subtype":"success"`, `"is_error":false`, and the page text in `"result"`. Parse: take the final array element, check `subtype`/`is_error`, read `result`.
 - **Observed failure shape** (from the accidental launchd re-run): `"subtype":"error_during_execution"`, `"is_error":true`, `"result":""` (empty), exit code unobserved for that run; judge by subtype/is_error, never exit code. The U5 backend must treat any non-`success` subtype or `is_error:true` as a failure regardless of exit code, and classify `error_during_execution` as **transient** (execution/transport class per the spec's error classification).

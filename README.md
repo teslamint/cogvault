@@ -144,12 +144,19 @@ go test -race ./...
 
 ## Project docs
 
-- [SPEC.md](SPEC.md) — behavior contract (canonical)
-- [DESIGN.md](DESIGN.md) — architecture and component design (canonical)
-- [CLAUDE.md](CLAUDE.md) — decision context and background
-- [docs/decisions/](docs/decisions/) — architectural decision records
+- [SPEC.md](SPEC.md) — public behavior and contract canon
+- [DESIGN.md](DESIGN.md) — architecture, package boundaries, and component boundaries
+- [CONCEPTS.md](CONCEPTS.md) — shared terminology
+- [docs/decisions/](docs/decisions/) — durable project decision records
 - [docs/specs/2026-07-22-refound-capture-pipeline-design.md](docs/specs/2026-07-22-refound-capture-pipeline-design.md)
-  — the approved v2 design
+  — approved v2 design that complements `SPEC.md` and `DESIGN.md`
+- [docs/context/project-background.md](docs/context/project-background.md) — non-canonical background, history, and archaeology
+- [CLAUDE.md](CLAUDE.md) and [AGENTS.md](AGENTS.md) — agent entrypoints and routing guides, not product canon
+- [docs/decisions/0022-repository-working-conventions.md](docs/decisions/0022-repository-working-conventions.md)
+  — repository-wide working and verification conventions
+- [docs/decisions/0023-stale-agent-convention-reconciliation.md](docs/decisions/0023-stale-agent-convention-reconciliation.md)
+  — current documentation-maintenance and context-propagation boundaries
+- [docs/plans/](docs/plans/) — non-canonical working notes that may become stale
 
 ## License
 

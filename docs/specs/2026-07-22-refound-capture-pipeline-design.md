@@ -136,7 +136,7 @@ New SQLite table `ingest_ledger`: source path, content hash, source directory, d
 
 ## Risks
 
-- **Claude Code CLI interface or policy changes** — the standing risk from CLAUDE.md §8, now load-bearing. Mitigation: everything behind `llm.Adapter`; JSON output mode; local backend is the designed escape hatch.
+- **Claude Code CLI interface or policy changes** — a standing v2 operational risk, now load-bearing. Mitigation: everything behind `llm.Adapter`; JSON output mode; local backend is the designed escape hatch documented in `docs/decisions/0021-v2-refounding.md` D3.
 - **PDF exceeds model context or headless PDF reading fails** — mitigation: max-file-size cap, failures isolated per file, O1 verified before the pipeline is built.
 - **Quota exhaustion during the 66-file backlog** — mitigation: `--limit` batching; quota failures are classified transient (no attempt consumed), so files resume on later runs indefinitely instead of burning out the attempt budget.
 - **launchd execution context differs from an interactive shell** — TCC may block `~/Downloads` reads, launchd's PATH excludes `~/.local/bin/claude`, and the CLI must be authenticated non-interactively. Mitigation: plist template with absolute paths + explicit PATH; README one-time grant procedure; O1 explicitly verifies digestion from a launchd-launched run, not just an interactive one.
