@@ -2,7 +2,7 @@
 schema: plan/v1
 title: Agent entrypoint and project documentation cleanup
 type: docs
-status: draft
+status: approved
 date: 2026-07-23
 execution: non-code
 ---
