@@ -8,7 +8,7 @@ The SQLite table (`ingest_ledger`) recording every digestion outcome, keyed by (
 
 ## Error classes (ingest)
 
-Three-way classification of per-file ingest failures: **transient** (quota/rate limit, timeout, CLI transport — retried indefinitely, no attempt consumed), **permanent** (malformed LLM output, schema-invalid page — consumes one of 3 attempts), **infra** (write/index/ledger failures — recorded, no attempt consumed). Only permanent failures can exhaust a file.
+Four-way classification of per-file ingest failures: **transient** (quota/rate limit, timeout, CLI transport — retried indefinitely, no attempt consumed), **permanent** (malformed LLM output, schema-invalid page — consumes one of 3 attempts), **infra** (write/index/ledger failures — recorded, no attempt consumed), **refused** (provider policy/AUP refusal — terminal under the same model, re-attempted only when the configured LLM model changes, consumes no attempt). Only permanent failures can exhaust a file.
 
 ## Single-writer lock
 

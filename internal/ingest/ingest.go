@@ -43,6 +43,7 @@ const (
 	classPermanent failureClass = iota // unparsable frontmatter / missing title
 	classTransient                     // llm.ErrTransient
 	classInfra                         // store.Write / idx.Add / ledger writes
+	classRefused                       // llm.ErrRefused
 )
 
 type RunOptions struct {
@@ -123,8 +124,16 @@ func (r *Runner) Run(ctx context.Context, opts RunOptions) (*Report, error) {
 			case "success":
 				report.Unchanged++
 				continue
+			case "refused":
+				if prev.llmModel == r.cfg.LLM.Model {
+					report.Skipped++
+					report.PerFile = append(report.PerFile, FileResult{
+						Path: entry.absPath, Action: actionRefused, Error: prev.lastError,
+					})
+					continue
+				}
 			case "failed":
-				if prev.attempts >= maxAttempts {
+				if prev.attempts >= maxAttempts && prev.llmModel == r.cfg.LLM.Model {
 					report.Skipped++
 					report.PerFile = append(report.PerFile, FileResult{
 						Path: entry.absPath, Action: actionExhausted, Error: prev.lastError,
@@ -216,6 +225,8 @@ func (r *Runner) digestOne(ctx context.Context, entry scanEntry, hash, schemaTex
 		class := classPermanent
 		if errors.Is(err, llm.ErrTransient) {
 			class = classTransient
+		} else if errors.Is(err, llm.ErrRefused) {
+			class = classRefused
 		}
 		r.recordFailure(entry, hash, origin, prev, report, "digest: "+err.Error(), class)
 		return
@@ -257,6 +268,7 @@ func (r *Runner) digestOne(ctx context.Context, entry scanEntry, hash, schemaTex
 		attempts:    attemptsOf(prev),
 		lastError:   "",
 		runOrigin:   origin,
+		llmModel:    r.cfg.LLM.Model,
 	})
 	if err != nil {
 		r.recordFailure(entry, hash, origin, prev, report, "ledger: "+err.Error(), classInfra)
@@ -272,17 +284,27 @@ func (r *Runner) recordFailure(entry scanEntry, hash, origin string, prev *ledge
 	if class == classPermanent {
 		attempts++
 	}
+	status := "failed"
+	if class == classRefused {
+		status = "refused"
+	}
 	_ = r.ledger.upsert(ledgerRow{
 		sourcePath:  entry.absPath,
 		contentHash: hash,
 		sourceDir:   entry.sourceDir,
 		digestedAt:  r.now().UTC().Format(time.RFC3339Nano),
 		wikiPage:    "",
-		status:      "failed",
+		status:      status,
 		attempts:    attempts,
 		lastError:   msg,
 		runOrigin:   origin,
+		llmModel:    r.cfg.LLM.Model,
 	})
+	if class == classRefused {
+		report.Refused++
+		report.PerFile = append(report.PerFile, FileResult{Path: entry.absPath, Action: actionRefused, Error: msg})
+		return
+	}
 	report.Failed++
 	report.PerFile = append(report.PerFile, FileResult{Path: entry.absPath, Action: actionFailed, Error: msg})
 }

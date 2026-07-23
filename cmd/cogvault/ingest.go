@@ -38,7 +38,7 @@ func runIngest(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("claude CLI not found in PATH; install Claude Code or add it to PATH")
 	}
-	adpt := llm.NewClaudeCode(binPath)
+	adpt := llm.NewClaudeCode(binPath, cfg.LLM.Model)
 
 	runner, err := ingest.New(cfg, store, idx, adpt, cfg.DBPath)
 	if err != nil {

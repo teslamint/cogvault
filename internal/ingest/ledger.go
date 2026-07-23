@@ -18,6 +18,7 @@ type ledgerRow struct {
 	attempts    int
 	lastError   string
 	runOrigin   string
+	llmModel    string
 }
 
 type ledger struct {
@@ -34,6 +35,7 @@ const ledgerDDL = `CREATE TABLE IF NOT EXISTS ingest_ledger (
 	attempts INTEGER,
 	last_error TEXT,
 	run_origin TEXT,
+	llm_model TEXT NOT NULL DEFAULT '',
 	PRIMARY KEY (source_path, content_hash)
 )`
 
@@ -54,7 +56,43 @@ func openLedger(dbPath string) (*ledger, error) {
 		db.Close()
 		return nil, fmt.Errorf("ingest.openLedger %s: %w", dbPath, err)
 	}
+	if err := migrateLLMModel(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("ingest.openLedger %s: %w", dbPath, err)
+	}
 	return &ledger{db: db}, nil
+}
+
+func migrateLLMModel(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(ingest_ledger)`)
+	if err != nil {
+		return err
+	}
+	has := false
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, ctype string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == "llm_model" {
+			has = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if has {
+		return nil
+	}
+	if _, err := db.Exec(`ALTER TABLE ingest_ledger ADD COLUMN llm_model TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (l *ledger) close() error {
@@ -67,10 +105,10 @@ func (l *ledger) close() error {
 func (l *ledger) lookup(sourcePath, contentHash string) (*ledgerRow, bool, error) {
 	row := &ledgerRow{sourcePath: sourcePath, contentHash: contentHash}
 	err := l.db.QueryRow(
-		`SELECT source_dir, digested_at, wiki_page, status, attempts, last_error, run_origin
+		`SELECT source_dir, digested_at, wiki_page, status, attempts, last_error, run_origin, llm_model
 		 FROM ingest_ledger WHERE source_path = ? AND content_hash = ?`,
 		sourcePath, contentHash,
-	).Scan(&row.sourceDir, &row.digestedAt, &row.wikiPage, &row.status, &row.attempts, &row.lastError, &row.runOrigin)
+	).Scan(&row.sourceDir, &row.digestedAt, &row.wikiPage, &row.status, &row.attempts, &row.lastError, &row.runOrigin, &row.llmModel)
 	if err == sql.ErrNoRows {
 		return nil, false, nil
 	}
@@ -106,10 +144,10 @@ func (l *ledger) supersedePrevSuccess(sourcePath string) error {
 func (l *ledger) upsert(row ledgerRow) error {
 	_, err := l.db.Exec(
 		`INSERT OR REPLACE INTO ingest_ledger
-		 (source_path, content_hash, source_dir, digested_at, wiki_page, status, attempts, last_error, run_origin)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 (source_path, content_hash, source_dir, digested_at, wiki_page, status, attempts, last_error, run_origin, llm_model)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		row.sourcePath, row.contentHash, row.sourceDir, row.digestedAt,
-		row.wikiPage, row.status, row.attempts, row.lastError, row.runOrigin,
+		row.wikiPage, row.status, row.attempts, row.lastError, row.runOrigin, row.llmModel,
 	)
 	if err != nil {
 		return fmt.Errorf("ingest.ledger.upsert %s: %w", row.sourcePath, err)

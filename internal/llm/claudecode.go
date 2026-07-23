@@ -15,11 +15,12 @@ const defaultTimeout = 5 * time.Minute
 
 type ClaudeCode struct {
 	binPath string
+	model   string
 	timeout time.Duration // 0 => defaultTimeout; overridden in tests
 }
 
-func NewClaudeCode(binPath string) *ClaudeCode {
-	return &ClaudeCode{binPath: binPath}
+func NewClaudeCode(binPath, model string) *ClaudeCode {
+	return &ClaudeCode{binPath: binPath, model: model}
 }
 
 func (c *ClaudeCode) Name() string { return "claudecode" }
@@ -40,7 +41,11 @@ func (c *ClaudeCode) digest(ctx context.Context, req DigestRequest) (*DigestResu
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, c.binPath, "--print", "--output-format", "json", "--allowedTools", "Read")
+	args := []string{"--print", "--output-format", "json", "--allowedTools", "Read"}
+	if c.model != "" {
+		args = append(args, "--model", c.model)
+	}
+	cmd := exec.CommandContext(ctx, c.binPath, args...)
 	// Bound cleanup once the deadline fires: an orphaned descendant holding the
 	// output pipes open must not keep Digest blocked past its timeout.
 	cmd.WaitDelay = 2 * time.Second
@@ -54,6 +59,9 @@ func (c *ClaudeCode) digest(ctx context.Context, req DigestRequest) (*DigestResu
 		return nil, fmt.Errorf("timeout after %s: %w", timeout, ErrTransient)
 	}
 	if runErr != nil {
+		if isRefusalText(stdout.String()) || isRefusalText(stderr.String()) {
+			return nil, fmt.Errorf("claude policy refusal: %w", ErrRefused)
+		}
 		// Both a failed process launch and a nonzero exit are transport/quota
 		// class; never inspect the exit code for digestion success (U1 spike).
 		msg := strings.TrimSpace(stderr.String())
@@ -71,10 +79,16 @@ func (c *ClaudeCode) digest(ctx context.Context, req DigestRequest) (*DigestResu
 }
 
 type resultEvent struct {
-	Type    string `json:"type"`
-	Subtype string `json:"subtype"`
-	IsError bool   `json:"is_error"`
-	Result  string `json:"result"`
+	Type           string `json:"type"`
+	Subtype        string `json:"subtype"`
+	IsError        bool   `json:"is_error"`
+	Result         string `json:"result"`
+	TerminalReason string `json:"terminal_reason"`
+}
+
+func isRefusalText(s string) bool {
+	s = strings.TrimSpace(s)
+	return strings.HasPrefix(s, "API Error:") || strings.Contains(s, "safeguards flagged")
 }
 
 func parseResult(stdout []byte) (string, error) {
@@ -86,6 +100,9 @@ func parseResult(stdout []byte) (string, error) {
 	final, ok := lastResultEvent(events)
 	if !ok {
 		return "", errors.New("no result event in claude output")
+	}
+	if final.TerminalReason == "api_error" || isRefusalText(final.Result) {
+		return "", fmt.Errorf("claude policy refusal: %w", ErrRefused)
 	}
 	if final.IsError || final.Subtype == "error_during_execution" {
 		return "", fmt.Errorf("claude execution error (subtype=%q): %w", final.Subtype, ErrTransient)
