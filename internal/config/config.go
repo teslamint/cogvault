@@ -17,6 +17,7 @@ type SourceDir struct {
 
 type LLMConfig struct {
 	Backend string `yaml:"backend"`
+	Model   string `yaml:"model"`
 }
 
 type Config struct {

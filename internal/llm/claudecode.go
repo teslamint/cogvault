@@ -15,11 +15,12 @@ const defaultTimeout = 5 * time.Minute
 
 type ClaudeCode struct {
 	binPath string
+	model   string
 	timeout time.Duration // 0 => defaultTimeout; overridden in tests
 }
 
-func NewClaudeCode(binPath string) *ClaudeCode {
-	return &ClaudeCode{binPath: binPath}
+func NewClaudeCode(binPath, model string) *ClaudeCode {
+	return &ClaudeCode{binPath: binPath, model: model}
 }
 
 func (c *ClaudeCode) Name() string { return "claudecode" }
@@ -40,7 +41,11 @@ func (c *ClaudeCode) digest(ctx context.Context, req DigestRequest) (*DigestResu
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, c.binPath, "--print", "--output-format", "json", "--allowedTools", "Read")
+	args := []string{"--print", "--output-format", "json", "--allowedTools", "Read"}
+	if c.model != "" {
+		args = append(args, "--model", c.model)
+	}
+	cmd := exec.CommandContext(ctx, c.binPath, args...)
 	// Bound cleanup once the deadline fires: an orphaned descendant holding the
 	// output pipes open must not keep Digest blocked past its timeout.
 	cmd.WaitDelay = 2 * time.Second

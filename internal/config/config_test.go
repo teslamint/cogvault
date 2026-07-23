@@ -68,6 +68,28 @@ llm:
 	}
 }
 
+func TestLoadLLMModel(t *testing.T) {
+	p := writeConfigFile(t, "wiki_dir: /data/wiki\ndb_path: /state/db.db\nllm:\n  model: opus\n")
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LLM.Model != "opus" {
+		t.Errorf("LLM.Model = %q, want %q", cfg.LLM.Model, "opus")
+	}
+}
+
+func TestLoadLLMModelDefaultEmpty(t *testing.T) {
+	p := writeConfigFile(t, "wiki_dir: /data/wiki\ndb_path: /state/db.db\n")
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LLM.Model != "" {
+		t.Errorf("LLM.Model = %q, want empty default", cfg.LLM.Model)
+	}
+}
+
 func TestLoadDefaults(t *testing.T) {
 	p := writeConfigFile(t, "wiki_dir: /data/wiki\ndb_path: /state/db.db\n")
 	cfg, err := Load(p)
