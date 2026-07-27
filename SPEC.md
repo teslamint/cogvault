@@ -107,6 +107,8 @@ sources:                # external directories the ingest pipeline reads. May be
     types: [string]     # allowed extensions, lowercase, no leading dot (e.g. [pdf])
 llm:
   backend: string       # default "claudecode". Only "claudecode" accepted in Phase 1.
+  model: string         # optional. Passed as --model to the LLM backend. Default: empty (backend default).
+max_file_size_mb: int   # ingest file size cap in MB. Default: 32. Negative rejected.
 exclude: string[]       # scan + index exclusion, relative to wiki_dir. Default: [".obsidian", ".trash"]
 exclude_read: string[]  # read + scan + index exclusion, relative to wiki_dir. Default: []
 adapter: string         # default "obsidian". Allowed: "obsidian", "markdown".
@@ -133,6 +135,7 @@ later (0001). Rejected:
 - `db_path` inside `wiki_dir`.
 - `db_path` that is a directory-like path.
 - `adapter` outside the allowed list; `llm.backend` other than `claudecode`.
+- `max_file_size_mb` negative (zero or omitted defaults to 32).
 - Unknown YAML keys (`KnownFields(true)`) and multi-document YAML.
 
 `wiki_dir`/`db_path` have no invented defaults: an empty value is a validation
@@ -467,7 +470,7 @@ cogvault ingest [--config <path>] [--dry-run] [--limit N] [--scheduled]
 ```
 scan source dir (top level only, Lstat: skip dirs/symlinks)
   → type filter (lowercase ext vs sources[].types)
-  → size cap (32MB; oversized files reported, not persisted)
+  → size cap (config max_file_size_mb, default 32MB; oversized files reported, not persisted)
   → settle-window gate (skip files modified within 2m — mid-download guard)
   → sha256 content hash → ledger lookup (skip if already processed)
   → llm.Digest(source path, schema) via claude --print
@@ -534,10 +537,13 @@ Owned by `internal/ingest` through its own DB connection to `db_path` (WAL +
 busy_timeout make the second connection safe). Type-excluded/oversized files are
 reported per run, not persisted. Source originals are never moved or deleted.
 
-### 10.7 Behavior constants (not config)
+### 10.7 Behavior constants and promoted knobs
 
-LLM timeout 5m, max permanent-failure attempts 3, max file size 32MB, settle
-window 2m. Each is promoted to a config key only on demonstrated need.
+LLM timeout 5m, max permanent-failure attempts 3, settle window 2m — these
+remain code constants, promoted to config keys only on demonstrated need.
+
+Max file size was promoted to `max_file_size_mb` (default 32MB) after a real
+corpus file (42MB PDF) was permanently skipped (F9).
 
 ---
 

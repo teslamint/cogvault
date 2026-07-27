@@ -28,6 +28,7 @@ type Config struct {
 	ExcludeRead         []string    `yaml:"exclude_read"`
 	Adapter             string      `yaml:"adapter"`
 	ConsistencyInterval int         `yaml:"consistency_interval"`
+	MaxFileSizeMB       int         `yaml:"max_file_size_mb"`
 	LLM                 LLMConfig   `yaml:"llm"`
 }
 
@@ -107,6 +108,9 @@ func (c *Config) applyDefaults() {
 	if c.ConsistencyInterval <= 0 {
 		c.ConsistencyInterval = 5
 	}
+	if c.MaxFileSizeMB == 0 {
+		c.MaxFileSizeMB = 32
+	}
 	if c.LLM.Backend == "" {
 		c.LLM.Backend = "claudecode"
 	}
@@ -160,6 +164,9 @@ func (c *Config) validate() error {
 		if err := validatePath(fmt.Sprintf("exclude_read[%d]", i), e, false); err != nil {
 			return err
 		}
+	}
+	if c.MaxFileSizeMB < 0 {
+		return fmt.Errorf("max_file_size_mb: must be positive; expected a value in megabytes")
 	}
 	if c.Adapter != "obsidian" && c.Adapter != "markdown" {
 		return fmt.Errorf("adapter: %q not supported; use \"obsidian\" or \"markdown\"", c.Adapter)
