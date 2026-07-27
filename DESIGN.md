@@ -264,6 +264,7 @@ resolveConfigPath → Load → bootstrap(store/index/adapter) → CheckConsisten
 | `mcp/server.go` | MCP server, instructions |
 | `mcp/tools.go` | six tools, mapError, listWithMeta (no scope) |
 | `cmd/cogvault/*` | cobra CLI: `--config`, init/search/serve/ingest |
+| `Makefile` | build (with adhoc codesign), install, test, clean |
 | `schema/schema.go` + `default_schema.md` | `go:embed` default schema |
 
 ---

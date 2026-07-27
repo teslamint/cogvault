@@ -38,6 +38,14 @@ The vault concept from v1 is gone: `wiki_dir` is the single storage root, and
 ### 1. Build
 
 ```bash
+make build                         # build + adhoc codesign (macOS FDA safe)
+make install                       # build + copy to ~/bin/ (launchd path)
+make install INSTALL_DIR=/usr/local/bin  # alternate install path
+```
+
+Or manually (without codesign — may cause macOS SIGKILL if FDA is granted):
+
+```bash
 go build -o cogvault ./cmd/cogvault
 ```
 
@@ -139,7 +147,8 @@ until a later phase digests markdown sources. See
 ## Development
 
 ```bash
-go test -race ./...
+make test                          # go test -race ./...
+make clean                         # remove built binary
 ```
 
 ## Project docs
