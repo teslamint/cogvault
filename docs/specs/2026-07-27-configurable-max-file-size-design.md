@@ -1,6 +1,6 @@
 ---
 title: "F9: Configurable max file size for ingest"
-status: draft
+status: approved
 created: 2026-07-27
 ---
 
