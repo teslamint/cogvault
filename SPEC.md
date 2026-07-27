@@ -107,6 +107,8 @@ sources:                # external directories the ingest pipeline reads. May be
     types: [string]     # allowed extensions, lowercase, no leading dot (e.g. [pdf])
 llm:
   backend: string       # default "claudecode". Only "claudecode" accepted in Phase 1.
+  model: string         # optional. Passed as --model to the LLM backend. Default: empty (backend default).
+max_file_size_mb: int   # ingest file size cap in MB. Default: 32. Negative rejected.
 exclude: string[]       # scan + index exclusion, relative to wiki_dir. Default: [".obsidian", ".trash"]
 exclude_read: string[]  # read + scan + index exclusion, relative to wiki_dir. Default: []
 adapter: string         # default "obsidian". Allowed: "obsidian", "markdown".
@@ -133,6 +135,7 @@ later (0001). Rejected:
 - `db_path` inside `wiki_dir`.
 - `db_path` that is a directory-like path.
 - `adapter` outside the allowed list; `llm.backend` other than `claudecode`.
+- `max_file_size_mb` negative (zero or omitted defaults to 32).
 - Unknown YAML keys (`KnownFields(true)`) and multi-document YAML.
 
 `wiki_dir`/`db_path` have no invented defaults: an empty value is a validation

@@ -254,21 +254,54 @@ func TestRunOversizedAndTypeExcluded(t *testing.T) {
 }
 
 func TestRunConfigMaxFileSize(t *testing.T) {
-	h := newHarness(t, []string{"md"}, okLLM())
-	h.runner.cfg.MaxFileSizeMB = 1
-	h.runner.maxFileSize = int64(h.runner.cfg.MaxFileSizeMB) << 20
+	root := t.TempDir()
+	wikiDir := filepath.Join(root, "wiki")
+	srcDir := filepath.Join(root, "src")
+	dbPath := filepath.Join(root, "cogvault.db")
+	if err := os.MkdirAll(wikiDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		WikiDir:       wikiDir,
+		DBPath:        dbPath,
+		Sources:       []config.SourceDir{{Path: srcDir, Types: []string{"md"}}},
+		Adapter:       "obsidian",
+		MaxFileSizeMB: 1,
+	}
+	store := storage.NewFSStorage(wikiDir, cfg)
+	idx, err := index.NewSQLiteIndex(wikiDir, dbPath, cfg)
+	if err != nil {
+		t.Fatalf("NewSQLiteIndex: %v", err)
+	}
+	t.Cleanup(func() { idx.Close() })
 
-	h.write(t, "small.md", "fits")
-	// Write a file that exceeds 1MB
+	m := okLLM()
+	runner, err := New(cfg, store, idx, m, dbPath)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { runner.Close() })
+	runner.settleWindow = 0
+
+	if runner.maxFileSize != int64(1)<<20 {
+		t.Fatalf("maxFileSize = %d, want %d (1MB from config)", runner.maxFileSize, int64(1)<<20)
+	}
+
+	if err := os.WriteFile(filepath.Join(srcDir, "small.md"), []byte("fits"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	big := make([]byte, (1<<20)+1)
 	for i := range big {
 		big[i] = 'x'
 	}
-	if err := os.WriteFile(filepath.Join(h.srcDir, "big.md"), big, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(srcDir, "big.md"), big, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "interactive"})
+	rep, err := runner.Run(context.Background(), RunOptions{Origin: "interactive"})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
