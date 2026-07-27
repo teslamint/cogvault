@@ -46,13 +46,14 @@ The ingest error classes (§4.2) are separate: `llm.ErrTransient` plus an intern
 
 ```go
 type SourceDir struct { Path string; Types []string }
-type LLMConfig struct { Backend string }
+type LLMConfig struct { Backend string; Model string }
 type Config struct {
     WikiDir, DBPath     string
     Sources             []SourceDir
     Exclude, ExcludeRead []string
     Adapter             string
     ConsistencyInterval int
+    MaxFileSizeMB       int            // default 32; ingest uses int64(v)<<20
     LLM                 LLMConfig
 }
 func Load(configPath string) (*Config, error)   // explicit path, no vault discovery
@@ -157,7 +158,8 @@ type RunOptions struct { DryRun bool; Limit int; Origin string }
 **Responsibility**: orchestrate the digest stage. `Run` acquires an exclusive
 `flock` on `<dir(dbPath)>/ingest.lock` (fail fast → `ErrAlreadyRunning`), scans
 each `cfg.Sources` dir **top level only** (`os.ReadDir` + `os.Lstat`, skipping
-dirs and symlinks) applying the type filter, 32MB size cap, and 2m settle window,
+dirs and symlinks) applying the type filter, configurable size cap (default 32MB,
+`cfg.MaxFileSizeMB`), and 2m settle window,
 streams a sha256 hash (`hashFile`, no full file in memory), looks up the ledger,
 calls `llm.Digest`, validates the page's frontmatter from bytes, resolves the
 collision-aware page path, writes through `storage`, indexes via `idx.Add`, and
