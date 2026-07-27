@@ -32,27 +32,40 @@ justify a new nesting level.
 
 ### Behavior
 
-- Zero or omitted: default 32MB (preserves current behavior).
-- Negative: validation error at config load (`max_file_size_mb: must be positive`).
-- Positive: value × 1MB becomes the ingest runner's `maxFileSize`.
+- Zero or omitted: `applyDefaults` sets 32 (the sole default owner; the ingest
+  package const is deleted). The zero-guard uses `== 0` (not `<= 0`) so negatives
+  reach validation — this differs from `consistency_interval` which silently
+  replaces `<= 0`.
+- Negative: validation error at config load (`max_file_size_mb: must be positive;
+  expected a value in megabytes`).
+- Positive: `int64(value) << 20` becomes the ingest runner's `maxFileSize`. No
+  upper-bound validation — the cost note below serves as the user-facing guard.
 
 ### Affected files
 
 | File | Change |
 |------|--------|
-| `internal/config/config.go` | Add `MaxFileSizeMB int` field + yaml tag; zero-guard in `applyDefaults`; negative-value validation |
-| `internal/ingest/ingest.go` | `New` wires `cfg.MaxFileSizeMB * 1<<20` → `Runner.maxFileSize`; package const `maxFileSize` remains as the default value source |
+| `internal/config/config.go` | Add `MaxFileSizeMB int` field + yaml tag; `== 0` guard in `applyDefaults`; `< 0` validation in `validate()` |
+| `internal/ingest/ingest.go` | `New` wires `int64(cfg.MaxFileSizeMB) << 20` → `Runner.maxFileSize`; delete package const `maxFileSize` (default now owned by config) |
 | `internal/config/config_test.go` | Validation test for negative value |
 | `internal/ingest/ingest_test.go` | Existing `h.runner.maxFileSize = 8` seam unchanged; add one test confirming config wiring |
-| `DESIGN.md` §2.2, §2.7 | Update Config struct listing and "32MB size cap" text |
-| `SPEC.md` §10 constants (line 539) and §flow (line 470) | Update both "32MB" references to note configurability |
+| `DESIGN.md` §2.2 | Update Config struct listing (also add `LLMConfig.Model` which is currently missing from the listing) |
+| `DESIGN.md` §2.7 | Update "32MB size cap" to "configurable size cap (default 32MB)" |
+| `SPEC.md` §10.7 (line 537–540) | `max file size 32MB` promoted to config key; update the "promoted on demonstrated need" clause to record this as the first such promotion |
+| `SPEC.md` §flow (line 470) | Update "size cap (32MB; ...)" to note configurability |
+| `docs/research/v2-follow-ups.md` | Update F9 row status |
 
 ### Forward/backward compatibility
 
 `KnownFields(true)` means an old binary rejects `max_file_size_mb` in config.
-This is the accepted tradeoff per decision `1dd6ef9a-c4f` (typo detection over
-forward compatibility). Omitting the field on old+new binaries preserves the 32MB
-default.
+This is the accepted tradeoff per `docs/decisions/0001-config-validation.md`
+(typo detection over forward compatibility).
+
+`cogvault init` (`Save`) marshals `DefaultConfig()` without `omitempty`, so a
+freshly initialized config will contain `max_file_size_mb: 32`. This means a
+config created by a new binary cannot be used with an old binary — the same
+forward-compatibility tradeoff as all other fields. Omitting the field in
+hand-written configs preserves old-binary compatibility.
 
 ### Cost note
 
@@ -63,8 +76,8 @@ A full digest prompt will cost more. There is no per-file cost guard in ingest.
 ## Success criteria
 
 - SC1a (unit-testable): `New` produces a Runner whose `maxFileSize` equals
-  `cfg.MaxFileSizeMB<<20`; a synthetic file above the configured cap skips, below
-  digests.
+  `int64(cfg.MaxFileSizeMB) << 20`; a synthetic file above the configured cap
+  skips, below digests.
 - SC1b (manual, ~$3): with `max_file_size_mb: 64`, the NYT PDF digests instead of
   appearing in `skipped`. Single real-corpus run, not a suite assertion.
 - SC2: A config with the field omitted or set to 0 behaves identically to today
@@ -74,11 +87,14 @@ A full digest prompt will cost more. There is no per-file cost guard in ingest.
 
 ## Non-edits
 
-`docs/decisions/0021-v2-refounding.md` states "max file size 32MB" but is an
-accepted decision record describing the original design. It is not edited — the
-config default preserves the original decision; the new field only lets users
-override it.
+- `docs/decisions/0021-v2-refounding.md` states "max file size 32MB" — accepted
+  decision record describing the original design. Not edited; the config default
+  preserves the original decision.
+- `docs/specs/2026-07-22-refound-capture-pipeline-design.md` line 87 states
+  "max file size 32MB" in the behavior-knobs-are-constants principle. Not edited;
+  it describes the original design stance. This spec is the "demonstrated need"
+  that the original text anticipated.
 
 ## Open decisions
 
-None — the design is minimal and unambiguous.
+None.
