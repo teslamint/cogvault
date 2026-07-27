@@ -67,10 +67,11 @@ func newHarness(t *testing.T, types []string, m *mockLLM) *harness {
 		t.Fatal(err)
 	}
 	cfg := &config.Config{
-		WikiDir: wikiDir,
-		DBPath:  dbPath,
-		Sources: []config.SourceDir{{Path: srcDir, Types: types}},
-		Adapter: "obsidian",
+		WikiDir:       wikiDir,
+		DBPath:        dbPath,
+		Sources:       []config.SourceDir{{Path: srcDir, Types: types}},
+		Adapter:       "obsidian",
+		MaxFileSizeMB: 32,
 	}
 	store := storage.NewFSStorage(wikiDir, cfg)
 	idx, err := index.NewSQLiteIndex(wikiDir, dbPath, cfg)
@@ -249,6 +250,33 @@ func TestRunOversizedAndTypeExcluded(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("ledger rows = %d, want 0", count)
+	}
+}
+
+func TestRunConfigMaxFileSize(t *testing.T) {
+	h := newHarness(t, []string{"md"}, okLLM())
+	h.runner.cfg.MaxFileSizeMB = 1
+	h.runner.maxFileSize = int64(h.runner.cfg.MaxFileSizeMB) << 20
+
+	h.write(t, "small.md", "fits")
+	// Write a file that exceeds 1MB
+	big := make([]byte, (1<<20)+1)
+	for i := range big {
+		big[i] = 'x'
+	}
+	if err := os.WriteFile(filepath.Join(h.srcDir, "big.md"), big, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "interactive"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Digested != 1 {
+		t.Fatalf("digested = %d, want 1", rep.Digested)
+	}
+	if rep.Skipped != 1 {
+		t.Fatalf("skipped = %d, want 1", rep.Skipped)
 	}
 }
 

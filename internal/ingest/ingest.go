@@ -26,7 +26,6 @@ import (
 
 const (
 	maxAttempts  = 3
-	maxFileSize  = 32 << 20
 	settleWindow = 2 * time.Minute
 )
 
@@ -82,7 +81,7 @@ func New(cfg *config.Config, store storage.Storage, idx index.Index, llmAdapter 
 		ledger:       l,
 		dbPath:       dbPath,
 		settleWindow: settleWindow,
-		maxFileSize:  maxFileSize,
+		maxFileSize:  int64(cfg.MaxFileSizeMB) << 20,
 		now:          time.Now,
 	}, nil
 }

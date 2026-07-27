@@ -29,6 +29,7 @@ exclude: ["vendor", "node_modules"]
 exclude_read: ["private"]
 adapter: "markdown"
 consistency_interval: 10
+max_file_size_mb: 64
 llm:
   backend: claudecode
 `)
@@ -62,6 +63,9 @@ llm:
 	}
 	if cfg.ConsistencyInterval != 10 {
 		t.Errorf("ConsistencyInterval = %d, want 10", cfg.ConsistencyInterval)
+	}
+	if cfg.MaxFileSizeMB != 64 {
+		t.Errorf("MaxFileSizeMB = %d, want 64", cfg.MaxFileSizeMB)
 	}
 	if cfg.LLM.Backend != "claudecode" {
 		t.Errorf("LLM.Backend = %q, want %q", cfg.LLM.Backend, "claudecode")
@@ -107,6 +111,9 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.ConsistencyInterval != 5 {
 		t.Errorf("ConsistencyInterval = %d, want 5", cfg.ConsistencyInterval)
+	}
+	if cfg.MaxFileSizeMB != 32 {
+		t.Errorf("MaxFileSizeMB = %d, want 32 (default)", cfg.MaxFileSizeMB)
 	}
 	if cfg.LLM.Backend != "claudecode" {
 		t.Errorf("LLM.Backend = %q, want %q (default)", cfg.LLM.Backend, "claudecode")
@@ -231,6 +238,7 @@ func TestValidationErrors(t *testing.T) {
 		{"exclude_read empty", "wiki_dir: /data/wiki\ndb_path: /state/db.db\nexclude_read: [\"\"]\n", "exclude_read[0]", []string{"empty"}},
 		{"adapter invalid", "wiki_dir: /data/wiki\ndb_path: /state/db.db\nadapter: notion\n", "adapter", []string{"not supported"}},
 		{"llm backend invalid", "wiki_dir: /data/wiki\ndb_path: /state/db.db\nllm:\n  backend: local\n", "llm.backend", []string{"not supported"}},
+		{"max_file_size_mb negative", "wiki_dir: /data/wiki\ndb_path: /state/db.db\nmax_file_size_mb: -1\n", "max_file_size_mb", []string{"positive"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
