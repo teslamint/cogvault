@@ -53,12 +53,19 @@ codesign --force --sign - ~/bin/cogvault
 The `--force` flag replaces the existing adhoc signature. The `-` identity creates
 a new adhoc signature with a fresh code directory hash that macOS accepts.
 
-For automation, add to a Makefile:
+When building and installing to a separate path, re-sign at the destination —
+signing the build artifact alone is not enough because macOS TCC matches the
+code hash at the FDA-granted path, not the build path:
 
 ```makefile
 build:
-	go build -o ~/bin/cogvault ./cmd/cogvault/
-	codesign --force --sign - ~/bin/cogvault
+	go build -o cogvault ./cmd/cogvault/
+	codesign --force --sign - cogvault
+
+install: build
+	mkdir -p $(HOME)/bin
+	cp cogvault $(HOME)/bin/cogvault
+	codesign --force --sign - $(HOME)/bin/cogvault
 ```
 
 ## Why This Works
@@ -79,6 +86,8 @@ grants or prompt for new ones.
 
 - Always run `codesign --force --sign -` after `go build` on macOS when the
   binary accesses TCC-protected directories.
-- Add the codesign step to the project's build target (Makefile, justfile, or
-  equivalent).
+- When copying to a separate install path, re-sign at the destination — a
+  sign-then-copy without destination re-sign still triggers SIGKILL.
+- Add the codesign step to the project's build target (`make build` / `make
+  install` in cogvault's Makefile).
 - When granting FDA to a Go binary, expect to re-sign after every rebuild.

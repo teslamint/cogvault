@@ -17,7 +17,7 @@ Add a Makefile to cogvault with build, install, test, and clean targets. The bui
 
 ### S1: Developer rebuilds and installs after code change
 
-Developer edits Go source, runs `make install`. The binary is built, adhoc-signed, and copied to `~/bin/cogvault` (the launchd plist path). The next `launchctl start` uses the new binary without SIGKILL.
+Developer edits Go source, runs `make install`. The binary is built, adhoc-signed, copied to `~/bin/cogvault` (the launchd plist path), and re-signed at the destination. The next `launchctl start` uses the new binary without SIGKILL.
 
 ### S2: Developer runs tests
 
@@ -32,7 +32,7 @@ Developer runs `make build` or just `make`. The binary is produced in the projec
 ### In
 
 - `Makefile` in project root with targets: `build` (default), `install`, `test`, `clean`
-- `codesign --force --sign -` in the build target
+- `codesign --force --sign -` in the build target and at the install destination
 - DESIGN.md update: mention Makefile in §5 File responsibilities
 - README.md update: point build instructions at `make build` / `make install`
 
