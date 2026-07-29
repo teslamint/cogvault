@@ -55,7 +55,11 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	for _, r := range results {
 		typeStr := ""
 		if r.Type != "" {
-			typeStr = fmt.Sprintf("  (%s)", r.Type)
+			if r.Category != "" {
+				typeStr = fmt.Sprintf("  (%s/%s)", r.Type, r.Category)
+			} else {
+				typeStr = fmt.Sprintf("  (%s)", r.Type)
+			}
 		}
 		cmd.Printf("%s  %s%s\n", r.Path, r.Title, typeStr)
 		if r.Snippet != "" {

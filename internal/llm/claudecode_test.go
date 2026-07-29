@@ -103,6 +103,11 @@ func TestDigestHappy(t *testing.T) {
 	if !strings.Contains(string(stdin), "notes/x.pdf") {
 		t.Errorf("stdin missing source path: %q", stdin)
 	}
+	for _, want := range []string{"category:", "article", "legal", "reference"} {
+		if !strings.Contains(string(stdin), want) {
+			t.Errorf("stdin missing category instruction %q", want)
+		}
+	}
 }
 
 func TestDigestFencedStripped(t *testing.T) {

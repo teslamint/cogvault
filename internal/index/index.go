@@ -2,6 +2,7 @@ package index
 
 import (
 	"errors"
+	"strings"
 
 	"github.com/teslamint/cogvault/internal/adapter"
 	"github.com/teslamint/cogvault/internal/storage"
@@ -20,17 +21,32 @@ type Index interface {
 }
 
 type Result struct {
-	Path    string  `json:"path"`
-	Title   string  `json:"title"`
-	Type    string  `json:"type"`
-	Snippet string  `json:"snippet"`
-	Score   float64 `json:"score"`
+	Path     string  `json:"path"`
+	Title    string  `json:"title"`
+	Type     string  `json:"type"`
+	Category string  `json:"category"`
+	Snippet  string  `json:"snippet"`
+	Score    float64 `json:"score"`
 }
 
 type FileMeta struct {
 	Path        string `json:"path"`
 	Title       string `json:"title"`
 	Type        string `json:"type"`
+	Category    string `json:"category"`
 	ContentHash string `json:"content_hash"`
 	IndexedAt   string `json:"indexed_at"`
+}
+
+func NormalizeCategory(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	v := strings.ToLower(strings.TrimSpace(raw))
+	switch v {
+	case "article", "legal", "reference":
+		return v
+	default:
+		return "article"
+	}
 }

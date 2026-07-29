@@ -374,14 +374,14 @@ best-effort index reflection. Errors: `ErrPermission`, `ErrTraversal`, `ErrSymli
 
 ### 8.4 wiki_list
 
-`prefix: string` (optional, default `""`) → `[{path, name, is_dir, title, type}]`.
-Non-recursive; title/type from the `GetMeta` cache. Errors: `ErrNotFound`,
+`prefix: string` (optional, default `""`) → `[{path, name, is_dir, title, type, category}]`.
+Non-recursive; title/type/category from the `GetMeta` cache. Errors: `ErrNotFound`,
 `ErrTraversal`.
 
 ### 8.5 wiki_search
 
 `query: string` (required), `limit: int` (optional, default 10) →
-`[{path, title, type, snippet, score}]`. Empty result is not an error.
+`[{path, title, type, category, snippet, score}]`. Empty result is not an error.
 
 - **No `scope` parameter** (removed in v2). The input schema does not advertise
   `scope`. Note: mcp-go does not set `additionalProperties:false`, so a stray
@@ -553,8 +553,10 @@ Read-only. The server passes a summary as instructions; the full text is read vi
 `wiki_read("_schema.md")`. Enforced type: `source` only; other types are free-form.
 The default schema (embedded via `go:embed`) defines source-page frontmatter
 (`type: source`, `source_path`, `ingested_at`) and required sections, plus
-provenance rules (`[TODO: source needed]`, `[UNCERTAIN]`). The ingest digestion
-prompt embeds these rules so generated pages conform.
+provenance rules (`[TODO: source needed]`, `[UNCERTAIN]`). Optional frontmatter:
+`category` (`article` | `legal` | `reference`), classified by the LLM during
+digestion via the `buildPrompt` instruction (not schema-dependent). The ingest
+digestion prompt embeds these rules so generated pages conform.
 
 ---
 

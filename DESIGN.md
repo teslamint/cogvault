@@ -103,9 +103,10 @@ v2 changes:
 
 - **`Search(query, limit)`** — the `scope` parameter and `appendScopeFilter` are
   removed; the index holds wiki pages only.
-- **Schema versioning** — `PRAGMA user_version=2` replaces the `mod_time`-column
-  sniffing migration. A DB with tables at `user_version < 2` is dropped and
-  recreated. `file_meta` gains `size INTEGER` and `mtime TEXT`.
+- **Schema versioning** — `PRAGMA user_version=3` replaces the `mod_time`-column
+  sniffing migration. A DB with tables at `user_version < 3` is dropped and
+  recreated. `file_meta` gains `size INTEGER`, `mtime TEXT`, and
+  `category TEXT DEFAULT ''` (F8: source-type classification).
 - **busy_timeout** — every connection (via the pooled DSN pragma) sets
   `busy_timeout=5000` so multi-process contention waits instead of failing. One
   exception: `Add`'s DELETE-then-INSERT runs in a DEFERRED tx whose FTS5 DELETE
@@ -139,7 +140,9 @@ runs `claude --print --output-format json --allowedTools "Read"` with the prompt
 (schema text + instructions + absolute source path) on **stdin** (avoids ARG_MAX),
 a per-call 5-minute timeout, strips an optional leading/trailing ``` fence, parses
 the final JSON array element, and treats any non-`success` subtype or
-`is_error:true` as failure regardless of exit code (O1 findings). Error
+`is_error:true` as failure regardless of exit code (O1 findings). `buildPrompt`
+carries the `category` classification instruction (article | legal | reference)
+directly in code — not dependent on the wiki's `_schema.md` version. Error
 classification: quota/rate-limit/timeout/transport/`error_during_execution` →
 `ErrTransient` (permanent otherwise). A future local backend implements the same
 interface without touching `ingest`.
@@ -254,8 +257,8 @@ resolveConfigPath → Load → bootstrap(store/index/adapter) → CheckConsisten
 | `storage/fs.go` | filesystem (single wiki root), security, mutex |
 | `adapter/obsidian/*` | Scan, frontmatter/wikilink/tag/dataview parse |
 | `adapter/markdown/parser.go` | standard-markdown fallback |
-| `index/index.go` | interface + Result + FileMeta |
-| `index/sqlite.go` | FTS5, file_meta (+size/mtime), user_version=2, stat-gated CheckConsistency, busy_timeout |
+| `index/index.go` | interface + Result + FileMeta + NormalizeCategory |
+| `index/sqlite.go` | FTS5, file_meta (+size/mtime/category), user_version=3, stat-gated CheckConsistency, busy_timeout |
 | `llm/llm.go` | Adapter interface, DigestRequest/Result, ErrTransient |
 | `llm/claudecode.go` | `claude --print` backend, JSON parse, error classification |
 | `ingest/ingest.go` | Runner: scan, hash, digest, validate, write, index, ledger, lock, ctx |
