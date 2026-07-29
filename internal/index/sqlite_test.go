@@ -310,6 +310,32 @@ func TestAddAndGetMetaWithCategory(t *testing.T) {
 	}
 }
 
+func TestSearchFTSReturnsCategory(t *testing.T) {
+	root := t.TempDir()
+	idx := newTestIndex(t, root, testCfg())
+
+	err := idx.Add("sources/article.md", "# 기사제목\n본문내용 여기에 작성합니다", map[string]string{
+		"title":    "기사제목",
+		"type":     "source",
+		"category": "article",
+		"tags":     "",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := idx.Search("본문내용", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Category != "article" {
+		t.Fatalf("FTS search Category = %q, want %q", results[0].Category, "article")
+	}
+}
+
 func TestAddWithoutCategory(t *testing.T) {
 	root := t.TempDir()
 	idx := newTestIndex(t, root, testCfg())
