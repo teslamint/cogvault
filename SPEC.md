@@ -484,10 +484,10 @@ scan source dir (top level only, Lstat: skip dirs/symlinks)
 
 One source file path → one wiki page `sources/<slug>.md`. `<slug>` is derived from
 the source base name (extension stripped) by: lowercasing, replacing spaces with
-`-`, dropping every character outside `[a-z0-9._-]`, collapsing runs of `-` to one,
-and trimming leading/trailing `-`. If that leaves the slug empty (e.g. a CJK-only
-name), it falls back to `src-<hash8>` (`hash8` = first 8 hex of sha256 of the file
-content). If the resulting page path is already mapped to a different source path,
+`-`, dropping every character that is not a Unicode letter, Unicode digit, `.`, `_`,
+or `-`, collapsing runs of `-` to one, and trimming leading/trailing `-`. If that
+leaves the slug empty (e.g. a name with no letters or digits), it falls back to
+`src-<hash8>` (`hash8` = first 8 hex of sha256 of the file content). If the resulting page path is already mapped to a different source path,
 the page becomes `sources/<slug>-<hash8>.md` (here `hash8` = first 8 hex of sha256
 of the absolute source path). Re-digestion of the same source path with new content
 overwrites its page and marks the prior ledger row `superseded`.

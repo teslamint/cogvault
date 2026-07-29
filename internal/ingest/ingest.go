@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/adrg/frontmatter"
 
@@ -380,7 +381,7 @@ func slugFor(absPath, hash string) string {
 
 	var b strings.Builder
 	for _, ch := range base {
-		if (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '.' || ch == '_' || ch == '-' {
+		if unicode.IsLetter(ch) || unicode.IsDigit(ch) || ch == '.' || ch == '_' || ch == '-' {
 			b.WriteRune(ch)
 		}
 	}
