@@ -428,10 +428,12 @@ func parsePage(content string) (map[string]any, string, bool) {
 
 func buildMeta(fm map[string]any, title string) map[string]string {
 	pageType, _ := fm["type"].(string)
+	category, _ := fm["category"].(string)
 	return map[string]string{
-		"title": title,
-		"type":  pageType,
-		"tags":  joinTags(fm["tags"]),
+		"title":    title,
+		"type":     pageType,
+		"category": index.NormalizeCategory(category),
+		"tags":     joinTags(fm["tags"]),
 	}
 }
 

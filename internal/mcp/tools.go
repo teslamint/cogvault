@@ -112,16 +112,18 @@ func handleWikiList(cfg *config.Config, store storage.Storage, idx index.Index, 
 		results := make([]map[string]any, len(entries))
 		for i, e := range entries {
 			r := map[string]any{
-				"path":   e.Path,
-				"name":   e.Name,
-				"is_dir": e.IsDir,
-				"title":  "",
-				"type":   "",
+				"path":     e.Path,
+				"name":     e.Name,
+				"is_dir":   e.IsDir,
+				"title":    "",
+				"type":     "",
+				"category": "",
 			}
 			if !e.IsDir {
 				if meta, metaErr := idx.GetMeta(e.Path); metaErr == nil {
 					r["title"] = meta.Title
 					r["type"] = meta.Type
+					r["category"] = meta.Category
 				}
 			}
 			results[i] = r

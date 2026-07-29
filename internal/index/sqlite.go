@@ -51,7 +51,7 @@ func NewSQLiteIndex(root, dbPath string, cfg *config.Config) (*SQLiteIndex, erro
 	return s, nil
 }
 
-const schemaVersion = 2
+const schemaVersion = 3
 
 // dsnWithPragmas appends _pragma DSN parameters so every pooled connection —
 // not just the first one — is opened with busy_timeout and WAL. Setting these
@@ -110,6 +110,7 @@ func (s *SQLiteIndex) initSchema() error {
 		path TEXT PRIMARY KEY,
 		title TEXT DEFAULT '',
 		type TEXT DEFAULT '',
+		category TEXT DEFAULT '',
 		content_hash TEXT NOT NULL,
 		size INTEGER NOT NULL DEFAULT 0,
 		mtime TEXT NOT NULL DEFAULT '',
@@ -149,6 +150,7 @@ func (s *SQLiteIndex) addTx(tx *sql.Tx, path string, content []byte, meta map[st
 	hash := contentHash(content)
 	title := meta["title"]
 	typ := meta["type"]
+	category := meta["category"]
 	tags := meta["tags"]
 	indexedAt := time.Now().UTC().Format(time.RFC3339)
 
@@ -159,8 +161,8 @@ func (s *SQLiteIndex) addTx(tx *sql.Tx, path string, content []byte, meta map[st
 		path, title, string(content), tags); err != nil {
 		return fmt.Errorf("index.Add %s: %w", path, err)
 	}
-	if _, err := tx.Exec(`INSERT OR REPLACE INTO file_meta(path, title, type, content_hash, size, mtime, indexed_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		path, title, typ, hash, size, mtime, indexedAt); err != nil {
+	if _, err := tx.Exec(`INSERT OR REPLACE INTO file_meta(path, title, type, category, content_hash, size, mtime, indexed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		path, title, typ, category, hash, size, mtime, indexedAt); err != nil {
 		return fmt.Errorf("index.Add %s: %w", path, err)
 	}
 	return nil
@@ -199,8 +201,8 @@ func (s *SQLiteIndex) GetMeta(path string) (*FileMeta, error) {
 	p := normalizePath(path)
 	var fm FileMeta
 	err := s.db.QueryRow(
-		`SELECT path, title, type, content_hash, indexed_at FROM file_meta WHERE path = ?`, p,
-	).Scan(&fm.Path, &fm.Title, &fm.Type, &fm.ContentHash, &fm.IndexedAt)
+		`SELECT path, title, type, category, content_hash, indexed_at FROM file_meta WHERE path = ?`, p,
+	).Scan(&fm.Path, &fm.Title, &fm.Type, &fm.Category, &fm.ContentHash, &fm.IndexedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("index.GetMeta %s: %w", p, cverr.ErrNotFound)
@@ -252,7 +254,7 @@ func (s *SQLiteIndex) Search(query string, limit int) ([]Result, error) {
 func (s *SQLiteIndex) searchFTS(query string, limit int) ([]Result, error) {
 	escaped := escapeMatch(query)
 
-	q := `SELECT f.path, f.title, f.type, snippet(wiki_fts, 2, '', '', '...', 32), rank
+	q := `SELECT f.path, f.title, f.type, f.category, snippet(wiki_fts, 2, '', '', '...', 32), rank
 		FROM wiki_fts JOIN file_meta f ON wiki_fts.path = f.path
 		WHERE wiki_fts MATCH ?`
 	args := []any{escaped}
@@ -270,7 +272,7 @@ func (s *SQLiteIndex) searchFTS(query string, limit int) ([]Result, error) {
 	for rows.Next() {
 		var r Result
 		var rank float64
-		if err := rows.Scan(&r.Path, &r.Title, &r.Type, &r.Snippet, &rank); err != nil {
+		if err := rows.Scan(&r.Path, &r.Title, &r.Type, &r.Category, &r.Snippet, &rank); err != nil {
 			return nil, fmt.Errorf("index.Search: %w", err)
 		}
 		r.Score = -rank
@@ -285,7 +287,7 @@ func (s *SQLiteIndex) searchFTS(query string, limit int) ([]Result, error) {
 func (s *SQLiteIndex) searchLIKE(query string, limit int) ([]Result, error) {
 	pattern := "%" + escapeLike(query) + "%"
 
-	q := `SELECT f.path, f.title, f.type, wiki_fts.content
+	q := `SELECT f.path, f.title, f.type, f.category, wiki_fts.content
 		FROM wiki_fts JOIN file_meta f ON wiki_fts.path = f.path
 		WHERE wiki_fts.content LIKE ? ESCAPE '\'`
 	args := []any{pattern}
@@ -303,7 +305,7 @@ func (s *SQLiteIndex) searchLIKE(query string, limit int) ([]Result, error) {
 	for rows.Next() {
 		var r Result
 		var content string
-		if err := rows.Scan(&r.Path, &r.Title, &r.Type, &content); err != nil {
+		if err := rows.Scan(&r.Path, &r.Title, &r.Type, &r.Category, &content); err != nil {
 			return nil, fmt.Errorf("index.Search: %w", err)
 		}
 		r.Snippet = likeSnippet(content, query)
@@ -459,10 +461,12 @@ func (s *SQLiteIndex) loadIndexedHashes() (map[string]fileState, error) {
 // BuildMeta extracts metadata from a parsed Source into the map format expected by Add.
 func BuildMeta(src *adapter.Source) map[string]string {
 	pageType, _ := src.Frontmatter["type"].(string)
+	category, _ := src.Frontmatter["category"].(string)
 	return map[string]string{
-		"title": src.Title,
-		"type":  pageType,
-		"tags":  strings.Join(src.Tags, ","),
+		"title":    src.Title,
+		"type":     pageType,
+		"category": NormalizeCategory(category),
+		"tags":     strings.Join(src.Tags, ","),
 	}
 }
 

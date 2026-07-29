@@ -1,7 +1,7 @@
 # F8: Source Category Classification
 
 ```yaml
-status: draft
+status: approved
 created: 2026-07-29
 tracker: F8
 priority: P2

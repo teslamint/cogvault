@@ -151,6 +151,10 @@ func buildPrompt(req DigestRequest) string {
 	b.WriteString(req.PageSlug)
 	b.WriteString("\n\nOutput ONLY a markdown wiki page (no preamble). Begin with YAML frontmatter carrying the fields title, type: source, source_path: ")
 	b.WriteString(req.SourcePath)
-	b.WriteString(", and ingested_at set to today's date in ISO 8601 (YYYY-MM-DD).\n")
+	b.WriteString(", ingested_at set to today's date in ISO 8601 (YYYY-MM-DD), and category: <one of article, legal, reference> based on the document content. ")
+	b.WriteString("article = news, opinion, analysis, blogs, newsletters, reports. ")
+	b.WriteString("legal = court rulings, legislation, terms of service, privacy policies, regulations. ")
+	b.WriteString("reference = technical docs, API docs, framework guides, standards, manuals. ")
+	b.WriteString("Default to article if uncertain.\n")
 	return b.String()
 }

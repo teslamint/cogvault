@@ -162,8 +162,8 @@ func TestInitSchemaExistingUnicode61(t *testing.T) {
 	}
 	db.Exec(`PRAGMA journal_mode=WAL`)
 	db.Exec(`CREATE VIRTUAL TABLE wiki_fts USING fts5(path, title, content, tags, tokenize='unicode61')`)
-	db.Exec(`CREATE TABLE file_meta (path TEXT PRIMARY KEY, title TEXT DEFAULT '', type TEXT DEFAULT '', content_hash TEXT NOT NULL, size INTEGER NOT NULL DEFAULT 0, mtime TEXT NOT NULL DEFAULT '', indexed_at TEXT NOT NULL)`)
-	db.Exec(`PRAGMA user_version = 2`)
+	db.Exec(`CREATE TABLE file_meta (path TEXT PRIMARY KEY, title TEXT DEFAULT '', type TEXT DEFAULT '', category TEXT DEFAULT '', content_hash TEXT NOT NULL, size INTEGER NOT NULL DEFAULT 0, mtime TEXT NOT NULL DEFAULT '', indexed_at TEXT NOT NULL)`)
+	db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion))
 	db.Close()
 
 	// Reopen with SQLiteIndex
@@ -174,7 +174,7 @@ func TestInitSchemaExistingUnicode61(t *testing.T) {
 	defer idx.Close()
 
 	if idx.useTrigram {
-		t.Fatal("expected useTrigram=false for existing v2 unicode61 DB")
+		t.Fatal("expected useTrigram=false for existing current-version unicode61 DB")
 	}
 }
 
@@ -193,7 +193,7 @@ func TestInitSchemaUserVersionRecreation(t *testing.T) {
 	db.Exec(`INSERT INTO wiki_fts(path, title, content, tags) VALUES ('old.md', 'Old', 'old content', '')`)
 	db.Close()
 
-	// Reopen — user_version 0 < 2 with tables present must drop and recreate on the v2 DDL.
+	// Reopen — user_version 0 < schemaVersion with tables present must drop and recreate.
 	idx, err := NewSQLiteIndex(t.TempDir(), dbPath, testCfg())
 	if err != nil {
 		t.Fatal(err)
@@ -206,17 +206,17 @@ func TestInitSchemaUserVersionRecreation(t *testing.T) {
 		t.Fatalf("expected ErrNotFound after recreation, got %v", err)
 	}
 
-	// user_version must now be 2.
+	// user_version must now match schemaVersion.
 	var uv int
 	if err := idx.db.QueryRow(`PRAGMA user_version`).Scan(&uv); err != nil {
 		t.Fatal(err)
 	}
-	if uv != 2 {
-		t.Fatalf("user_version = %d, want 2", uv)
+	if uv != schemaVersion {
+		t.Fatalf("user_version = %d, want %d", uv, schemaVersion)
 	}
 
-	// The recreated file_meta must carry the v2 size/mtime columns.
-	var hasSize, hasMtime bool
+	// The recreated file_meta must carry size/mtime/category columns.
+	var hasSize, hasMtime, hasCategory bool
 	rows, err := idx.db.Query(`PRAGMA table_info(file_meta)`)
 	if err != nil {
 		t.Fatal(err)
@@ -234,10 +234,12 @@ func TestInitSchemaUserVersionRecreation(t *testing.T) {
 			hasSize = true
 		case "mtime":
 			hasMtime = true
+		case "category":
+			hasCategory = true
 		}
 	}
-	if !hasSize || !hasMtime {
-		t.Fatalf("recreated file_meta missing v2 columns: size=%v mtime=%v", hasSize, hasMtime)
+	if !hasSize || !hasMtime || !hasCategory {
+		t.Fatalf("recreated file_meta missing columns: size=%v mtime=%v category=%v", hasSize, hasMtime, hasCategory)
 	}
 }
 
@@ -271,6 +273,84 @@ func TestAddAndGetMeta(t *testing.T) {
 	}
 	if fm.IndexedAt == "" {
 		t.Fatal("IndexedAt empty")
+	}
+}
+
+func TestAddAndGetMetaWithCategory(t *testing.T) {
+	root := t.TempDir()
+	idx := newTestIndex(t, root, testCfg())
+
+	err := idx.Add("sources/ruling.md", "# 판결\n본문", map[string]string{
+		"title":    "판결",
+		"type":     "source",
+		"category": "legal",
+		"tags":     "",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fm, err := idx.GetMeta("sources/ruling.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fm.Category != "legal" {
+		t.Fatalf("Category = %q, want %q", fm.Category, "legal")
+	}
+
+	results, err := idx.Search("판결", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Category != "legal" {
+		t.Fatalf("search Category = %q, want %q", results[0].Category, "legal")
+	}
+}
+
+func TestAddWithoutCategory(t *testing.T) {
+	root := t.TempDir()
+	idx := newTestIndex(t, root, testCfg())
+
+	err := idx.Add("sources/old.md", "# Old\ncontent", map[string]string{
+		"title": "Old",
+		"type":  "source",
+		"tags":  "",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fm, err := idx.GetMeta("sources/old.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fm.Category != "" {
+		t.Fatalf("Category = %q, want empty", fm.Category)
+	}
+}
+
+func TestNormalizeCategory(t *testing.T) {
+	tests := []struct {
+		input, want string
+	}{
+		{"article", "article"},
+		{"legal", "legal"},
+		{"reference", "reference"},
+		{"Article", "article"},
+		{"LEGAL", "legal"},
+		{"  Reference  ", "reference"},
+		{"unknown", "article"},
+		{"정책문서", "article"},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		got := NormalizeCategory(tt.input)
+		if got != tt.want {
+			t.Errorf("NormalizeCategory(%q) = %q, want %q", tt.input, got, tt.want)
+		}
 	}
 }
 

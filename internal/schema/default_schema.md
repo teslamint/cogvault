@@ -28,6 +28,7 @@
 
 ### source (필수 스키마)
 - 필수 frontmatter: `title`, `type: source`, `source_path`, `ingested_at`
+- 선택 frontmatter: `category` (`article` | `legal` | `reference`)
 - 필수 섹션: ## 요약, ## 핵심 포인트, ## 관련 페이지
 
 ### 자유 타입 (선택)
