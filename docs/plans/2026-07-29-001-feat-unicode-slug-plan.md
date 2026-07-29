@@ -2,7 +2,7 @@
 schema: plan/v1
 title: "F7: Non-ASCII slug quality — preserve Unicode word characters"
 type: feat
-status: draft
+status: approved
 date: 2026-07-29
 execution: code
 ---
