@@ -38,7 +38,7 @@ The LLM picks one based on content. If uncertain, `article`.
 
 2. **wiki_search with category visibility**: `wiki_search("판례")` returns results with `category: "legal"` alongside `type: "source"`. An MCP client can display or filter by category.
 
-3. **wiki_list browsing**: `wiki_list("sources/")` returns entries with `category` field, enabling per-category filtering when needed.
+3. **wiki_list browsing**: `wiki_list("sources/")` returns entries with `category` field. Server-side filtering by category is out of scope — clients filter locally from the returned list.
 
 4. **Existing pages**: Pages ingested before F8 have `category: ""` in index results. They remain fully functional; category is informational, not structural.
 
@@ -80,7 +80,7 @@ Note: existing installs must manually update their wiki `_schema.md` or delete+r
 
 ### Index schema (`internal/index/sqlite.go`)
 
-Bump `schemaVersion` from 2 to 3. Add `category TEXT DEFAULT ''` to the `file_meta` CREATE TABLE statement. On startup, the existing `initSchema` logic drops+recreates tables when `user_version < schemaVersion`, then `CheckConsistency` (or `Rebuild` for new DBs) re-indexes all 91 pages from disk. Existing pages lack `category` in frontmatter, so they get `category = ''` — same end state as ALTER TABLE but follows the established migration pattern (DESIGN §2.5).
+Bump `schemaVersion` from 2 to 3. Add `category TEXT DEFAULT ''` to the `file_meta` CREATE TABLE statement. On first `CheckConsistency` call after upgrade (triggered by search, serve, or init), `initSchema` drops+recreates tables when `user_version < schemaVersion`, then `CheckConsistency` re-indexes all 91 pages from disk. Existing pages lack `category` in frontmatter, so they get `category = ''` — same end state as ALTER TABLE but follows the established migration pattern (DESIGN §2.5).
 
 ### Meta extraction
 
@@ -98,7 +98,7 @@ category, _ := fm["category"].(string)
 category = normalizeCategory(category)
 ```
 
-**Normalization** (`normalizeCategory`): lowercase + coerce off-taxonomy values to `article`. The LLM may emit `Article`, `Legal`, or unexpected values; normalization ensures consistent grouping. Placed in `internal/ingest/ingest.go` (private) and duplicated as a package-level function in `internal/index/sqlite.go` for CheckConsistency — both are short one-liners with a switch.
+**Normalization** (`NormalizeCategory`): lowercase + coerce off-taxonomy values to `article`. Empty string and non-string YAML values stay `""` (marks pre-F8 pages). The LLM may emit `Article`, `Legal`, or unexpected values; normalization ensures consistent grouping. Exported from `internal/index` (used by both `BuildMeta` and `ingest.buildMeta` since ingest already imports `internal/index`).
 
 ### Index `addTx`
 
@@ -158,13 +158,13 @@ Both search paths updated:
 ### Canon updates
 
 **SPEC.md**:
+- §8.4 `wiki_list`: add `category` to return shape `[{path, name, is_dir, title, type, category}]`.
 - §8.5 `wiki_search`: add `category` to return shape `[{path, title, type, category, snippet, score}]`.
 - §11: add `category` as optional source-page frontmatter field with taxonomy.
 
 **DESIGN.md**:
-- §2.5: update `schemaVersion` to 3; add `category` to `file_meta` column list.
+- §2.5: update `schemaVersion` to 3; add `category` to `file_meta` column list; update §5 table `user_version=2` → `user_version=3`.
 - §2.6: update `buildPrompt` description to include category instruction.
-- §5: no new files — existing file responsibilities unchanged.
 
 ## Data Model
 
@@ -183,7 +183,7 @@ No ledger schema change. Category lives in:
 1. **LLM prompt**: verify `buildPrompt` output contains category instruction.
 2. **Index schema v3**: test that a v2 DB triggers drop+recreate and the new table has `category`.
 3. **Index Add/Search**: test `Add` with category in meta map; verify both `searchFTS` and `searchLIKE` return category. Verify `GetMeta` returns category.
-4. **Category normalization**: `"Legal"` → `"legal"`, `"unknown"` → `"article"`, `""` → `""`.
+4. **Category normalization**: `"Legal"` → `"legal"`, `"unknown"` → `"article"`, `""` → `""` (pre-F8 marker preserved).
 5. **Ingest**: mock LLM returns page with `category: legal`; verify `buildMeta` extracts and normalizes it.
 6. **Ingest validation**: page without `category` still passes validation.
 7. **MCP**: `wiki_list` and `wiki_search` results include `category` field.
