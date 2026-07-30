@@ -117,6 +117,9 @@ These bullets preserve v1 review history; they are not a current rule index. Cur
 
 ## Future Directions and Current Roadmap Context
 
+The forward-looking index is [ROADMAP.md](../../ROADMAP.md); keep both in sync or
+move items with a pointer left behind.
+
 Canonical v2 product and architecture state lives in `SPEC.md`, `DESIGN.md`, and [0021](../decisions/0021-v2-refounding.md). The [approved v2 design](../specs/2026-07-22-refound-capture-pipeline-design.md) is complementary implementation context, not another canonical owner. [0014](../decisions/0014-roadmap-adoption-boundaries.md) preserves pre-refounding roadmap-adoption rationale, while [v2 follow-ups](../research/v2-follow-ups.md) tracks current post-refounding work. The list below preserves the broader historical and forward-looking context that used to sit inside `CLAUDE.md`.
 
 The v2 refounding moved the canonical documents to English; the earlier Korean material retained above remains historical.

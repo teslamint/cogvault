@@ -4,7 +4,8 @@ A personal knowledge pipeline: drop files into folders you already fill, let an
 LLM digest each one into a searchable wiki, and consume the result over MCP, the
 CLI, or your phone.
 
-**Status:** v2 Phase 1 implemented; a 1-week real-world validation is pending.
+**Status:** v2 Phase 1 complete — all four success criteria met (2026-07-29).
+See [ROADMAP.md](ROADMAP.md) for what comes next.
 
 ## How it works
 
@@ -153,6 +154,7 @@ make clean                         # remove built binary
 
 ## Project docs
 
+- [ROADMAP.md](ROADMAP.md) — forward-looking summary with canonical owner references
 - [SPEC.md](SPEC.md) — public behavior and contract canon
 - [DESIGN.md](DESIGN.md) — architecture, package boundaries, and component boundaries
 - [CONCEPTS.md](CONCEPTS.md) — shared terminology

@@ -3,8 +3,9 @@
 Version: v2 (Phase 1)
 Scope: v2 Phase 1 — the capture→digest→consume pipeline. Later phases (URL
 capture, periodic digest, local LLM backend) get their own specs.
-Status: **implemented; 1-week validation pending.** Issues found during use are
-folded back into this spec.
+Status: **implemented; validation complete** (SC1–SC4 met, 2026-07-29; see F1 in
+`docs/research/v2-follow-ups.md`). Issues found during use are folded back into
+this spec.
 
 Canonical design: `docs/specs/2026-07-22-refound-capture-pipeline-design.md`.
 Refounding rationale: `docs/decisions/0021-v2-refounding.md` (supersedes 0020).
