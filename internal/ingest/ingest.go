@@ -132,6 +132,12 @@ func (r *Runner) Run(ctx context.Context, opts RunOptions) (*Report, error) {
 		if found {
 			switch prev.status {
 			case "success":
+				if err := r.handleSuccessRow(entry.absPath, prev, report); err != nil {
+					if errors.Is(err, cverr.ErrNotFound) {
+						break
+					}
+					continue
+				}
 				report.Unchanged++
 				continue
 			case "refused":
@@ -163,6 +169,23 @@ func (r *Runner) Run(ctx context.Context, opts RunOptions) (*Report, error) {
 	}
 
 	return report, nil
+}
+
+func (r *Runner) handleSuccessRow(sourcePath string, prev *ledgerRow, report *Report) error {
+	_, _, err := r.store.Stat(prev.wikiPage)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, cverr.ErrNotFound) {
+		return err
+	}
+	report.Failed++
+	report.PerFile = append(report.PerFile, FileResult{
+		Path:   sourcePath,
+		Action: actionFailed,
+		Error:  "stat wiki page: " + err.Error(),
+	})
+	return err
 }
 
 type scanEntry struct {
