@@ -107,6 +107,41 @@ func (fs *FSStorage) WriteSchema(data []byte) error {
 	return nil
 }
 
+func (fs *FSStorage) Move(src, dst string) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	absSrc, cleanedSrc, err := fs.resolvePath(src)
+	if err != nil {
+		return err
+	}
+	if cleanedSrc == filepath.Clean(fs.cfg.SchemaPath()) {
+		return fmt.Errorf("storage.Move %s: %w", src, cverr.ErrPermission)
+	}
+
+	absDst, cleanedDst, err := fs.resolvePath(dst)
+	if err != nil {
+		return err
+	}
+	if cleanedDst == filepath.Clean(fs.cfg.SchemaPath()) {
+		return fmt.Errorf("storage.Move %s: %w", dst, cverr.ErrPermission)
+	}
+
+	if _, err := os.Stat(absSrc); errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("storage.Move %s: %w", src, cverr.ErrNotFound)
+	} else if err != nil {
+		return fmt.Errorf("storage.Move %s: %w", src, err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(absDst), 0o755); err != nil {
+		return fmt.Errorf("storage.Move %s: %w", dst, err)
+	}
+	if err := os.Rename(absSrc, absDst); err != nil {
+		return fmt.Errorf("storage.Move %s -> %s: %w", src, dst, err)
+	}
+	return nil
+}
+
 func (fs *FSStorage) List(prefix string) ([]ListEntry, error) {
 	absPath, cleaned, err := fs.resolvePath(prefix)
 	if err != nil {
