@@ -25,3 +25,7 @@ The immediate (non-waiting) failure of a DEFERRED transaction that read under a 
 ## Settle window
 
 The 2-minute mtime quiet period a source file must satisfy before ingest will hash it — guards against digesting mid-download/mid-sync partial files.
+
+## Deviation addendum
+
+A committed record for observable behavior discovered after spec or plan approval. It preserves the approved artifact and authorizes a separately reviewed, user-approved remediation plan. *Avoid: "silent plan correction".*

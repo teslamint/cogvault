@@ -29,6 +29,7 @@ Read these non-obvious invariants before editing:
 - `docs/decisions/`: durable project decision records.
 - `docs/research/`: investigation notes and review artifacts before promotion to decisions.
 - `docs/solutions/`: resolved problem writeups and reusable learnings.
+- `docs/deviations/`: committed post-approval behavior addenda that authorize separately approved remediation plans.
 - `docs/plans/`: non-canonical working notes; useful for execution context, but stale-prone and never higher priority than canon.
 - `docs/specs/2026-07-22-refound-capture-pipeline-design.md`: approved v2 refounding design that complements, not overrides, `SPEC.md`/`DESIGN.md`.
 - `docs/context/project-background.md`: neutral background, archaeology, rejected alternatives, and historical v1 context.
