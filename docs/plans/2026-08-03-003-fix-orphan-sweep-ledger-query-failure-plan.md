@@ -2,10 +2,11 @@
 schema: plan/v1
 title: "Expose orphan sweep ledger query failure"
 type: fix
-status: approved
+status: done
 date: 2026-08-03
 execution: code
 body_seal: 82a4d01e017cf254050493caf2445c568ea3aa99133a82c6f0646514d0b565c2
+completed_by: 45ce6bb651242e734b512380ca65cdbdb1116154
 ---
 
 ## Goal

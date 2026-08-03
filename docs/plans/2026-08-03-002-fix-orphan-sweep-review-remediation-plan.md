@@ -2,9 +2,10 @@
 schema: plan/v1
 title: "F4 review remediation"
 type: fix
-status: approved
+status: done
 date: 2026-08-03
 body_seal: 25989db1261afb6c935c9cdf4193f00d55c7218ff4ea98b184000fe46d0ec910
+completed_by: 45ce6bb651242e734b512380ca65cdbdb1116154
 execution: code
 origin: docs/specs/2026-08-03-orphan-sweep-archive-design.md
 ---
