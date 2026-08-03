@@ -82,8 +82,11 @@ root is writable except `_schema.md` (guarded via `cfg.SchemaPath()`). New
 `Stat(path) (int64, time.Time, error)` uses `resolvePath` + `os.Stat` with the
 existing error mapping, feeding the index stat-gate. `Move(src, dst string) error`
 resolves both paths, acquires the mutex, creates the destination parent directory,
-and calls `os.Rename`; used by the ingest orphan sweep to archive pages. Single
-global write mutex retained (0006).
+and calls `os.Rename`; used by the ingest orphan sweep to archive pages.
+`exclude_read`/schema permission checks happen before existence checks on both
+source and destination. For allowed paths, missing source returns `ErrNotFound`
+before destination occupancy is checked, and an occupied destination returns an
+error that wraps `os.ErrExist`. Single global write mutex retained (0006).
 
 ### 2.4 adapter/obsidian
 
@@ -163,17 +166,27 @@ type RunOptions struct { DryRun bool; Limit int; Origin string }
 **Responsibility**: orchestrate the digest stage. `Run` acquires an exclusive
 `flock` on `<dir(dbPath)>/ingest.lock` (fail fast → `ErrAlreadyRunning`). Before
 the main file loop, `sweepOrphans` queries success rows and archives pages whose
-source files no longer exist on disk to `sources/_archived/`; a source-dir
-availability guard prevents mass-archive when a directory is temporarily
-unavailable. The main loop then scans
+source files no longer exist on disk to `sources/_archived/`, but only when an
+exact source-dir snapshot still contains at least one tracked survivor and
+exactly one missing success-row source. Zero-survivor and multi-missing states
+are treated as ambiguous and remain unchanged. `sweepOrphans` reads the exact
+directory entries again before each move, so a restored source cancels that
+archive action. Source-dir snapshot errors log/report and skip that directory
+unless the error is context cancellation. `Run` checks cancellation before sweep,
+before each sweep candidate, and between scanned files; cancellation stops future
+mutations but does not roll back rows already completed. The main loop then scans
 each `cfg.Sources` dir **top level only** (`os.ReadDir` + `os.Lstat`, skipping
 dirs and symlinks) applying the type filter, configurable size cap (default 32MB,
 `cfg.MaxFileSizeMB`), and 2m settle window,
 streams a sha256 hash (`hashFile`, no full file in memory), looks up the ledger,
-calls `llm.Digest`, validates the page's frontmatter from bytes, resolves the
-collision-aware page path, writes through `storage`, indexes via `idx.Add`, and
-finalizes the ledger row. It honors ctx cancellation between files (partial report
-+ wrapped ctx error) and releases the lock via defer. Error classes drive
+calls `Storage.Stat` for found `success` rows, and reports `Unchanged` only when
+that page still exists. `ErrNotFound` falls through to re-digest the present
+source; other stat errors increment `Failed`, append `actionFailed` with
+`stat wiki page: <error>`, and leave the success row unchanged. For re-digestion
+it validates the page's frontmatter from bytes, resolves the collision-aware page
+path, writes through `storage`, indexes via `idx.Add`, and finalizes the ledger
+row. It honors ctx cancellation between files (partial report + wrapped ctx
+error) and releases the lock via defer. Error classes drive
 `attempts` (permanent ++, transient/infra unchanged; §4.2).
 
 **Ledger** (`ledger.go`): owns its **own** `sql.Open("sqlite", dsn)` to `db_path`

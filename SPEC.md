@@ -110,7 +110,7 @@ llm:
   backend: string       # default "claudecode". Only "claudecode" accepted in Phase 1.
   model: string         # optional. Passed as --model to the LLM backend. Default: empty (backend default).
 max_file_size_mb: int   # ingest file size cap in MB. Default: 32. Negative rejected.
-exclude: string[]       # scan + index exclusion, relative to wiki_dir. Default: [".obsidian", ".trash"]
+exclude: string[]       # scan + index exclusion, relative to wiki_dir. Default: [".obsidian", ".trash", "sources/_archived"]
 exclude_read: string[]  # read + scan + index exclusion, relative to wiki_dir. Default: []
 adapter: string         # default "obsidian". Allowed: "obsidian", "markdown".
 consistency_interval: int  # min seconds between consistency checks. Default: 5.
@@ -138,6 +138,11 @@ later (0001). Rejected:
 - `adapter` outside the allowed list; `llm.backend` other than `claudecode`.
 - `max_file_size_mb` negative (zero or omitted defaults to 32).
 - Unknown YAML keys (`KnownFields(true)`) and multi-document YAML.
+
+`Config.AllExcluded()` returns the effective scan/index exclusion list. It always
+contains `sources/_archived` exactly once, even for older configs whose explicit
+`exclude` list omits it. This does not mutate the user's configured `exclude`
+list.
 
 `wiki_dir`/`db_path` have no invented defaults: an empty value is a validation
 error, which drives the two-step `init` (§9.1).
@@ -197,6 +202,10 @@ Stat(path) → (size int64, mtime time.Time, error)
 - Missing file → `ErrNotFound`.
 - `Stat` returns size and mtime for the consistency stat-gate (§6.9); same error
   mapping as Read.
+
+Exact-path reads remain allowed for archived pages unless that exact path also
+falls under `exclude_read`. Internal archive exclusion affects scan/index
+surfaces, not direct retention reads.
 
 ### 5.4 Write
 
@@ -494,9 +503,15 @@ of the absolute source path). Re-digestion of the same source path with new cont
 overwrites its page and marks the prior ledger row `superseded`.
 
 A renamed or deleted source file's page and ledger row survive the immediate
-change. On the next ingest run, a pre-scan sweep archives the orphaned page to
-`sources/_archived/<slug>-<hash8>.md` and marks the ledger row `superseded`. The
-`sources/_archived` directory is excluded from indexing.
+change. On the next ingest run, a pre-scan sweep archives only when the source
+directory snapshot still shows at least one tracked survivor and exactly one
+missing success-row source. Zero-survivor and multi-missing directories are
+treated as ambiguous and remain unchanged. The sweep rechecks the exact directory
+entries again before each move; a restored source cancels that archive action.
+Completed archives move the page to `sources/_archived/<slug>-<hash8>.md` and
+mark the ledger row `superseded`. `sources/_archived` is an internal scan/index
+exclusion, but archived pages remain readable by exact path until manual
+removal.
 
 ### 10.3 Failure isolation
 
@@ -511,7 +526,11 @@ A per-run report with counts (digested, failed, skipped, deferred, unchanged,
 archived) and a per-file list (action ∈ `digested | would-digest | failed |
 skipped | deferred | exhausted | archived | would-archive`, plus an error string). Oversized/type-excluded files appear in the
 report but not the ledger. Unchanged (already-processed) files are counted but
-kept out of the per-file list for readable backlog reports.
+kept out of the per-file list for readable backlog reports. A `success` row is
+unchanged only when `Storage.Stat` confirms that its wiki page still exists.
+`ErrNotFound` falls through to re-digest the present source. Other stat errors
+report `failed` with `stat wiki page: <error>` and leave the ledger row
+unchanged.
 
 ### 10.5 Concurrency
 
