@@ -2,7 +2,8 @@
 schema: plan/v1
 title: "F4: Orphan sweep + archive"
 type: feat
-status: draft
+status: approved
+body_seal: 1a92b68f4df0b381f5c60b651e5d532309b49ac61d92ed582e3dd4eb5f4116ee
 date: 2026-08-03
 execution: code
 origin: docs/specs/2026-08-03-orphan-sweep-archive-design.md
