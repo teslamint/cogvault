@@ -903,6 +903,42 @@ func TestCheckConsistencyExcludeContract(t *testing.T) {
 	}
 }
 
+func TestCheckConsistencyEffectiveArchiveExclusion(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, filepath.Join(root, "notes", "visible.md"), "# Visible\nBody")
+	mustWriteFile(t, filepath.Join(root, "sources", "_archived", "hidden.md"), "# Hidden\nBody")
+
+	cfg := &config.Config{
+		WikiDir:             "_wiki",
+		DBPath:              ".cogvault.db",
+		Exclude:             []string{".obsidian", ".trash"},
+		ExcludeRead:         []string{},
+		Adapter:             "obsidian",
+		ConsistencyInterval: 5,
+	}
+
+	store := storage.NewFSStorage(root, cfg)
+	idx := newTestIndex(t, root, cfg)
+
+	added, _, _, err := idx.CheckConsistency(store, obsidian.New(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if added != 1 {
+		t.Fatalf("expected 1 file indexed (visible only), got added=%d", added)
+	}
+
+	_, err = idx.GetMeta("notes/visible.md")
+	if err != nil {
+		t.Fatalf("visible file should be indexed: %v", err)
+	}
+
+	_, err = idx.GetMeta("sources/_archived/hidden.md")
+	if !errors.Is(err, cverr.ErrNotFound) {
+		t.Fatalf("archived file should not be indexed, got %v", err)
+	}
+}
+
 func TestCheckConsistencyExcludedFileRemoval(t *testing.T) {
 	root := t.TempDir()
 	mustWriteFile(t, filepath.Join(root, "notes", "test.md"), "# Test\nBody")
@@ -1580,4 +1616,3 @@ func (f *failingStorage) Stat(path string) (int64, time.Time, error) {
 	}
 	return f.inner.Stat(path)
 }
-

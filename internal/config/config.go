@@ -32,6 +32,8 @@ type Config struct {
 	LLM                 LLMConfig   `yaml:"llm"`
 }
 
+const archiveExcludePath = "sources/_archived"
+
 func Load(configPath string) (*Config, error) {
 	f, err := os.Open(configPath)
 	if err != nil {
@@ -97,7 +99,7 @@ func (c *Config) applyDefaults() {
 		}
 	}
 	if c.Exclude == nil {
-		c.Exclude = []string{".obsidian", ".trash", "sources/_archived"}
+		c.Exclude = []string{".obsidian", ".trash", archiveExcludePath}
 	}
 	if c.ExcludeRead == nil {
 		c.ExcludeRead = []string{}
@@ -117,11 +119,19 @@ func (c *Config) applyDefaults() {
 }
 
 // AllExcluded returns exclude followed by exclude_read.
-// No deduplication or normalization.
+// The returned slice always includes the internal archive path exactly once.
 func (c *Config) AllExcluded() []string {
-	result := make([]string, 0, len(c.Exclude)+len(c.ExcludeRead))
+	result := make([]string, 0, len(c.Exclude)+len(c.ExcludeRead)+1)
 	result = append(result, c.Exclude...)
-	result = append(result, c.ExcludeRead...)
+	if !containsString(result, archiveExcludePath) {
+		result = append(result, archiveExcludePath)
+	}
+	for _, path := range c.ExcludeRead {
+		if path == archiveExcludePath && containsString(result, archiveExcludePath) {
+			continue
+		}
+		result = append(result, path)
+	}
 	return result
 }
 
@@ -232,6 +242,15 @@ func containsDotDot(path string) bool {
 			if component == ".." {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+func containsString(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
+			return true
 		}
 	}
 	return false
