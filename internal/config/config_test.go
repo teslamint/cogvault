@@ -100,8 +100,8 @@ func TestLoadDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.Exclude) != 2 || cfg.Exclude[0] != ".obsidian" || cfg.Exclude[1] != ".trash" {
-		t.Errorf("Exclude = %v, want [.obsidian .trash]", cfg.Exclude)
+	if len(cfg.Exclude) != 3 || cfg.Exclude[0] != ".obsidian" || cfg.Exclude[1] != ".trash" || cfg.Exclude[2] != "sources/_archived" {
+		t.Errorf("Exclude = %v, want [.obsidian .trash sources/_archived]", cfg.Exclude)
 	}
 	if cfg.ExcludeRead == nil || len(cfg.ExcludeRead) != 0 {
 		t.Errorf("ExcludeRead = %v, want []", cfg.ExcludeRead)

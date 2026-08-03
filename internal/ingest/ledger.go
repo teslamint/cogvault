@@ -141,6 +141,26 @@ func (l *ledger) supersedePrevSuccess(sourcePath string) error {
 	return nil
 }
 
+func (l *ledger) successRows() ([]ledgerRow, error) {
+	rows, err := l.db.Query(
+		`SELECT source_path, content_hash, source_dir, digested_at, wiki_page, status, attempts, last_error, run_origin, llm_model
+		 FROM ingest_ledger WHERE status = 'success'`)
+	if err != nil {
+		return nil, fmt.Errorf("ingest.ledger.successRows: %w", err)
+	}
+	defer rows.Close()
+
+	var result []ledgerRow
+	for rows.Next() {
+		var r ledgerRow
+		if err := rows.Scan(&r.sourcePath, &r.contentHash, &r.sourceDir, &r.digestedAt, &r.wikiPage, &r.status, &r.attempts, &r.lastError, &r.runOrigin, &r.llmModel); err != nil {
+			return nil, fmt.Errorf("ingest.ledger.successRows scan: %w", err)
+		}
+		result = append(result, r)
+	}
+	return result, rows.Err()
+}
+
 func (l *ledger) upsert(row ledgerRow) error {
 	_, err := l.db.Exec(
 		`INSERT OR REPLACE INTO ingest_ledger

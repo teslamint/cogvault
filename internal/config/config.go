@@ -97,7 +97,7 @@ func (c *Config) applyDefaults() {
 		}
 	}
 	if c.Exclude == nil {
-		c.Exclude = []string{".obsidian", ".trash"}
+		c.Exclude = []string{".obsidian", ".trash", "sources/_archived"}
 	}
 	if c.ExcludeRead == nil {
 		c.ExcludeRead = []string{}
