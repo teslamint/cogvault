@@ -115,7 +115,7 @@ func (fs *FSStorage) Move(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	if cleanedSrc == filepath.Clean(fs.cfg.SchemaPath()) {
+	if fs.isExcludeRead(cleanedSrc) || cleanedSrc == filepath.Clean(fs.cfg.SchemaPath()) {
 		return fmt.Errorf("storage.Move %s: %w", src, cverr.ErrPermission)
 	}
 
@@ -123,7 +123,7 @@ func (fs *FSStorage) Move(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	if cleanedDst == filepath.Clean(fs.cfg.SchemaPath()) {
+	if fs.isExcludeRead(cleanedDst) || cleanedDst == filepath.Clean(fs.cfg.SchemaPath()) {
 		return fmt.Errorf("storage.Move %s: %w", dst, cverr.ErrPermission)
 	}
 
@@ -131,6 +131,12 @@ func (fs *FSStorage) Move(src, dst string) error {
 		return fmt.Errorf("storage.Move %s: %w", src, cverr.ErrNotFound)
 	} else if err != nil {
 		return fmt.Errorf("storage.Move %s: %w", src, err)
+	}
+
+	if _, err := os.Stat(absDst); err == nil {
+		return fmt.Errorf("storage.Move %s: %w", dst, os.ErrExist)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("storage.Move %s: %w", dst, err)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(absDst), 0o755); err != nil {
