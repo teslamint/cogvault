@@ -332,7 +332,7 @@ serialized with other wiki writes.
 ```
 U1: O1 spike — headless PDF digestion verification (research note)
 U2: config v2 (single mode, explicit path, sources, ~ expansion)
-U3: storage — root is the wiki, Stat added
+U3: storage — root is the wiki, Stat and Move added
 U4: index — user_version=2, size+mtime stat-gate, scope removal, busy_timeout
 U5: llm — adapter interface + claudecode backend + error classes
 U6: ingest — pipeline, ledger, lock, report
