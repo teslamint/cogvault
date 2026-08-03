@@ -1,7 +1,7 @@
 # F4: Orphan Sweep + Archive
 
 ```yaml
-status: draft
+status: approved
 created: 2026-08-03
 tracker: F4
 priority: P3
