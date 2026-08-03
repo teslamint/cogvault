@@ -62,7 +62,8 @@ The remediation defines these behaviors:
    An explicit user exclude list cannot remove this internal exclusion.
 2. A source directory needs survivor proof before the sweep archives any row.
    A snapshot must contain at least one exact source path from its success rows.
-   If no success row remains, the sweep skips the directory and logs a warning.
+   The snapshot must contain exactly one missing success-row source.
+   The sweep skips zero-survivor and multi-missing states as ambiguous.
 3. The sweep checks the exact directory entry again before each page move.
    A restored source cancels that archive action.
 4. The sweep accepts a context and checks cancellation before each candidate.
@@ -74,10 +75,14 @@ The remediation defines these behaviors:
 7. A success ledger row is unchanged only while its wiki page exists.
    If the page is missing, ingest rebuilds the page from the present source.
 8. Dry-run reports archive candidates without changing storage or the ledger.
+9. Archived pages remain readable through an exact wiki path.
+   The archive retains them until the user removes them manually.
+   The internal exclusion affects scans and indexes, not direct reads.
 
 The survivor proof is conservative.
 If every tracked source disappears, the sweep treats the state as ambiguous.
-The pages remain live until a later run observes another tracked source in that directory.
+If several tracked sources disappear, the sweep also treats the state as ambiguous.
+The pages remain live until a later run observes one missing tracked source.
 
 ## Safety and consent boundaries
 
@@ -96,6 +101,7 @@ The remediation adds these tests:
 
 - an old explicit exclude list still excludes `sources/_archived`;
 - an empty source directory cannot trigger a mass archive;
+- a partially available directory cannot archive several missing sources;
 - a restored exact source path cancels an archive action;
 - a canceled context causes no archive mutation;
 - a missing live page for a success row is rebuilt;
@@ -103,8 +109,9 @@ The remediation adds these tests:
 - `Storage.Move` rejects both `exclude_read` directions;
 - `Storage.Move` preserves both files when the destination exists;
 - dry-run preserves the success row and creates no archive destination;
-- archive names preserve distinct hash suffixes; and
-- source directory and move errors preserve pages and ledger rows.
+- archive names preserve distinct hash suffixes;
+- source directory and move errors preserve pages and ledger rows; and
+- an archived page remains directly readable through its exact path.
 
 Run `go test -race ./...` and `go vet ./...` after the targeted tests pass.
 
