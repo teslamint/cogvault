@@ -1541,6 +1541,9 @@ func (c *countingStorage) List(prefix string) ([]storage.ListEntry, error) {
 func (c *countingStorage) Exists(path string) (bool, error) {
 	return c.inner.Exists(path)
 }
+func (c *countingStorage) Move(src, dst string) error {
+	return c.inner.Move(src, dst)
+}
 func (c *countingStorage) Stat(path string) (int64, time.Time, error) {
 	return c.inner.Stat(path)
 }
@@ -1567,6 +1570,9 @@ func (f *failingStorage) List(prefix string) ([]storage.ListEntry, error) {
 }
 func (f *failingStorage) Exists(path string) (bool, error) {
 	return f.inner.Exists(path)
+}
+func (f *failingStorage) Move(src, dst string) error {
+	return f.inner.Move(src, dst)
 }
 func (f *failingStorage) Stat(path string) (int64, time.Time, error) {
 	if f.failStatOn != "" && normalizePath(path) == normalizePath(f.failStatOn) {

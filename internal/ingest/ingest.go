@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -99,6 +100,8 @@ func (r *Runner) Run(ctx context.Context, opts RunOptions) (*Report, error) {
 	defer unlock()
 
 	report := &Report{}
+
+	r.sweepOrphans(report, opts.DryRun)
 
 	schemaText, err := r.readSchema()
 	if err != nil {
@@ -307,6 +310,66 @@ func (r *Runner) recordFailure(entry scanEntry, hash, origin string, prev *ledge
 	}
 	report.Failed++
 	report.PerFile = append(report.PerFile, FileResult{Path: entry.absPath, Action: actionFailed, Error: msg})
+}
+
+func (r *Runner) sweepOrphans(report *Report, dryRun bool) {
+	availableDirs := map[string]bool{}
+	for _, src := range r.cfg.Sources {
+		dir := filepath.Clean(src.Path)
+		if _, err := os.Stat(dir); err == nil {
+			availableDirs[dir] = true
+		} else {
+			slog.Warn("sweep: source dir unavailable, skipping", "dir", dir, "error", err)
+		}
+	}
+
+	rows, err := r.ledger.successRows()
+	if err != nil {
+		slog.Warn("sweep: ledger query failed", "error", err)
+		return
+	}
+
+	for _, row := range rows {
+		if !availableDirs[row.sourceDir] {
+			continue
+		}
+		if _, err := os.Stat(row.sourcePath); err == nil {
+			continue
+		} else if !errors.Is(err, os.ErrNotExist) {
+			slog.Warn("sweep: stat error, skipping", "path", row.sourcePath, "error", err)
+			continue
+		}
+
+		if dryRun {
+			report.Archived++
+			report.PerFile = append(report.PerFile, FileResult{
+				Path: row.sourcePath, Action: actionWouldArchive,
+			})
+			continue
+		}
+
+		base := filepath.Base(row.wikiPage)
+		ext := filepath.Ext(base)
+		name := strings.TrimSuffix(base, ext)
+		dst := "sources/_archived/" + name + "-" + row.contentHash[:8] + ext
+
+		moveErr := r.store.Move(row.wikiPage, dst)
+		if moveErr != nil && !errors.Is(moveErr, cverr.ErrNotFound) {
+			slog.Warn("sweep: move failed", "src", row.wikiPage, "dst", dst, "error", moveErr)
+			continue
+		}
+
+		row.status = "superseded"
+		if err := r.ledger.upsert(row); err != nil {
+			slog.Warn("sweep: ledger update failed", "path", row.sourcePath, "error", err)
+			continue
+		}
+
+		report.Archived++
+		report.PerFile = append(report.PerFile, FileResult{
+			Path: row.sourcePath, Action: actionArchived,
+		})
+	}
 }
 
 func (r *Runner) pagePath(slug, absSourcePath string) (string, error) {

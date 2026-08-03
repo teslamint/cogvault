@@ -11,6 +11,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/teslamint/cogvault/internal/adapter/markdown"
 	"github.com/teslamint/cogvault/internal/config"
 	"github.com/teslamint/cogvault/internal/index"
 	"github.com/teslamint/cogvault/internal/llm"
@@ -812,6 +813,197 @@ func TestRunSourceDirReadError(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("no source-error entry for %s in %+v", missing, rep.PerFile)
+	}
+}
+
+func TestSweepOrphansSourceDeleted(t *testing.T) {
+	h := newHarness(t, []string{"md"}, okLLM())
+	src := h.write(t, "victim.md", "content")
+
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "interactive"})
+	if err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	if rep.Digested != 1 {
+		t.Fatalf("digested = %d, want 1", rep.Digested)
+	}
+
+	if err := os.Remove(src); err != nil {
+		t.Fatal(err)
+	}
+
+	rep2, err := h.runner.Run(context.Background(), RunOptions{Origin: "interactive"})
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if rep2.Archived != 1 {
+		t.Fatalf("archived = %d, want 1", rep2.Archived)
+	}
+
+	if ok, _ := h.store.Exists("sources/victim.md"); ok {
+		t.Fatal("original page should be gone")
+	}
+
+	archived := false
+	entries, _ := h.store.List("sources/_archived")
+	for _, e := range entries {
+		if strings.Contains(e.Name, "victim") {
+			archived = true
+			break
+		}
+	}
+	if !archived {
+		t.Fatal("page not found in _archived")
+	}
+
+	hash := contentHash([]byte("content"))
+	row, found, _ := h.runner.ledger.lookup(src, hash)
+	if !found || row.status != "superseded" {
+		t.Fatalf("ledger: found=%v status=%v, want superseded", found, row.status)
+	}
+}
+
+func TestSweepOrphansAllPresent(t *testing.T) {
+	h := newHarness(t, []string{"md"}, okLLM())
+	h.write(t, "keep.md", "content")
+
+	if _, err := h.runner.Run(context.Background(), RunOptions{Origin: "interactive"}); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "interactive"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Archived != 0 {
+		t.Fatalf("archived = %d, want 0", rep.Archived)
+	}
+}
+
+func TestSweepOrphansDryRun(t *testing.T) {
+	h := newHarness(t, []string{"md"}, okLLM())
+	src := h.write(t, "dry.md", "content")
+
+	if _, err := h.runner.Run(context.Background(), RunOptions{Origin: "interactive"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Remove(src); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := h.runner.Run(context.Background(), RunOptions{DryRun: true, Origin: "interactive"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Archived != 1 {
+		t.Fatalf("archived = %d, want 1", rep.Archived)
+	}
+
+	found := false
+	for _, f := range rep.PerFile {
+		if f.Action == actionWouldArchive {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected would-archive action in report")
+	}
+
+	if ok, _ := h.store.Exists("sources/dry.md"); !ok {
+		t.Fatal("dry-run should not move the page")
+	}
+}
+
+func TestSweepOrphansSourceDirMissing(t *testing.T) {
+	h := newHarness(t, []string{"md"}, okLLM())
+	src := h.write(t, "orphan.md", "content")
+
+	if _, err := h.runner.Run(context.Background(), RunOptions{Origin: "interactive"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Remove(src); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(h.srcDir); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "interactive"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Archived != 0 {
+		t.Fatalf("archived = %d, want 0 (dir missing = skip)", rep.Archived)
+	}
+}
+
+func TestSweepOrphansWikiPageAlreadyGone(t *testing.T) {
+	h := newHarness(t, []string{"md"}, okLLM())
+	src := h.write(t, "gone.md", "content")
+
+	if _, err := h.runner.Run(context.Background(), RunOptions{Origin: "interactive"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Remove(src); err != nil {
+		t.Fatal(err)
+	}
+	os.Remove(filepath.Join(h.wikiDir, "sources", "gone.md"))
+
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "interactive"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Archived != 1 {
+		t.Fatalf("archived = %d, want 1 (ledger still updated)", rep.Archived)
+	}
+
+	hash := contentHash([]byte("content"))
+	row, found, _ := h.runner.ledger.lookup(src, hash)
+	if !found || row.status != "superseded" {
+		t.Fatalf("ledger: found=%v status=%v, want superseded", found, row.status)
+	}
+}
+
+func TestSweepOrphansSearchExclusion(t *testing.T) {
+	h := newHarness(t, []string{"md"}, okLLM())
+	h.runner.cfg.Exclude = []string{"sources/_archived"}
+	src := h.write(t, "searchme.md", "unique-search-term-xyz")
+
+	if _, err := h.runner.Run(context.Background(), RunOptions{Origin: "interactive"}); err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := h.idx.Search("searchme", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected search hit before archive")
+	}
+
+	if err := os.Remove(src); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := h.runner.Run(context.Background(), RunOptions{Origin: "interactive"}); err != nil {
+		t.Fatal(err)
+	}
+
+	adpt := &markdown.MarkdownAdapter{}
+	sqlIdx := h.idx.(*index.SQLiteIndex)
+	if _, _, _, err := sqlIdx.CheckConsistency(h.store, adpt, true); err != nil {
+		t.Fatalf("CheckConsistency: %v", err)
+	}
+
+	results, err = h.idx.Search("searchme", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("expected 0 search results after archive, got %d", len(results))
 	}
 }
 
