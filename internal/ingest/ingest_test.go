@@ -809,6 +809,7 @@ func TestRunContextCanceled(t *testing.T) {
 
 func TestRunContextCanceledWithoutOrphanCandidates(t *testing.T) {
 	h := newHarness(t, []string{"md"}, okLLM())
+	logFixture(t, h, "boundary_sentinel="+h.srcDir)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -819,6 +820,142 @@ func TestRunContextCanceledWithoutOrphanCandidates(t *testing.T) {
 	}
 	if rep == nil {
 		t.Fatal("report should be non-nil")
+	}
+}
+
+func TestRunReturnsSweepLedgerQueryFailure(t *testing.T) {
+	h := newHarness(t, []string{"md"}, okLLM())
+	src := h.write(t, "known.md", "known content")
+	h.write(t, "pending.md", "pending content")
+	logFixture(t, h, "boundary_sentinel="+filepath.Join(h.wikiDir, "sources", "known.md"))
+
+	if _, err := h.runner.Run(context.Background(), RunOptions{Origin: "interactive"}); err != nil {
+		t.Fatal(err)
+	}
+	knownResults, err := h.idx.Search("known", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(knownResults) == 0 {
+		t.Fatal("expected known page in index before failure")
+	}
+	callsBefore := len(h.llm.requests)
+	beforeWiki := snapshotPaths(t, h.wikiDir)
+	beforeRows := ledgerCount(t, h.runner.ledger)
+	if err := h.runner.ledger.close(); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "interactive"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "ingest.ledger.successRows") {
+		t.Fatalf("err = %v, want successRows cause", err)
+	}
+	if rep == nil {
+		t.Fatal("report = nil, want partial report")
+	}
+	if len(rep.PerFile) != 0 {
+		t.Fatalf("per-file = %+v, want empty", rep.PerFile)
+	}
+	if rep.Digested != 0 || rep.Failed != 0 || rep.Archived != 0 || rep.SourceErrors != 0 || rep.Unchanged != 0 || rep.Skipped != 0 || rep.Deferred != 0 || rep.Refused != 0 {
+		t.Fatalf("report = %+v, want empty counts", rep)
+	}
+	if len(h.llm.requests) != callsBefore {
+		t.Fatalf("llm calls = %d, want %d total (no extra calls after forced failure)", len(h.llm.requests), callsBefore)
+	}
+	afterWiki := snapshotPaths(t, h.wikiDir)
+	if !reflect.DeepEqual(beforeWiki, afterWiki) {
+		t.Fatalf("wiki changed across forced failure: before=%v after=%v", beforeWiki, afterWiki)
+	}
+	knownResultsAfter, err := h.idx.Search("known", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(knownResultsAfter) != len(knownResults) {
+		t.Fatalf("index changed across forced failure: before=%d after=%d", len(knownResults), len(knownResultsAfter))
+	}
+	if count := ledgerCountClosedOK(t, h.dbPath); count != beforeRows {
+		t.Fatalf("ledger rows changed across forced failure: before=%d after=%d", beforeRows, count)
+	}
+	row, found, err := lookupWithFreshLedger(h.dbPath, src, contentHash([]byte("known content")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || row.status != "success" {
+		t.Fatalf("row after forced failure: found=%v row=%+v, want preserved success", found, row)
+	}
+}
+
+func TestRunRetriesAfterSweepLedgerQueryFailure(t *testing.T) {
+	h := newHarness(t, []string{"md"}, okLLM())
+	src := h.write(t, "retry.md", "retry content")
+	logFixture(t, h, "boundary_sentinel="+filepath.Join(h.wikiDir, "sources", "retry.md"))
+
+	if err := h.runner.ledger.close(); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "interactive"})
+	if err == nil {
+		t.Fatal("expected first-run error")
+	}
+	if rep == nil || len(rep.PerFile) != 0 {
+		t.Fatalf("rep = %+v, want empty partial report", rep)
+	}
+
+	reopened, err := openLedger(h.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.runner.ledger = reopened
+
+	rep2, err := h.runner.Run(context.Background(), RunOptions{Origin: "interactive"})
+	if err != nil {
+		t.Fatalf("recovery run: %v", err)
+	}
+	if rep2.Digested != 1 {
+		t.Fatalf("digested = %d, want 1", rep2.Digested)
+	}
+	if len(h.llm.requests) != 1 {
+		t.Fatalf("llm calls = %d, want 1 after recovery rerun", len(h.llm.requests))
+	}
+	if ok, _ := h.store.Exists("sources/retry.md"); !ok {
+		t.Fatal("recovery run should reacquire lock and write the page")
+	}
+	row, found, err := h.runner.ledger.lookup(src, contentHash([]byte("retry content")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || row.status != "success" {
+		t.Fatalf("row after recovery: found=%v row=%+v, want success", found, row)
+	}
+}
+
+func TestRunScheduledReturnsSweepLedgerQueryFailure(t *testing.T) {
+	h := newHarness(t, []string{"md"}, okLLM())
+	h.write(t, "known.md", "known content")
+	logFixture(t, h, "boundary_sentinel="+filepath.Join(h.srcDir, "known.md"))
+
+	if _, err := h.runner.Run(context.Background(), RunOptions{Origin: "scheduled"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.runner.ledger.close(); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "scheduled"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "ingest.ledger.successRows") {
+		t.Fatalf("err = %v, want successRows cause", err)
+	}
+	if rep == nil || len(rep.PerFile) != 0 {
+		t.Fatalf("rep = %+v, want empty partial report", rep)
+	}
+	if len(h.llm.requests) != 1 {
+		t.Fatalf("llm calls = %d, want unchanged pre-failure count", len(h.llm.requests))
 	}
 }
 
@@ -1989,6 +2126,56 @@ func mustRead(t *testing.T, p string) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+func snapshotPaths(t *testing.T, root string) []string {
+	t.Helper()
+	var paths []string
+	if err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if path == root {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		paths = append(paths, rel)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return paths
+}
+
+func ledgerCount(t *testing.T, l *ledger) int {
+	t.Helper()
+	var count int
+	if err := l.db.QueryRow(`SELECT COUNT(1) FROM ingest_ledger`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	return count
+}
+
+func ledgerCountClosedOK(t *testing.T, dbPath string) int {
+	t.Helper()
+	l, err := openLedger(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.close()
+	return ledgerCount(t, l)
+}
+
+func lookupWithFreshLedger(dbPath, sourcePath, hash string) (*ledgerRow, bool, error) {
+	l, err := openLedger(dbPath)
+	if err != nil {
+		return nil, false, err
+	}
+	defer l.close()
+	return l.lookup(sourcePath, hash)
 }
 
 func installSupersedeAbortTrigger(l *ledger) error {

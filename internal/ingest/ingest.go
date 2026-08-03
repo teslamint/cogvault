@@ -349,7 +349,7 @@ func (r *Runner) sweepOrphans(ctx context.Context, report *Report, dryRun bool) 
 	rows, err := r.ledger.successRows()
 	if err != nil {
 		slog.Warn("sweep: ledger query failed", "error", err)
-		return nil
+		return err
 	}
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].sourceDir == rows[j].sourceDir {
