@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -64,6 +65,7 @@ type Runner struct {
 	settleWindow time.Duration
 	maxFileSize  int64
 	now          func() time.Time
+	readDir      func(string) ([]os.DirEntry, error)
 }
 
 func New(cfg *config.Config, store storage.Storage, idx index.Index, llmAdapter llm.Adapter, dbPath string) (*Runner, error) {
@@ -84,6 +86,7 @@ func New(cfg *config.Config, store storage.Storage, idx index.Index, llmAdapter 
 		settleWindow: settleWindow,
 		maxFileSize:  int64(cfg.MaxFileSizeMB) << 20,
 		now:          time.Now,
+		readDir:      os.ReadDir,
 	}, nil
 }
 
@@ -99,6 +102,13 @@ func (r *Runner) Run(ctx context.Context, opts RunOptions) (*Report, error) {
 	defer unlock()
 
 	report := &Report{}
+	if err := ctx.Err(); err != nil {
+		return report, fmt.Errorf("ingest.Run: %w", err)
+	}
+
+	if err := r.sweepOrphans(ctx, report, opts.DryRun); err != nil {
+		return report, fmt.Errorf("ingest.Run: %w", err)
+	}
 
 	schemaText, err := r.readSchema()
 	if err != nil {
@@ -122,6 +132,12 @@ func (r *Runner) Run(ctx context.Context, opts RunOptions) (*Report, error) {
 		if found {
 			switch prev.status {
 			case "success":
+				if err := r.handleSuccessRow(entry.absPath, prev, report); err != nil {
+					if errors.Is(err, cverr.ErrNotFound) {
+						break
+					}
+					continue
+				}
 				report.Unchanged++
 				continue
 			case "refused":
@@ -153,6 +169,23 @@ func (r *Runner) Run(ctx context.Context, opts RunOptions) (*Report, error) {
 	}
 
 	return report, nil
+}
+
+func (r *Runner) handleSuccessRow(sourcePath string, prev *ledgerRow, report *Report) error {
+	_, _, err := r.store.Stat(prev.wikiPage)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, cverr.ErrNotFound) {
+		return err
+	}
+	report.Failed++
+	report.PerFile = append(report.PerFile, FileResult{
+		Path:   sourcePath,
+		Action: actionFailed,
+		Error:  "stat wiki page: " + err.Error(),
+	})
+	return err
 }
 
 type scanEntry struct {
@@ -307,6 +340,170 @@ func (r *Runner) recordFailure(entry scanEntry, hash, origin string, prev *ledge
 	}
 	report.Failed++
 	report.PerFile = append(report.PerFile, FileResult{Path: entry.absPath, Action: actionFailed, Error: msg})
+}
+
+func (r *Runner) sweepOrphans(ctx context.Context, report *Report, dryRun bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	rows, err := r.ledger.successRows()
+	if err != nil {
+		slog.Warn("sweep: ledger query failed", "error", err)
+		return err
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].sourceDir == rows[j].sourceDir {
+			return rows[i].sourcePath < rows[j].sourcePath
+		}
+		return rows[i].sourceDir < rows[j].sourceDir
+	})
+
+	rowsByDir := make(map[string][]ledgerRow, len(rows))
+	for _, row := range rows {
+		dir := filepath.Clean(row.sourceDir)
+		rowsByDir[dir] = append(rowsByDir[dir], row)
+	}
+
+	seenDirs := map[string]struct{}{}
+	for _, src := range r.cfg.Sources {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		dir := filepath.Clean(src.Path)
+		if _, seen := seenDirs[dir]; seen {
+			continue
+		}
+		seenDirs[dir] = struct{}{}
+
+		dirRows := rowsByDir[dir]
+		if len(dirRows) == 0 {
+			continue
+		}
+
+		snapshot, ok, err := r.snapshotDir(dir)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return err
+			}
+			r.reportSweepSourceError(report, dir, err)
+			continue
+		}
+		if !ok {
+			continue
+		}
+		candidates, survivors := orphanCandidates(dirRows, snapshot)
+		if survivors < 1 || len(candidates) != 1 {
+			continue
+		}
+		row := candidates[0]
+
+		if dryRun {
+			report.Archived++
+			report.PerFile = append(report.PerFile, FileResult{
+				Path: row.sourcePath, Action: actionWouldArchive,
+			})
+			continue
+		}
+
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		recheck, ok, err := r.snapshotDir(dir)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return err
+			}
+			r.reportSweepSourceError(report, dir, err)
+			continue
+		}
+		if !ok {
+			continue
+		}
+		recheckCandidates, recheckSurvivors := orphanCandidates(dirRows, recheck)
+		if recheckSurvivors < 1 || len(recheckCandidates) != 1 || !sameLedgerRow(row, recheckCandidates[0]) {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		dst := archivedWikiPath(row)
+		moveErr := r.store.Move(row.wikiPage, dst)
+		if moveErr != nil && !errors.Is(moveErr, cverr.ErrNotFound) {
+			slog.Warn("sweep: move failed", "src", row.wikiPage, "dst", dst, "error", moveErr)
+			continue
+		}
+
+		row.status = "superseded"
+		if err := r.ledger.upsert(row); err != nil {
+			slog.Warn("sweep: ledger update failed", "path", row.sourcePath, "error", err)
+			continue
+		}
+
+		report.Archived++
+		report.PerFile = append(report.PerFile, FileResult{
+			Path: row.sourcePath, Action: actionArchived,
+		})
+	}
+	return nil
+}
+
+func (r *Runner) reportSweepSourceError(report *Report, dir string, err error) {
+	slog.Warn("sweep: source dir snapshot failed, skipping", "dir", dir, "error", err)
+	report.SourceErrors++
+	report.PerFile = append(report.PerFile, FileResult{
+		Path:   dir,
+		Action: actionSourceError,
+		Error:  err.Error(),
+	})
+}
+
+type sourceSnapshot map[string]struct{}
+
+func (r *Runner) snapshotDir(dir string) (sourceSnapshot, bool, error) {
+	entries, err := r.readDir(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			slog.Warn("sweep: source dir unavailable, skipping", "dir", dir, "error", err)
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	snapshot := make(sourceSnapshot, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		snapshot[filepath.Join(dir, entry.Name())] = struct{}{}
+	}
+	return snapshot, true, nil
+}
+
+func orphanCandidates(rows []ledgerRow, snapshot sourceSnapshot) ([]ledgerRow, int) {
+	candidates := make([]ledgerRow, 0, len(rows))
+	survivors := 0
+	for _, row := range rows {
+		if _, ok := snapshot[row.sourcePath]; ok {
+			survivors++
+			continue
+		}
+		candidates = append(candidates, row)
+	}
+	return candidates, survivors
+}
+
+func sameLedgerRow(left, right ledgerRow) bool {
+	return left.sourcePath == right.sourcePath &&
+		left.contentHash == right.contentHash &&
+		left.sourceDir == right.sourceDir &&
+		left.wikiPage == right.wikiPage
+}
+
+func archivedWikiPath(row ledgerRow) string {
+	base := filepath.Base(row.wikiPage)
+	ext := filepath.Ext(base)
+	name := strings.TrimSuffix(base, ext)
+	return "sources/_archived/" + name + "-" + row.contentHash[:8] + ext
 }
 
 func (r *Runner) pagePath(slug, absSourcePath string) (string, error) {

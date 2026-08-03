@@ -80,8 +80,13 @@ type FSStorage struct { root string; cfg *config.Config; mu sync.Mutex }
 per-method checks). The v1 `Write` wiki-prefix check is **deleted**: the whole
 root is writable except `_schema.md` (guarded via `cfg.SchemaPath()`). New
 `Stat(path) (int64, time.Time, error)` uses `resolvePath` + `os.Stat` with the
-existing error mapping, feeding the index stat-gate. Single global write mutex
-retained (0006).
+existing error mapping, feeding the index stat-gate. `Move(src, dst string) error`
+resolves both paths, acquires the mutex, creates the destination parent directory,
+and calls `os.Rename`; used by the ingest orphan sweep to archive pages.
+`exclude_read`/schema permission checks happen before existence checks on both
+source and destination. For allowed paths, missing source returns `ErrNotFound`
+before destination occupancy is checked, and an occupied destination returns an
+error that wraps `os.ErrExist`. Single global write mutex retained (0006).
 
 ### 2.4 adapter/obsidian
 
@@ -159,15 +164,29 @@ type RunOptions struct { DryRun bool; Limit int; Origin string }
 ```
 
 **Responsibility**: orchestrate the digest stage. `Run` acquires an exclusive
-`flock` on `<dir(dbPath)>/ingest.lock` (fail fast → `ErrAlreadyRunning`), scans
+`flock` on `<dir(dbPath)>/ingest.lock` (fail fast → `ErrAlreadyRunning`). Before
+the main file loop, `sweepOrphans` queries success rows and archives pages whose
+source files no longer exist on disk to `sources/_archived/`, but only when an
+exact source-dir snapshot still contains at least one tracked survivor and
+exactly one missing success-row source. Zero-survivor and multi-missing states
+are treated as ambiguous and remain unchanged. `sweepOrphans` reads the exact
+directory entries again before each move, so a restored source cancels that
+archive action. Source-dir snapshot errors log/report and skip that directory
+unless the error is context cancellation. `Run` checks cancellation before sweep,
+before each sweep candidate, and between scanned files; cancellation stops future
+mutations but does not roll back rows already completed. The main loop then scans
 each `cfg.Sources` dir **top level only** (`os.ReadDir` + `os.Lstat`, skipping
 dirs and symlinks) applying the type filter, configurable size cap (default 32MB,
 `cfg.MaxFileSizeMB`), and 2m settle window,
 streams a sha256 hash (`hashFile`, no full file in memory), looks up the ledger,
-calls `llm.Digest`, validates the page's frontmatter from bytes, resolves the
-collision-aware page path, writes through `storage`, indexes via `idx.Add`, and
-finalizes the ledger row. It honors ctx cancellation between files (partial report
-+ wrapped ctx error) and releases the lock via defer. Error classes drive
+calls `Storage.Stat` for found `success` rows, and reports `Unchanged` only when
+that page still exists. `ErrNotFound` falls through to re-digest the present
+source; other stat errors increment `Failed`, append `actionFailed` with
+`stat wiki page: <error>`, and leave the success row unchanged. For re-digestion
+it validates the page's frontmatter from bytes, resolves the collision-aware page
+path, writes through `storage`, indexes via `idx.Add`, and finalizes the ledger
+row. It honors ctx cancellation between files (partial report + wrapped ctx
+error) and releases the lock via defer. Error classes drive
 `attempts` (permanent ++, transient/infra unchanged; §4.2).
 
 **Ledger** (`ledger.go`): owns its **own** `sql.Open("sqlite", dsn)` to `db_path`
@@ -276,7 +295,7 @@ resolveConfigPath → Load → bootstrap(store/index/adapter) → CheckConsisten
 
 ```
 Storage.Read/Stat  — no lock
-Storage.Write      — Storage.mu
+Storage.Write/Move — Storage.mu
 Index.Search/GetMeta — Index.mu.RLock (WAL read)
 Index.Add/Remove   — Index.mu.Lock
 CheckConsistency   — ccMu.Lock (serialize) + mu (read then apply)
@@ -286,6 +305,8 @@ DB (all openers)   — busy_timeout=5000 per connection (contention → wait)
 
 Storage.mu ↔ Index.mu never held together; no deadlock. Cross-process safety
 (scheduled ingest vs live serve) rests on the ingest flock + WAL + busy_timeout.
+Archive moves share the same storage mutex as writes, so sweep mutations stay
+serialized with other wiki writes.
 
 ---
 
@@ -294,7 +315,7 @@ Storage.mu ↔ Index.mu never held together; no deadlock. Cross-process safety
 | Target | Method |
 |------|------|
 | config | YAML → Load → validate (absolute/overlap/expansion) |
-| storage/fs | `t.TempDir()` fixtures; Stat; whole-root write; security |
+| storage/fs | `t.TempDir()` fixtures; Stat; Move; whole-root write; security |
 | adapter | fixtures/obsidian, edge |
 | index/sqlite | temp DB; user_version recreation; stat-gate Read-count |
 | llm | fake `claude` in `testdata/bin` (argv/stdin/mode) |
@@ -311,7 +332,7 @@ Storage.mu ↔ Index.mu never held together; no deadlock. Cross-process safety
 ```
 U1: O1 spike — headless PDF digestion verification (research note)
 U2: config v2 (single mode, explicit path, sources, ~ expansion)
-U3: storage — root is the wiki, Stat added
+U3: storage — root is the wiki, Stat and Move added
 U4: index — user_version=2, size+mtime stat-gate, scope removal, busy_timeout
 U5: llm — adapter interface + claudecode backend + error classes
 U6: ingest — pipeline, ledger, lock, report

@@ -489,6 +489,197 @@ func TestWriteExcludeReadBlocked(t *testing.T) {
 	}
 }
 
+func TestMoveHappyPath(t *testing.T) {
+	root := t.TempDir()
+	store := newTestStorage(t, root, &config.Config{})
+
+	if err := store.Write("sources/a.md", []byte("content")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Move("sources/a.md", "sources/_archived/a-abcd1234.md"); err != nil {
+		t.Fatalf("Move() error = %v", err)
+	}
+
+	if _, err := store.Read("sources/a.md"); !errors.Is(err, cverr.ErrNotFound) {
+		t.Fatalf("src should be gone, got err = %v", err)
+	}
+
+	data, err := store.Read("sources/_archived/a-abcd1234.md")
+	if err != nil {
+		t.Fatalf("dst Read() error = %v", err)
+	}
+	if string(data) != "content" {
+		t.Fatalf("dst content = %q, want %q", string(data), "content")
+	}
+}
+
+func TestMoveMissingSrc(t *testing.T) {
+	root := t.TempDir()
+	store := newTestStorage(t, root, &config.Config{})
+
+	err := store.Move("sources/nope.md", "sources/_archived/nope.md")
+	if !errors.Is(err, cverr.ErrNotFound) {
+		t.Fatalf("Move missing src: expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestMoveTraversalRejected(t *testing.T) {
+	root := t.TempDir()
+	store := newTestStorage(t, root, &config.Config{})
+
+	if err := store.Write("sources/a.md", []byte("content")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := store.Move("../escape", "sources/b.md")
+	if !errors.Is(err, cverr.ErrTraversal) {
+		t.Fatalf("Move traversal src: expected ErrTraversal, got %v", err)
+	}
+
+	err = store.Move("sources/a.md", "../escape")
+	if !errors.Is(err, cverr.ErrTraversal) {
+		t.Fatalf("Move traversal dst: expected ErrTraversal, got %v", err)
+	}
+}
+
+func TestMoveSymlinkRejected(t *testing.T) {
+	root := t.TempDir()
+	store := newTestStorage(t, root, &config.Config{})
+
+	real := filepath.Join(root, "real.md")
+	if err := os.WriteFile(real, []byte("real"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link.md")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+
+	err := store.Move("link.md", "dst.md")
+	if !errors.Is(err, cverr.ErrSymlink) {
+		t.Fatalf("Move symlink src: expected ErrSymlink, got %v", err)
+	}
+}
+
+func TestMoveAutoMkdir(t *testing.T) {
+	root := t.TempDir()
+	store := newTestStorage(t, root, &config.Config{})
+
+	if err := store.Write("a.md", []byte("content")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Move("a.md", "deep/nested/dir/a.md"); err != nil {
+		t.Fatalf("Move auto-mkdir error = %v", err)
+	}
+
+	data, err := store.Read("deep/nested/dir/a.md")
+	if err != nil {
+		t.Fatalf("Read after move error = %v", err)
+	}
+	if string(data) != "content" {
+		t.Fatalf("content = %q, want %q", string(data), "content")
+	}
+}
+
+func TestMoveRejectsSchema(t *testing.T) {
+	root := t.TempDir()
+	store := newTestStorage(t, root, &config.Config{})
+
+	if err := store.Write("a.md", []byte("content")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := store.Move("a.md", "_schema.md")
+	if !errors.Is(err, cverr.ErrPermission) {
+		t.Fatalf("Move to schema: expected ErrPermission, got %v", err)
+	}
+}
+
+func TestMoveRejectsExcludeReadSource(t *testing.T) {
+	root := t.TempDir()
+	store := newTestStorage(t, root, &config.Config{ExcludeRead: []string{"private"}})
+
+	mustWriteFile(t, filepath.Join(root, "private", "secret.md"), "secret")
+
+	err := store.Move("private/secret.md", "archive/secret.md")
+	if !errors.Is(err, cverr.ErrPermission) {
+		t.Fatalf("Move exclude_read src: expected ErrPermission, got %v", err)
+	}
+}
+
+func TestMoveRejectsExcludeReadDestination(t *testing.T) {
+	root := t.TempDir()
+	store := newTestStorage(t, root, &config.Config{ExcludeRead: []string{"private"}})
+
+	if err := store.Write("notes/secret.md", []byte("secret")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := store.Move("notes/secret.md", "private/secret.md")
+	if !errors.Is(err, cverr.ErrPermission) {
+		t.Fatalf("Move exclude_read dst: expected ErrPermission, got %v", err)
+	}
+}
+
+func TestMoveMissingProtectedSourceReturnsPermission(t *testing.T) {
+	root := t.TempDir()
+	store := newTestStorage(t, root, &config.Config{ExcludeRead: []string{"private"}})
+
+	err := store.Move("private/missing.md", "archive/missing.md")
+	if !errors.Is(err, cverr.ErrPermission) {
+		t.Fatalf("Move missing protected src: expected ErrPermission, got %v", err)
+	}
+}
+
+func TestMovePreservesOccupiedDestination(t *testing.T) {
+	root := t.TempDir()
+	store := newTestStorage(t, root, &config.Config{})
+
+	if err := store.Write("sources/a.md", []byte("source")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Write("archive/a.md", []byte("existing")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := store.Move("sources/a.md", "archive/a.md")
+	if !errors.Is(err, os.ErrExist) {
+		t.Fatalf("Move occupied dst: expected os.ErrExist, got %v", err)
+	}
+
+	srcData, err := store.Read("sources/a.md")
+	if err != nil {
+		t.Fatalf("Read src after failed move error = %v", err)
+	}
+	if string(srcData) != "source" {
+		t.Fatalf("src content after failed move = %q, want %q", string(srcData), "source")
+	}
+
+	dstData, err := store.Read("archive/a.md")
+	if err != nil {
+		t.Fatalf("Read dst after failed move error = %v", err)
+	}
+	if string(dstData) != "existing" {
+		t.Fatalf("dst content after failed move = %q, want %q", string(dstData), "existing")
+	}
+}
+
+func TestMoveMissingSourceWinsOverOccupiedDestination(t *testing.T) {
+	root := t.TempDir()
+	store := newTestStorage(t, root, &config.Config{})
+
+	if err := store.Write("archive/a.md", []byte("existing")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := store.Move("sources/missing.md", "archive/a.md")
+	if !errors.Is(err, cverr.ErrNotFound) {
+		t.Fatalf("Move missing src with occupied dst: expected ErrNotFound, got %v", err)
+	}
+}
+
 func containsString(items []string, want string) bool {
 	for _, item := range items {
 		if item == want {

@@ -100,8 +100,8 @@ func TestLoadDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.Exclude) != 2 || cfg.Exclude[0] != ".obsidian" || cfg.Exclude[1] != ".trash" {
-		t.Errorf("Exclude = %v, want [.obsidian .trash]", cfg.Exclude)
+	if len(cfg.Exclude) != 3 || cfg.Exclude[0] != ".obsidian" || cfg.Exclude[1] != ".trash" || cfg.Exclude[2] != "sources/_archived" {
+		t.Errorf("Exclude = %v, want [.obsidian .trash sources/_archived]", cfg.Exclude)
 	}
 	if cfg.ExcludeRead == nil || len(cfg.ExcludeRead) != 0 {
 		t.Errorf("ExcludeRead = %v, want []", cfg.ExcludeRead)
@@ -387,7 +387,7 @@ func TestAllExcluded(t *testing.T) {
 		ExcludeRead: []string{"c"},
 	}
 	got := cfg.AllExcluded()
-	want := []string{"a", "b", "c"}
+	want := []string{"a", "b", "sources/_archived", "c"}
 	if len(got) != len(want) {
 		t.Fatalf("AllExcluded() = %v, want %v", got, want)
 	}
@@ -403,8 +403,49 @@ func TestAllExcludedBothEmpty(t *testing.T) {
 		Exclude:     []string{},
 		ExcludeRead: []string{},
 	}
-	if got := cfg.AllExcluded(); len(got) != 0 {
-		t.Errorf("AllExcluded() = %v, want empty", got)
+	got := cfg.AllExcluded()
+	want := []string{"sources/_archived"}
+	if len(got) != len(want) {
+		t.Fatalf("AllExcluded() = %v, want %v", got, want)
+	}
+	for i, v := range want {
+		if got[i] != v {
+			t.Errorf("AllExcluded()[%d] = %q, want %q", i, got[i], v)
+		}
+	}
+}
+
+func TestAllExcludedArchivePathNotDuplicated(t *testing.T) {
+	cfg := &Config{
+		Exclude:     []string{"a", "sources/_archived"},
+		ExcludeRead: []string{"c"},
+	}
+	got := cfg.AllExcluded()
+	want := []string{"a", "sources/_archived", "c"}
+	if len(got) != len(want) {
+		t.Fatalf("AllExcluded() = %v, want %v", got, want)
+	}
+	for i, v := range want {
+		if got[i] != v {
+			t.Errorf("AllExcluded()[%d] = %q, want %q", i, got[i], v)
+		}
+	}
+}
+
+func TestAllExcludedArchivePathNotDuplicatedFromExcludeRead(t *testing.T) {
+	cfg := &Config{
+		Exclude:     []string{"a"},
+		ExcludeRead: []string{"sources/_archived", "c"},
+	}
+	got := cfg.AllExcluded()
+	want := []string{"a", "sources/_archived", "c"}
+	if len(got) != len(want) {
+		t.Fatalf("AllExcluded() = %v, want %v", got, want)
+	}
+	for i, v := range want {
+		if got[i] != v {
+			t.Errorf("AllExcluded()[%d] = %q, want %q", i, got[i], v)
+		}
 	}
 }
 
