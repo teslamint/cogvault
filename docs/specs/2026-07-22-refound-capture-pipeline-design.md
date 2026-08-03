@@ -127,7 +127,7 @@ New SQLite table `ingest_ledger`: source path, content hash, source directory, d
 
 ## Testing
 
-- Unit: `internal/ingest` with a mock `llm.Adapter`; ledger state transitions (new / already-processed / transient-failure-no-attempt / permanent-failure-attempt / attempts-exhausted / superseded-on-rehash); stability-gate skip; hash-based dedup including renamed files.
+- Unit: `internal/ingest` with a mock `llm.Adapter`; ledger state transitions (new / already-processed / transient-failure-no-attempt / permanent-failure-attempt / attempts-exhausted / superseded-on-rehash); stability-gate skip; hash-based dedup.
 - Unit: `internal/llm/claudecode` against a fake `claude` executable in `testdata/bin` (records argv/stdin, returns canned JSON) — success, timeout, malformed output, nonzero exit.
 - Unit: single-mode config (absolute `wiki_dir`/`db_path` accepted, leading-`~` expansion, overlap rejection); storage boundary = wiki root only; ingest source reads refuse symlinks and oversized files.
 - Integration: end-to-end ingest over `testdata/fixtures` sources with the fake CLI, asserting pages exist, index hits, ledger rows; concurrent ingest+serve write smoke test (busy timeout effective).

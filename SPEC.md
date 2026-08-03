@@ -493,6 +493,11 @@ the page becomes `sources/<slug>-<hash8>.md` (here `hash8` = first 8 hex of sha2
 of the absolute source path). Re-digestion of the same source path with new content
 overwrites its page and marks the prior ledger row `superseded`.
 
+A renamed or deleted source file's page and ledger row survive the immediate
+change. On the next ingest run, a pre-scan sweep archives the orphaned page to
+`sources/_archived/<slug>-<hash8>.md` and marks the ledger row `superseded`. The
+`sources/_archived` directory is excluded from indexing.
+
 ### 10.3 Failure isolation
 
 Per-file failures are classified (§4.2) and never abort the run. Permanent
@@ -502,9 +507,9 @@ unchanged so the file retries indefinitely.
 
 ### 10.4 Report
 
-A per-run report with counts (digested, failed, skipped, deferred, unchanged) and
-a per-file list (action ∈ `digested | would-digest | failed | skipped | deferred |
-exhausted`, plus an error string). Oversized/type-excluded files appear in the
+A per-run report with counts (digested, failed, skipped, deferred, unchanged,
+archived) and a per-file list (action ∈ `digested | would-digest | failed |
+skipped | deferred | exhausted | archived | would-archive`, plus an error string). Oversized/type-excluded files appear in the
 report but not the ledger. Unchanged (already-processed) files are counted but
 kept out of the per-file list for readable backlog reports.
 

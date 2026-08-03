@@ -80,8 +80,10 @@ type FSStorage struct { root string; cfg *config.Config; mu sync.Mutex }
 per-method checks). The v1 `Write` wiki-prefix check is **deleted**: the whole
 root is writable except `_schema.md` (guarded via `cfg.SchemaPath()`). New
 `Stat(path) (int64, time.Time, error)` uses `resolvePath` + `os.Stat` with the
-existing error mapping, feeding the index stat-gate. Single global write mutex
-retained (0006).
+existing error mapping, feeding the index stat-gate. `Move(src, dst string) error`
+resolves both paths, acquires the mutex, creates the destination parent directory,
+and calls `os.Rename`; used by the ingest orphan sweep to archive pages. Single
+global write mutex retained (0006).
 
 ### 2.4 adapter/obsidian
 
@@ -159,7 +161,11 @@ type RunOptions struct { DryRun bool; Limit int; Origin string }
 ```
 
 **Responsibility**: orchestrate the digest stage. `Run` acquires an exclusive
-`flock` on `<dir(dbPath)>/ingest.lock` (fail fast → `ErrAlreadyRunning`), scans
+`flock` on `<dir(dbPath)>/ingest.lock` (fail fast → `ErrAlreadyRunning`). Before
+the main file loop, `sweepOrphans` queries success rows and archives pages whose
+source files no longer exist on disk to `sources/_archived/`; a source-dir
+availability guard prevents mass-archive when a directory is temporarily
+unavailable. The main loop then scans
 each `cfg.Sources` dir **top level only** (`os.ReadDir` + `os.Lstat`, skipping
 dirs and symlinks) applying the type filter, configurable size cap (default 32MB,
 `cfg.MaxFileSizeMB`), and 2m settle window,
