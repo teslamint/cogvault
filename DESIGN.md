@@ -295,7 +295,7 @@ resolveConfigPath → Load → bootstrap(store/index/adapter) → CheckConsisten
 
 ```
 Storage.Read/Stat  — no lock
-Storage.Write      — Storage.mu
+Storage.Write/Move — Storage.mu
 Index.Search/GetMeta — Index.mu.RLock (WAL read)
 Index.Add/Remove   — Index.mu.Lock
 CheckConsistency   — ccMu.Lock (serialize) + mu (read then apply)
@@ -305,6 +305,8 @@ DB (all openers)   — busy_timeout=5000 per connection (contention → wait)
 
 Storage.mu ↔ Index.mu never held together; no deadlock. Cross-process safety
 (scheduled ingest vs live serve) rests on the ingest flock + WAL + busy_timeout.
+Archive moves share the same storage mutex as writes, so sweep mutations stay
+serialized with other wiki writes.
 
 ---
 
@@ -313,7 +315,7 @@ Storage.mu ↔ Index.mu never held together; no deadlock. Cross-process safety
 | Target | Method |
 |------|------|
 | config | YAML → Load → validate (absolute/overlap/expansion) |
-| storage/fs | `t.TempDir()` fixtures; Stat; whole-root write; security |
+| storage/fs | `t.TempDir()` fixtures; Stat; Move; whole-root write; security |
 | adapter | fixtures/obsidian, edge |
 | index/sqlite | temp DB; user_version recreation; stat-gate Read-count |
 | llm | fake `claude` in `testdata/bin` (argv/stdin/mode) |

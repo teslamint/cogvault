@@ -118,8 +118,9 @@ func (c *Config) applyDefaults() {
 	}
 }
 
-// AllExcluded returns exclude followed by exclude_read.
-// The returned slice always includes the internal archive path exactly once.
+// AllExcluded returns the effective scan/index exclusion list without mutating
+// the configured exclude slices. The returned slice always includes the
+// internal archive path exactly once.
 func (c *Config) AllExcluded() []string {
 	result := make([]string, 0, len(c.Exclude)+len(c.ExcludeRead)+1)
 	result = append(result, c.Exclude...)

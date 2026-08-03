@@ -184,6 +184,7 @@ Storage is rooted at the absolute `wiki_dir`. It never touches `sources[]`.
 ```
 Read(path) → ([]byte, error)
 Write(path, data []byte) → error
+Move(src, dst) → error
 List(prefix) → ([]ListEntry, error)
 Exists(path) → (bool, error)
 Stat(path) → (size int64, mtime time.Time, error)
@@ -215,7 +216,19 @@ surfaces, not direct retention reads.
 - Intermediate directories auto-created; existing files overwritten.
 - Index reflection is eventual (§5.7).
 
-### 5.5 List
+### 5.5 Move
+
+- `exclude_read` on either source or destination → `ErrPermission`.
+- `_schema.md` on either side → `ErrPermission`.
+- Permission checks happen before existence checks.
+- For allowed paths, missing source → `ErrNotFound`.
+- For allowed paths, occupied destination returns an error that wraps
+  `os.ErrExist`.
+- Exact-path archive moves use this contract; a missing live page takes
+  precedence over an occupied archive destination.
+- Parent directories for the destination are auto-created.
+
+### 5.6 List
 
 - `prefix` must be a directory; a file path → `ErrNotFound`.
 - Direct children only (non-recursive); directories end with `/`.
@@ -223,16 +236,16 @@ surfaces, not direct retention reads.
 - Listing an `exclude_read` directory itself → `ErrPermission` (not an empty
   list — existence must not leak).
 
-### 5.6 Exists
+### 5.7 Exists
 
 - `exclude_read` → always `false`.
 
-### 5.7 Consistency model
+### 5.8 Consistency model
 
 Eventual consistency. Transient write↔index divergence is allowed; automatic
 detection and repair are guaranteed (bounded staleness, §6.9).
 
-### 5.8 Concurrency
+### 5.9 Concurrency
 
 - Same-path writes serialized (single global mutex, 0006); last-write-wins.
 - Read↔Write concurrent.

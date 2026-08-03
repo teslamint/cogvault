@@ -423,6 +423,9 @@ func (r *Runner) sweepOrphans(ctx context.Context, report *Report, dryRun bool) 
 		if recheckSurvivors < 1 || len(recheckCandidates) != 1 || !sameLedgerRow(row, recheckCandidates[0]) {
 			continue
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 
 		dst := archivedWikiPath(row)
 		moveErr := r.store.Move(row.wikiPage, dst)

@@ -856,6 +856,7 @@ func TestSweepOrphansSourceDeleted(t *testing.T) {
 	h := newHarness(t, []string{"md"}, okLLM())
 	src := h.write(t, "victim.md", "content")
 	h.write(t, "survivor.md", "still here")
+	logFixture(t, h, "boundary_sentinel="+filepath.Join(h.srcDir, "survivor.md"))
 
 	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "interactive"})
 	if err != nil {
@@ -990,6 +991,7 @@ func TestSweepOrphansWikiPageAlreadyGone(t *testing.T) {
 	h := newHarness(t, []string{"md"}, okLLM())
 	src := h.write(t, "gone.md", "content")
 	h.write(t, "survivor.md", "still here")
+	logFixture(t, h, "boundary_sentinel="+filepath.Join(h.wikiDir, "sources", "_archived", "gone-"+contentHash([]byte("content"))[:8]+".md"))
 
 	if _, err := h.runner.Run(context.Background(), RunOptions{Origin: "interactive"}); err != nil {
 		t.Fatal(err)
@@ -998,7 +1000,21 @@ func TestSweepOrphansWikiPageAlreadyGone(t *testing.T) {
 	if err := os.Remove(src); err != nil {
 		t.Fatal(err)
 	}
-	os.Remove(filepath.Join(h.wikiDir, "sources", "gone.md"))
+	livePath := filepath.Join(h.wikiDir, "sources", "gone.md")
+	archivePath := filepath.Join(h.wikiDir, "sources", "_archived", "gone-"+contentHash([]byte("content"))[:8]+".md")
+	archivedBody, err := os.ReadFile(livePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(archivePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(archivePath, archivedBody, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(livePath); err != nil {
+		t.Fatal(err)
+	}
 
 	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "interactive"})
 	if err != nil {
@@ -1012,6 +1028,13 @@ func TestSweepOrphansWikiPageAlreadyGone(t *testing.T) {
 	row, found, _ := h.runner.ledger.lookup(src, hash)
 	if !found || row.status != "superseded" {
 		t.Fatalf("ledger: found=%v status=%v, want superseded", found, row.status)
+	}
+	archivedBodyAfter, err := os.ReadFile(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(archivedBodyAfter) != string(archivedBody) {
+		t.Fatalf("archive bytes changed across rerun")
 	}
 }
 
@@ -1214,6 +1237,7 @@ func TestSweepOrphansMoveFailure(t *testing.T) {
 	h := newHarness(t, []string{"md"}, okLLM())
 	src := h.write(t, "victim.md", "content")
 	h.write(t, "survivor.md", "keep")
+	logFixture(t, h, "boundary_sentinel="+filepath.Join(h.wikiDir, "sources", "victim.md"))
 
 	if _, err := h.runner.Run(context.Background(), RunOptions{Origin: "interactive"}); err != nil {
 		t.Fatal(err)
@@ -1415,6 +1439,7 @@ func TestSweepOrphansScheduled(t *testing.T) {
 	h := newHarness(t, []string{"md"}, okLLM())
 	src := h.write(t, "victim.md", "content")
 	h.write(t, "survivor.md", "keep")
+	logFixture(t, h, "boundary_sentinel="+filepath.Join(h.srcDir, "survivor.md"))
 
 	if _, err := h.runner.Run(context.Background(), RunOptions{Origin: "scheduled"}); err != nil {
 		t.Fatal(err)
@@ -1442,6 +1467,7 @@ func TestSweepOrphansCancellationBetweenCandidates(t *testing.T) {
 		{Path: h.srcDir, Types: []string{"md"}},
 		{Path: srcDir2, Types: []string{"md"}},
 	}
+	logFixture(t, h, "boundary_sentinel="+filepath.Join(h.wikiDir, "sources", "second-missing.md"))
 
 	firstMissing := h.write(t, "first-missing.md", "one")
 	h.write(t, "first-survivor.md", "keep one")
@@ -1491,6 +1517,137 @@ func TestSweepOrphansCancellationBetweenCandidates(t *testing.T) {
 	}
 	if ok, _ := h.store.Exists("sources/second-missing.md"); !ok {
 		t.Fatal("second candidate page must remain live after cancellation")
+	}
+}
+
+func TestSweepOrphansCanceledAfterFinalRecheck(t *testing.T) {
+	h := newHarness(t, []string{"md"}, okLLM())
+	src := h.write(t, "victim.md", "content")
+	h.write(t, "survivor.md", "keep")
+
+	if _, err := h.runner.Run(context.Background(), RunOptions{Origin: "interactive"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(src); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defaultReadDir := os.ReadDir
+	var calls int
+	h.runner.readDir = func(path string) ([]os.DirEntry, error) {
+		calls++
+		entries, err := defaultReadDir(path)
+		if err != nil {
+			return nil, err
+		}
+		if calls == 2 {
+			cancel()
+		}
+		return entries, nil
+	}
+
+	rep, err := h.runner.Run(ctx, RunOptions{Origin: "interactive"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context canceled", err)
+	}
+	if rep == nil {
+		t.Fatal("report = nil, want partial report")
+	}
+	if rep.Archived != 0 {
+		t.Fatalf("archived = %d, want 0", rep.Archived)
+	}
+	if ok, _ := h.store.Exists("sources/victim.md"); !ok {
+		t.Fatal("cancellation after final recheck must preserve live page")
+	}
+	row, found, err := h.runner.ledger.lookup(src, contentHash([]byte("content")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || row.status != "success" {
+		t.Fatalf("ledger: found=%v row=%+v, want preserved success row", found, row)
+	}
+}
+
+func TestSweepOrphansArchivesTwoSameBasenameVersionsSeparately(t *testing.T) {
+	m := &mockLLM{fn: func(req llm.DigestRequest) (*llm.DigestResult, error) {
+		body, err := os.ReadFile(req.SourcePath)
+		if err != nil {
+			return nil, err
+		}
+		label := strings.TrimSpace(string(body))
+		return &llm.DigestResult{PageContent: "---\ntitle: " + label + "\ntype: source\n---\n\nbody " + label + "\n"}, nil
+	}}
+	h := newHarness(t, []string{"md"}, m)
+	src := h.write(t, "victim.md", "v1")
+	h.write(t, "survivor.md", "keep")
+
+	if _, err := h.runner.Run(context.Background(), RunOptions{Origin: "interactive"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(src); err != nil {
+		t.Fatal(err)
+	}
+	if err := installSupersedeAbortTrigger(h.runner.ledger); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.runner.Run(context.Background(), RunOptions{Origin: "interactive"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dropSupersedeAbortTrigger(h.runner.ledger); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte("v2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.runner.Run(context.Background(), RunOptions{Origin: "interactive"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(src); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "interactive"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Archived != 1 {
+		t.Fatalf("archived = %d, want 1", rep.Archived)
+	}
+	hash1 := contentHash([]byte("v1"))
+	hash2 := contentHash([]byte("v2"))
+	archive1 := "sources/_archived/victim-" + hash1[:8] + ".md"
+	archive2 := "sources/_archived/victim-" + hash2[:8] + ".md"
+	if archive1 == archive2 {
+		t.Fatal("archive paths should differ by content hash")
+	}
+	body1, err := h.store.Read(archive1)
+	if err != nil {
+		t.Fatalf("Read(%q): %v", archive1, err)
+	}
+	body2, err := h.store.Read(archive2)
+	if err != nil {
+		t.Fatalf("Read(%q): %v", archive2, err)
+	}
+	if string(body1) == string(body2) {
+		t.Fatalf("archived bodies should differ between versions")
+	}
+	if !strings.Contains(string(body1), "title: v1") || !strings.Contains(string(body2), "title: v2") {
+		t.Fatalf("unexpected archived bodies: body1=%q body2=%q", string(body1), string(body2))
+	}
+	row1, found, err := h.runner.ledger.lookup(src, hash1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || row1.status != "superseded" {
+		t.Fatalf("row1: found=%v row=%+v, want superseded", found, row1)
+	}
+	row2, found, err := h.runner.ledger.lookup(src, hash2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || row2.status != "superseded" {
+		t.Fatalf("row2: found=%v row=%+v, want superseded", found, row2)
 	}
 }
 
