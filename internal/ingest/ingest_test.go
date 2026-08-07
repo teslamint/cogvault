@@ -133,6 +133,9 @@ func TestRunHappyPathTwoFiles(t *testing.T) {
 	if rep.Digested != 2 || rep.Failed != 0 || rep.Skipped != 0 {
 		t.Fatalf("counts = %+v", rep)
 	}
+	if rep.SumMismatch != "" {
+		t.Fatalf("sum mismatch: %s", rep.SumMismatch)
+	}
 
 	for _, p := range []string{"sources/note-one.md", "sources/note-two.md"} {
 		if ok, _ := h.store.Exists(p); !ok {
@@ -166,6 +169,9 @@ func TestRunIdempotentSecondRun(t *testing.T) {
 	if rep.Digested != 0 || rep.Unchanged != 2 {
 		t.Fatalf("second run counts = %+v, want digested=0 unchanged=2", rep)
 	}
+	if rep.SumMismatch != "" {
+		t.Fatalf("sum mismatch: %s", rep.SumMismatch)
+	}
 	if len(h.llm.requests) != 2 {
 		t.Fatalf("llm called %d times, want 2 (no re-digest)", len(h.llm.requests))
 	}
@@ -182,6 +188,9 @@ func TestRunDeferredWithinSettleWindow(t *testing.T) {
 	}
 	if rep.Deferred != 1 || rep.Digested != 0 {
 		t.Fatalf("counts = %+v, want deferred=1 digested=0", rep)
+	}
+	if rep.SumMismatch != "" {
+		t.Fatalf("sum mismatch: %s", rep.SumMismatch)
 	}
 	if len(h.llm.requests) != 0 {
 		t.Fatal("llm called for deferred file")
@@ -264,6 +273,9 @@ func TestRunOversizedAndTypeExcluded(t *testing.T) {
 	}
 	if rep.Skipped != 2 || rep.Digested != 0 {
 		t.Fatalf("counts = %+v, want skipped=2 digested=0", rep)
+	}
+	if rep.SumMismatch != "" {
+		t.Fatalf("sum mismatch: %s", rep.SumMismatch)
 	}
 	// neither persisted to ledger
 	var count int
@@ -428,6 +440,9 @@ func TestRunPermanentErrorExhausts(t *testing.T) {
 	if rep.Skipped != 1 || rep.Failed != 0 {
 		t.Fatalf("run 4 counts = %+v, want skipped=1 failed=0", rep)
 	}
+	if rep.SumMismatch != "" {
+		t.Fatalf("sum mismatch: %s", rep.SumMismatch)
+	}
 	if len(m.requests) != callsBefore {
 		t.Fatal("exhausted file was re-digested")
 	}
@@ -449,6 +464,9 @@ func TestRunRefusedTerminalNoAttempt(t *testing.T) {
 	}
 	if rep.Refused != 1 || rep.Failed != 0 {
 		t.Fatalf("counts = %+v, want refused=1 failed=0", rep)
+	}
+	if rep.SumMismatch != "" {
+		t.Fatalf("sum mismatch: %s", rep.SumMismatch)
 	}
 	row, found, _ := h.runner.ledger.lookup(src, contentHash([]byte("one")))
 	if !found || row.status != "refused" || row.attempts != 0 {
@@ -482,6 +500,9 @@ func TestRunRefusedSkippedWhenModelMatches(t *testing.T) {
 	}
 	if rep.Refused != 0 || rep.Skipped != 1 {
 		t.Fatalf("counts = %+v, want refused=0 skipped=1", rep)
+	}
+	if rep.SumMismatch != "" {
+		t.Fatalf("sum mismatch: %s", rep.SumMismatch)
 	}
 }
 
@@ -2339,31 +2360,38 @@ func TestSumCheckMismatchInString(t *testing.T) {
 	}
 }
 
-func TestSumCheckLstatError(t *testing.T) {
+func TestSumCheckReadPermissionError(t *testing.T) {
 	h := newHarness(t, []string{"md"}, okLLM())
-	p := h.write(t, "good.md", "content")
+	h.write(t, "good.md", "content")
 	bad := filepath.Join(h.srcDir, "bad.md")
 	os.WriteFile(bad, []byte("x"), 0o644)
 	os.Chmod(bad, 0o000)
 	t.Cleanup(func() { os.Chmod(bad, 0o644) })
 
-	info, err := os.Lstat(bad)
-	if err != nil {
-		if rep, runErr := h.runner.Run(context.Background(), RunOptions{Origin: "test"}); runErr != nil {
-			t.Fatalf("Run: %v", runErr)
-		} else if rep.Scanned != 1 || rep.SumMismatch != "" {
-			t.Fatalf("scanned=%d mismatch=%q (Lstat failed on bad.md as expected)", rep.Scanned, rep.SumMismatch)
-		}
-		return
-	}
-	_ = info
-	_ = p
-
 	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "test"})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
+	if rep.Scanned != 2 {
+		t.Fatalf("scanned = %d, want 2 (good.md + bad.md)", rep.Scanned)
+	}
+	if rep.Skipped != 1 {
+		t.Fatalf("skipped = %d, want 1 (bad.md read error)", rep.Skipped)
+	}
+	if rep.Digested != 1 {
+		t.Fatalf("digested = %d, want 1 (good.md)", rep.Digested)
+	}
 	if rep.SumMismatch != "" {
-		t.Fatalf("unexpected sum mismatch: %s", rep.SumMismatch)
+		t.Fatalf("sum mismatch: %s", rep.SumMismatch)
+	}
+	found := false
+	for _, f := range rep.PerFile {
+		if f.Path == bad && f.Action == actionSkipped && strings.Contains(f.Error, "read:") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected skipped entry for bad.md with read error, got: %+v", rep.PerFile)
 	}
 }

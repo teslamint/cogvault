@@ -547,6 +547,9 @@ mismatch` warning on the summary line. `not-examined` counts source files the
 main loop never reached due to `--limit`; it is omitted from the summary line
 when zero.
 
+Per-file actions describe the reason, not the summary bucket; they do not tally
+1:1 to the summary counts.
+
 Oversized/type-excluded files appear in the report but not the ledger. Files
 whose `Lstat` fails appear as `skipped` with error `"stat: <err>"`. Unchanged
 (already-processed) files are counted but kept out of the per-file list for
