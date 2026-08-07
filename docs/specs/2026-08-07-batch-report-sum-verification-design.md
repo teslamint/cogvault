@@ -1,6 +1,6 @@
 # Batch Report Sum Verification
 
-Status: draft
+Status: approved
 Date: 2026-08-07
 
 ## Problem
