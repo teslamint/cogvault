@@ -63,7 +63,7 @@ and are not part of the wiki tree.
 └── (other pages the agent writes)
 
 <source dir>/                   # e.g. ~/Downloads/_Articles — read directly by ingest,
-    *.pdf                       #   never through storage, never MCP-addressable
+    *.pdf, *.md, ...            #   never through storage, never MCP-addressable
 
 <db_path>                       # absolute, OUTSIDE wiki_dir (e.g. ~/.local/state/cogvault/)
 ```

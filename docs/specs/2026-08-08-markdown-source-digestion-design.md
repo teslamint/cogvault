@@ -50,7 +50,7 @@ with a type-aware phrase based on `req.SourceExt`:
 | Extension | Phrase |
 |-----------|--------|
 | `.pdf`    | "Read the PDF file at path:" |
-| `.md`     | "Read the markdown file at path:" |
+| `.md`, `.markdown` | "Read the markdown file at path:" |
 | other     | "Read the file at path:" |
 
 No other prompt changes.
