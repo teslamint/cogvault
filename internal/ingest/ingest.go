@@ -116,11 +116,13 @@ func (r *Runner) Run(ctx context.Context, opts RunOptions) (*Report, error) {
 	}
 
 	digested := 0
-	for _, entry := range r.scan(report) {
+	entries := r.scan(report)
+	for i, entry := range entries {
 		if err := ctx.Err(); err != nil {
 			return report, fmt.Errorf("ingest.Run: %w", err)
 		}
 		if opts.Limit > 0 && digested >= opts.Limit {
+			report.NotExamined = len(entries) - i
 			break
 		}
 
@@ -168,6 +170,9 @@ func (r *Runner) Run(ctx context.Context, opts RunOptions) (*Report, error) {
 		r.digestOne(ctx, entry, hash, schemaText, opts.Origin, prev, report)
 	}
 
+	if err := report.SumCheck(); err != nil {
+		report.SumMismatch = err.Error()
+	}
 	return report, nil
 }
 
@@ -213,11 +218,15 @@ func (r *Runner) scan(report *Report) []scanEntry {
 			abs := filepath.Join(dir, name)
 			info, err := os.Lstat(abs)
 			if err != nil {
+				report.Scanned++
+				report.Skipped++
+				report.PerFile = append(report.PerFile, FileResult{Path: abs, Action: actionSkipped, Error: "stat: " + err.Error()})
 				continue
 			}
 			if info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 				continue
 			}
+			report.Scanned++
 			ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(name), "."))
 			if !containsType(types, ext) {
 				report.Skipped++

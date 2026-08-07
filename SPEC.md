@@ -535,15 +535,25 @@ unchanged so the file retries indefinitely.
 
 ### 10.4 Report
 
-A per-run report with counts (digested, failed, skipped, deferred, unchanged,
-archived) and a per-file list (action ∈ `digested | would-digest | failed |
-skipped | deferred | exhausted | archived | would-archive`, plus an error string). Oversized/type-excluded files appear in the
-report but not the ledger. Unchanged (already-processed) files are counted but
-kept out of the per-file list for readable backlog reports. A `success` row is
-unchanged only when `Storage.Stat` confirms that its wiki page still exists.
-`ErrNotFound` falls through to re-digest the present source. Other stat errors
-report `failed` with `stat wiki page: <error>` and leave the ledger row
-unchanged.
+A per-run report with counts (scanned, digested, failed, refused, skipped,
+deferred, unchanged, archived, source-errors, not-examined) and a per-file list
+(action ∈ `digested | would-digest | failed | refused | skipped | deferred |
+exhausted | source-error | archived | would-archive`, plus an error string).
+
+**Sum invariant.** `scanned == digested + failed + refused + skipped + deferred +
+unchanged + not-examined`. `archived` (wiki-page sweep) and `source-errors`
+(directory-level) are excluded. A mismatch is surfaced as a `!! report sum
+mismatch` warning on the summary line. `not-examined` counts source files the
+main loop never reached due to `--limit`; it is omitted from the summary line
+when zero.
+
+Oversized/type-excluded files appear in the report but not the ledger. Files
+whose `Lstat` fails appear as `skipped` with error `"stat: <err>"`. Unchanged
+(already-processed) files are counted but kept out of the per-file list for
+readable backlog reports. A `success` row is unchanged only when `Storage.Stat`
+confirms that its wiki page still exists. `ErrNotFound` falls through to
+re-digest the present source. Other stat errors report `failed` with
+`stat wiki page: <error>` and leave the ledger row unchanged.
 
 ### 10.5 Concurrency
 

@@ -25,6 +25,7 @@ type FileResult struct {
 }
 
 type Report struct {
+	Scanned      int
 	Digested     int
 	Failed       int
 	Refused      int
@@ -33,13 +34,31 @@ type Report struct {
 	Unchanged    int
 	Archived     int
 	SourceErrors int
+	NotExamined  int
+	SumMismatch  string
 	PerFile      []FileResult
+}
+
+func (r *Report) SumCheck() error {
+	sum := r.Digested + r.Failed + r.Refused + r.Skipped + r.Deferred + r.Unchanged + r.NotExamined
+	if sum != r.Scanned {
+		return fmt.Errorf("report sum mismatch: scanned=%d sum=%d (digested=%d failed=%d refused=%d skipped=%d deferred=%d unchanged=%d not-examined=%d)",
+			r.Scanned, sum, r.Digested, r.Failed, r.Refused, r.Skipped, r.Deferred, r.Unchanged, r.NotExamined)
+	}
+	return nil
 }
 
 func (r *Report) String() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "digested=%d failed=%d refused=%d skipped=%d deferred=%d unchanged=%d archived=%d source-errors=%d\n",
-		r.Digested, r.Failed, r.Refused, r.Skipped, r.Deferred, r.Unchanged, r.Archived, r.SourceErrors)
+	fmt.Fprintf(&b, "scanned=%d digested=%d failed=%d refused=%d skipped=%d deferred=%d unchanged=%d archived=%d source-errors=%d",
+		r.Scanned, r.Digested, r.Failed, r.Refused, r.Skipped, r.Deferred, r.Unchanged, r.Archived, r.SourceErrors)
+	if r.NotExamined > 0 {
+		fmt.Fprintf(&b, " not-examined=%d", r.NotExamined)
+	}
+	b.WriteByte('\n')
+	if r.SumMismatch != "" {
+		fmt.Fprintf(&b, "  !! %s\n", r.SumMismatch)
+	}
 	width := 0
 	for _, f := range r.PerFile {
 		if len(f.Action) > width {
