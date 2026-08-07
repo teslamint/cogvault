@@ -26,7 +26,7 @@ directories the ingest pipeline reads directly (0021).
 
 ### 1.2 In scope (Phase 1)
 
-- `cogvault ingest`: scan sources → hash → digest each PDF via the LLM adapter →
+- `cogvault ingest`: scan sources → hash → digest each source file via the LLM adapter →
   write + index wiki pages → record a per-file outcome in the ledger → print a
   report.
 - MCP stdio server: six tools (read, write, list, search, scan, parse).
@@ -63,7 +63,7 @@ and are not part of the wiki tree.
 └── (other pages the agent writes)
 
 <source dir>/                   # e.g. ~/Downloads/_Articles — read directly by ingest,
-    *.pdf                       #   never through storage, never MCP-addressable
+    *.pdf, *.md, ...            #   never through storage, never MCP-addressable
 
 <db_path>                       # absolute, OUTSIDE wiki_dir (e.g. ~/.local/state/cogvault/)
 ```
@@ -105,7 +105,7 @@ wiki_dir: string        # absolute (after leading ~/ expansion). The sole storag
 db_path: string         # absolute (after leading ~/ expansion). MUST be outside wiki_dir. Required.
 sources:                # external directories the ingest pipeline reads. May be empty.
   - path: string        # absolute (after leading ~/ expansion)
-    types: [string]     # allowed extensions, lowercase, no leading dot (e.g. [pdf])
+    types: [string]     # allowed extensions, lowercase, no leading dot (e.g. [pdf, md])
 llm:
   backend: string       # default "claudecode". Only "claudecode" accepted in Phase 1.
   model: string         # optional. Passed as --model to the LLM backend. Default: empty (backend default).

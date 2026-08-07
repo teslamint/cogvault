@@ -252,4 +252,41 @@ func TestDigestWrapsSourcePath(t *testing.T) {
 	}
 }
 
+func TestSourceTypePhrase(t *testing.T) {
+	cases := []struct {
+		ext  string
+		want string
+	}{
+		{".pdf", "Read the PDF file at path: "},
+		{".PDF", "Read the PDF file at path: "},
+		{".md", "Read the markdown file at path: "},
+		{".markdown", "Read the markdown file at path: "},
+		{".txt", "Read the file at path: "},
+		{"", "Read the file at path: "},
+	}
+	for _, tc := range cases {
+		if got := sourceTypePhrase(tc.ext); got != tc.want {
+			t.Errorf("sourceTypePhrase(%q) = %q, want %q", tc.ext, got, tc.want)
+		}
+	}
+}
+
+func TestBuildPromptTypeAware(t *testing.T) {
+	cases := []struct {
+		ext      string
+		contains string
+	}{
+		{".pdf", "Read the PDF file at path:"},
+		{".md", "Read the markdown file at path:"},
+		{".txt", "Read the file at path:"},
+	}
+	for _, tc := range cases {
+		req := DigestRequest{SourcePath: "/src/doc" + tc.ext, SchemaText: "S", PageSlug: "doc", SourceExt: tc.ext}
+		got := buildPrompt(req)
+		if !strings.Contains(got, tc.contains) {
+			t.Errorf("buildPrompt(ext=%q) missing %q in:\n%s", tc.ext, tc.contains, got)
+		}
+	}
+}
+
 var _ Adapter = (*ClaudeCode)(nil)

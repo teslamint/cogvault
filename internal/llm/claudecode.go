@@ -142,10 +142,22 @@ func stripFence(s string) string {
 	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
+func sourceTypePhrase(ext string) string {
+	switch strings.ToLower(ext) {
+	case ".pdf":
+		return "Read the PDF file at path: "
+	case ".md", ".markdown":
+		return "Read the markdown file at path: "
+	default:
+		return "Read the file at path: "
+	}
+}
+
 func buildPrompt(req DigestRequest) string {
 	var b strings.Builder
 	b.WriteString(req.SchemaText)
-	b.WriteString("\n\nRead the PDF file at path: ")
+	b.WriteString("\n\n")
+	b.WriteString(sourceTypePhrase(req.SourceExt))
 	b.WriteString(req.SourcePath)
 	b.WriteString("\n\nDigest it into the wiki page slug: ")
 	b.WriteString(req.PageSlug)

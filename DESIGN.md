@@ -130,7 +130,7 @@ direct `Add` calls pass zero size/mtime, CheckConsistency threads real values.
 ### 2.6 llm (new)
 
 ```go
-type DigestRequest struct { SourcePath, SchemaText, PageSlug string }
+type DigestRequest struct { SourcePath, SchemaText, PageSlug, SourceExt string }
 type DigestResult  struct { PageContent string }
 type Adapter interface {
     Digest(ctx context.Context, req DigestRequest) (*DigestResult, error)
@@ -146,6 +146,7 @@ runs `claude --print --output-format json --allowedTools "Read"` with the prompt
 a per-call 5-minute timeout, strips an optional leading/trailing ``` fence, parses
 the final JSON array element, and treats any non-`success` subtype or
 `is_error:true` as failure regardless of exit code (O1 findings). `buildPrompt`
+uses `SourceExt` to emit a type-aware read instruction (PDF/markdown/generic) and
 carries the `category` classification instruction (article | legal | reference)
 directly in code — not dependent on the wiki's `_schema.md` version. Error
 classification: quota/rate-limit/timeout/transport/`error_during_execution` →
