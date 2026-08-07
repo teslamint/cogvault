@@ -262,6 +262,7 @@ func (r *Runner) digestOne(ctx context.Context, entry scanEntry, hash, schemaTex
 		SourcePath: entry.absPath,
 		SchemaText: schemaText,
 		PageSlug:   slug,
+		SourceExt:  filepath.Ext(entry.absPath),
 	})
 	if err != nil {
 		class := classPermanent

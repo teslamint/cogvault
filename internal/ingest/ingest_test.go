@@ -2395,3 +2395,25 @@ func TestSumCheckReadPermissionError(t *testing.T) {
 		t.Fatalf("expected skipped entry for bad.md with read error, got: %+v", rep.PerFile)
 	}
 }
+
+func TestDigestSourceExtPassedToLLM(t *testing.T) {
+	m := okLLM()
+	h := newHarness(t, []string{"md"}, m)
+	h.write(t, "notes.md", "some markdown content")
+
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "test"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Digested != 1 {
+		t.Fatalf("digested = %d, want 1", rep.Digested)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.requests) != 1 {
+		t.Fatalf("llm requests = %d, want 1", len(m.requests))
+	}
+	if got := m.requests[0].SourceExt; got != ".md" {
+		t.Errorf("SourceExt = %q, want %q", got, ".md")
+	}
+}

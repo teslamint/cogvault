@@ -9,6 +9,7 @@ type DigestRequest struct {
 	SourcePath string
 	SchemaText string
 	PageSlug   string
+	SourceExt  string
 }
 
 type DigestResult struct {
