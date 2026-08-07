@@ -133,6 +133,9 @@ func TestRunHappyPathTwoFiles(t *testing.T) {
 	if rep.Digested != 2 || rep.Failed != 0 || rep.Skipped != 0 {
 		t.Fatalf("counts = %+v", rep)
 	}
+	if rep.SumMismatch != "" {
+		t.Fatalf("sum mismatch: %s", rep.SumMismatch)
+	}
 
 	for _, p := range []string{"sources/note-one.md", "sources/note-two.md"} {
 		if ok, _ := h.store.Exists(p); !ok {
@@ -166,6 +169,9 @@ func TestRunIdempotentSecondRun(t *testing.T) {
 	if rep.Digested != 0 || rep.Unchanged != 2 {
 		t.Fatalf("second run counts = %+v, want digested=0 unchanged=2", rep)
 	}
+	if rep.SumMismatch != "" {
+		t.Fatalf("sum mismatch: %s", rep.SumMismatch)
+	}
 	if len(h.llm.requests) != 2 {
 		t.Fatalf("llm called %d times, want 2 (no re-digest)", len(h.llm.requests))
 	}
@@ -182,6 +188,9 @@ func TestRunDeferredWithinSettleWindow(t *testing.T) {
 	}
 	if rep.Deferred != 1 || rep.Digested != 0 {
 		t.Fatalf("counts = %+v, want deferred=1 digested=0", rep)
+	}
+	if rep.SumMismatch != "" {
+		t.Fatalf("sum mismatch: %s", rep.SumMismatch)
 	}
 	if len(h.llm.requests) != 0 {
 		t.Fatal("llm called for deferred file")
@@ -264,6 +273,9 @@ func TestRunOversizedAndTypeExcluded(t *testing.T) {
 	}
 	if rep.Skipped != 2 || rep.Digested != 0 {
 		t.Fatalf("counts = %+v, want skipped=2 digested=0", rep)
+	}
+	if rep.SumMismatch != "" {
+		t.Fatalf("sum mismatch: %s", rep.SumMismatch)
 	}
 	// neither persisted to ledger
 	var count int
@@ -428,6 +440,9 @@ func TestRunPermanentErrorExhausts(t *testing.T) {
 	if rep.Skipped != 1 || rep.Failed != 0 {
 		t.Fatalf("run 4 counts = %+v, want skipped=1 failed=0", rep)
 	}
+	if rep.SumMismatch != "" {
+		t.Fatalf("sum mismatch: %s", rep.SumMismatch)
+	}
 	if len(m.requests) != callsBefore {
 		t.Fatal("exhausted file was re-digested")
 	}
@@ -449,6 +464,9 @@ func TestRunRefusedTerminalNoAttempt(t *testing.T) {
 	}
 	if rep.Refused != 1 || rep.Failed != 0 {
 		t.Fatalf("counts = %+v, want refused=1 failed=0", rep)
+	}
+	if rep.SumMismatch != "" {
+		t.Fatalf("sum mismatch: %s", rep.SumMismatch)
 	}
 	row, found, _ := h.runner.ledger.lookup(src, contentHash([]byte("one")))
 	if !found || row.status != "refused" || row.attempts != 0 {
@@ -482,6 +500,9 @@ func TestRunRefusedSkippedWhenModelMatches(t *testing.T) {
 	}
 	if rep.Refused != 0 || rep.Skipped != 1 {
 		t.Fatalf("counts = %+v, want refused=0 skipped=1", rep)
+	}
+	if rep.SumMismatch != "" {
+		t.Fatalf("sum mismatch: %s", rep.SumMismatch)
 	}
 }
 
@@ -2203,4 +2224,174 @@ func (f failStatStorage) Stat(path string) (int64, time.Time, error) {
 		return 0, time.Time{}, f.err
 	}
 	return f.Storage.Stat(path)
+}
+
+func TestSumCheckUnit(t *testing.T) {
+	t.Run("balanced", func(t *testing.T) {
+		r := &Report{Scanned: 5, Digested: 2, Failed: 1, Skipped: 1, Unchanged: 1}
+		if err := r.SumCheck(); err != nil {
+			t.Fatalf("SumCheck: %v", err)
+		}
+	})
+	t.Run("with not-examined", func(t *testing.T) {
+		r := &Report{Scanned: 5, Digested: 1, NotExamined: 4}
+		if err := r.SumCheck(); err != nil {
+			t.Fatalf("SumCheck: %v", err)
+		}
+	})
+	t.Run("mismatch", func(t *testing.T) {
+		r := &Report{Scanned: 5, Digested: 2}
+		if err := r.SumCheck(); err == nil {
+			t.Fatal("SumCheck should fail on mismatch")
+		}
+	})
+	t.Run("archived excluded", func(t *testing.T) {
+		r := &Report{Scanned: 2, Digested: 2, Archived: 3}
+		if err := r.SumCheck(); err != nil {
+			t.Fatalf("SumCheck should ignore Archived: %v", err)
+		}
+	})
+	t.Run("source-errors excluded", func(t *testing.T) {
+		r := &Report{Scanned: 2, Digested: 2, SourceErrors: 1}
+		if err := r.SumCheck(); err != nil {
+			t.Fatalf("SumCheck should ignore SourceErrors: %v", err)
+		}
+	})
+	t.Run("zero scanned zero sum", func(t *testing.T) {
+		r := &Report{}
+		if err := r.SumCheck(); err != nil {
+			t.Fatalf("SumCheck: %v", err)
+		}
+	})
+	t.Run("all refused", func(t *testing.T) {
+		r := &Report{Scanned: 3, Refused: 3}
+		if err := r.SumCheck(); err != nil {
+			t.Fatalf("SumCheck: %v", err)
+		}
+	})
+}
+
+func TestSumCheckIntegrationHappyPath(t *testing.T) {
+	h := newHarness(t, []string{"md"}, okLLM())
+	h.write(t, "a.md", "one")
+	h.write(t, "b.md", "two")
+
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "test"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Scanned != 2 {
+		t.Fatalf("scanned = %d, want 2", rep.Scanned)
+	}
+	if rep.SumMismatch != "" {
+		t.Fatalf("unexpected sum mismatch: %s", rep.SumMismatch)
+	}
+}
+
+func TestSumCheckWithLimit(t *testing.T) {
+	h := newHarness(t, []string{"md"}, okLLM())
+	h.write(t, "a.md", "one")
+	h.write(t, "b.md", "two")
+	h.write(t, "c.md", "three")
+
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "test", Limit: 1})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Scanned != 3 {
+		t.Fatalf("scanned = %d, want 3", rep.Scanned)
+	}
+	if rep.Digested != 1 {
+		t.Fatalf("digested = %d, want 1", rep.Digested)
+	}
+	if rep.NotExamined != 2 {
+		t.Fatalf("not-examined = %d, want 2", rep.NotExamined)
+	}
+	if rep.SumMismatch != "" {
+		t.Fatalf("unexpected sum mismatch: %s", rep.SumMismatch)
+	}
+}
+
+func TestSumCheckSkippedType(t *testing.T) {
+	h := newHarness(t, []string{"pdf"}, okLLM())
+	h.write(t, "a.txt", "wrong type")
+	h.write(t, "b.pdf", "right type")
+
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "test"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Scanned != 2 {
+		t.Fatalf("scanned = %d, want 2", rep.Scanned)
+	}
+	if rep.Skipped != 1 {
+		t.Fatalf("skipped = %d, want 1", rep.Skipped)
+	}
+	if rep.SumMismatch != "" {
+		t.Fatalf("unexpected sum mismatch: %s", rep.SumMismatch)
+	}
+}
+
+func TestSumCheckStringOutput(t *testing.T) {
+	r := &Report{Scanned: 3, Digested: 2, Skipped: 1}
+	s := r.String()
+	if !strings.Contains(s, "scanned=3") {
+		t.Fatalf("String() missing scanned=3: %s", s)
+	}
+	if strings.Contains(s, "not-examined=") {
+		t.Fatalf("String() should omit not-examined when zero: %s", s)
+	}
+
+	r2 := &Report{Scanned: 5, Digested: 1, NotExamined: 4}
+	s2 := r2.String()
+	if !strings.Contains(s2, "not-examined=4") {
+		t.Fatalf("String() missing not-examined=4: %s", s2)
+	}
+}
+
+func TestSumCheckMismatchInString(t *testing.T) {
+	r := &Report{Scanned: 5, Digested: 2, SumMismatch: "report sum mismatch: scanned=5 sum=2"}
+	s := r.String()
+	if !strings.Contains(s, "!!") {
+		t.Fatalf("String() should show !! for mismatch: %s", s)
+	}
+	if !strings.Contains(s, "report sum mismatch") {
+		t.Fatalf("String() should include mismatch message: %s", s)
+	}
+}
+
+func TestSumCheckReadPermissionError(t *testing.T) {
+	h := newHarness(t, []string{"md"}, okLLM())
+	h.write(t, "good.md", "content")
+	bad := filepath.Join(h.srcDir, "bad.md")
+	os.WriteFile(bad, []byte("x"), 0o644)
+	os.Chmod(bad, 0o000)
+	t.Cleanup(func() { os.Chmod(bad, 0o644) })
+
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "test"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Scanned != 2 {
+		t.Fatalf("scanned = %d, want 2 (good.md + bad.md)", rep.Scanned)
+	}
+	if rep.Skipped != 1 {
+		t.Fatalf("skipped = %d, want 1 (bad.md read error)", rep.Skipped)
+	}
+	if rep.Digested != 1 {
+		t.Fatalf("digested = %d, want 1 (good.md)", rep.Digested)
+	}
+	if rep.SumMismatch != "" {
+		t.Fatalf("sum mismatch: %s", rep.SumMismatch)
+	}
+	found := false
+	for _, f := range rep.PerFile {
+		if f.Path == bad && f.Action == actionSkipped && strings.Contains(f.Error, "read:") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected skipped entry for bad.md with read error, got: %+v", rep.PerFile)
+	}
 }

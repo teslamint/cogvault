@@ -1,7 +1,7 @@
 # Roadmap — cogvault
 
 Status: non-canonical forward-looking summary
-Last updated: 2026-07-30
+Last updated: 2026-08-07
 
 This file is a navigational index into canonical owners — it carries no
 independent scope claims. Every item references the document or decision that
@@ -54,6 +54,7 @@ Each later phase gets its own spec when work begins
 | Phone capture (share-sheet → synced inbox → pipeline) | S5 in [SPEC](SPEC.md) §1.3 | [project-background](docs/context/project-background.md) §Later Phases |
 | URL / web-article extraction (fetch + extract before digest) | [SPEC](SPEC.md) §1.3 | [project-background](docs/context/project-background.md) §Later Phases |
 | Markdown-source digestion (restore v1 full-text coverage) | v1 coverage lost per [0021](docs/decisions/0021-v2-refounding.md) | [project-background](docs/context/project-background.md) §Later Phases |
+| Supplementary file types (xlsx/csv/tsv alongside PDFs) | Separate resource layer for tables/data; inspired by [llm-wiki §ch.8][llm-wiki] | [SPEC](SPEC.md) §1.3 |
 
 ### Digest expansion
 
@@ -61,17 +62,29 @@ Each later phase gets its own spec when work begins
 |------|---------|-------|
 | Local LLM backend (second `llm.Adapter` — ollama / llama.cpp) | Primary mitigation for Claude CLI change risk | [0021](docs/decisions/0021-v2-refounding.md) D3, [project-background](docs/context/project-background.md) |
 | Periodic digest (`cogvault digest` — daily/weekly summary page) | S6 in [SPEC](SPEC.md) §1.3 | [project-background](docs/context/project-background.md) §Later Phases |
+| Batch report sum verification (assert `sum(counts) == scanned`) | Prevent silent count drift; inspired by [llm-wiki §ch.6][llm-wiki] | [SPEC](SPEC.md) §10.4 |
+
+### Knowledge synthesis
+
+"파일이 늘어나는 것과 지식이 축적되는 것은 다르다" — ingest가 source page 1개를
+생성하고 끝나는 현 구조에서, 교차 문서 관계를 자동으로 유지하는 층을 추가.
+Inspired by [llm-wiki-for-scientists][llm-wiki].
+
+| Item | Context | Owner |
+|------|---------|-------|
+| Synthesis layer — ingest 후처리로 관련 기존 페이지 검색 → concept/synthesis 페이지 자동 생성/갱신 | 현재 가장 큰 기능 갭. wiki_search + wiki_write 인프라 이미 존재 | [SPEC](SPEC.md) §1.3 |
+| Question → wiki feedback loop — Q&A 답변 중 재사용 가치 있는 결과를 wiki에 저장하는 시스템 패턴 | MCP 지침이나 `_schema.md`에 권장 워크플로 추가로 시작 가능 (코드 변경 불필요) | [SPEC](SPEC.md) §8 |
 
 ### Consume / tooling expansion
 
 | Item | Context | Owner |
 |------|---------|-------|
 | `wiki_delete` + git auto-commit (paired — deletion unsafe without auto-commit) | [SPEC](SPEC.md) §1.3 | [project-background](docs/context/project-background.md) §Carry-Overs |
-| Lint (contradictions, orphans, broken links, frontmatter compliance; introduces `ResolveLink`) | | [project-background](docs/context/project-background.md) §Carry-Overs |
+| Lint (contradictions, orphans, broken links, frontmatter compliance; introduces `ResolveLink`) | Orphan audit: link graph로 고립 페이지 탐지 ([llm-wiki §ch.6][llm-wiki] 참고) | [project-background](docs/context/project-background.md) §Carry-Overs |
 | `wiki_write` warnings (frontmatter validation feedback) | | [project-background](docs/context/project-background.md) §Carry-Overs |
 | SSE transport (remote access via tunnel or cloud deploy) | | [project-background](docs/context/project-background.md) §Carry-Overs |
 | Code-block wikilink exclusion (state machine for fenced/inline code) | | [project-background](docs/context/project-background.md) §Carry-Overs |
-| Page-type expansion (entity/concept/synthesis schemas when usage justifies it) | | [project-background](docs/context/project-background.md) §Carry-Overs |
+| Page-type expansion (entity/concept/synthesis schemas when usage justifies it) | Synthesis layer의 선행 조건; schema 정의 후 자동 생성 가능 | [project-background](docs/context/project-background.md) §Carry-Overs |
 
 ### Longer horizon
 
@@ -109,3 +122,6 @@ documented in the owning decision.
 - [docs/decisions/0014-roadmap-adoption-boundaries.md](docs/decisions/0014-roadmap-adoption-boundaries.md) — adoption boundary decisions
 - [docs/research/v2-follow-ups.md](docs/research/v2-follow-ups.md) — operational follow-up tracker
 - [docs/context/project-background.md](docs/context/project-background.md) — historical context and full future-direction list
+- [docs/research/llm-wiki-for-scientists-review.md](docs/research/llm-wiki-for-scientists-review.md) — llm-wiki-for-scientists analysis (2026-08-07)
+
+[llm-wiki]: https://github.com/chaek-union/llm-wiki-for-scientists
