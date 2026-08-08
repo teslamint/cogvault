@@ -80,7 +80,7 @@ Inspired by [llm-wiki-for-scientists][llm-wiki].
 | Item | Context | Owner |
 |------|---------|-------|
 | `wiki_delete` + git auto-commit (paired — deletion unsafe without auto-commit) | [SPEC](SPEC.md) §1.3 | [project-background](docs/context/project-background.md) §Carry-Overs |
-| Lint (contradictions, orphans, broken links, frontmatter compliance; introduces `ResolveLink`) | Orphan audit: link graph로 고립 페이지 탐지 ([llm-wiki §ch.6][llm-wiki] 참고) | [project-background](docs/context/project-background.md) §Carry-Overs |
+| ~~Lint (contradictions, orphans, broken links, frontmatter compliance; introduces `ResolveLink`)~~ | **Done** (2026-08-08). `cogvault lint` checks broken links, orphans, frontmatter compliance with `resolveWikilink`. | [project-background](docs/context/project-background.md) §Carry-Overs |
 | ~~`wiki_write` warnings (frontmatter validation feedback)~~ | **Done** (PR #20, 2026-08-08). `validateFrontmatter` returns warnings array. | [project-background](docs/context/project-background.md) §Carry-Overs |
 | SSE transport (remote access via tunnel or cloud deploy) | | [project-background](docs/context/project-background.md) §Carry-Overs |
 | ~~Code-block wikilink exclusion (state machine for fenced/inline code)~~ | **Done** (PR #19, 2026-08-08). `codeSpans` filter in `extractWikilinks`. | [project-background](docs/context/project-background.md) §Carry-Overs |
