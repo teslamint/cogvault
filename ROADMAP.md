@@ -94,7 +94,7 @@ Inspired by [llm-wiki-for-scientists][llm-wiki].
 | RRF hybrid search | Depends on vector search | [project-background](docs/context/project-background.md) §Longer-Horizon |
 | Ontology graph | | [project-background](docs/context/project-background.md) §Longer-Horizon |
 | Multi-wiki support | | [project-background](docs/context/project-background.md) §Longer-Horizon |
-| Auto-generated read-only `_index.md` view | | [project-background](docs/context/project-background.md) §Longer-Horizon |
+| ~~Auto-generated read-only `_index.md` view~~ | **Done** (2026-08-08). `cogvault index` CLI command generates `_index.md` with wikilinks and titles. | [project-background](docs/context/project-background.md) §Longer-Horizon |
 
 ---
 
