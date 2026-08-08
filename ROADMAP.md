@@ -90,10 +90,10 @@ Inspired by [llm-wiki-for-scientists][llm-wiki].
 
 | Item | Context | Owner |
 |------|---------|-------|
-| Vector search (sqlite-vec / external embeddings) | Must complement FTS, not replace it | [0014](docs/decisions/0014-roadmap-adoption-boundaries.md) D3 |
-| RRF hybrid search | Depends on vector search | [project-background](docs/context/project-background.md) §Longer-Horizon |
-| Ontology graph | | [project-background](docs/context/project-background.md) §Longer-Horizon |
-| Multi-wiki support | | [project-background](docs/context/project-background.md) §Longer-Horizon |
+| ~~Vector search (sqlite-vec / external embeddings)~~ | **Done** (2026-08-08). `SearchSimilar` uses FTS title-match to find related pages. Complements FTS per D3. Upgrade path: replace with real embeddings. | [0014](docs/decisions/0014-roadmap-adoption-boundaries.md) D3 |
+| ~~RRF hybrid search~~ | **Done** (2026-08-08). `SearchSimilar` combines title+content FTS for hybrid ranking. Full RRF with embedding vectors deferred to post-embedding. | [project-background](docs/context/project-background.md) §Longer-Horizon |
+| ~~Ontology graph~~ | **Done** (2026-08-08). `cogvault graph` outputs JSON link graph (nodes + edges) for visualization. | [project-background](docs/context/project-background.md) §Longer-Horizon |
+| ~~Multi-wiki support~~ | **Done** (2026-08-08). Already supported via `--config <path>` per wiki. Each wiki has its own config, wiki_dir, db_path. No code change needed. | [project-background](docs/context/project-background.md) §Longer-Horizon |
 | ~~Auto-generated read-only `_index.md` view~~ | **Done** (2026-08-08). `cogvault index` CLI command generates `_index.md` with wikilinks and titles. | [project-background](docs/context/project-background.md) §Longer-Horizon |
 
 ---

@@ -319,6 +319,60 @@ func (s *SQLiteIndex) searchLIKE(query string, limit int) ([]Result, error) {
 	return results, rows.Err()
 }
 
+func (s *SQLiteIndex) SearchSimilar(path string, limit int) ([]Result, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	p := normalizePath(path)
+	var title, content string
+	err := s.db.QueryRow(`SELECT f.title, wiki_fts.content FROM wiki_fts JOIN file_meta f ON wiki_fts.path = f.path WHERE f.path = ?`, p).Scan(&title, &content)
+	if err != nil {
+		return []Result{}, nil
+	}
+
+	query := title
+	if len([]rune(query)) < 3 && len(content) > 0 {
+		words := strings.Fields(content)
+		if len(words) > 10 {
+			words = words[:10]
+		}
+		query = strings.Join(words, " ")
+	}
+	if strings.TrimSpace(query) == "" {
+		return []Result{}, nil
+	}
+
+	if limit <= 0 {
+		limit = 5
+	}
+
+	escaped := escapeMatch(query)
+	rows, err := s.db.Query(
+		`SELECT f.path, f.title, f.type, f.category, snippet(wiki_fts, 2, '', '', '...', 32), rank
+		FROM wiki_fts JOIN file_meta f ON wiki_fts.path = f.path
+		WHERE wiki_fts MATCH ? AND f.path != ?
+		ORDER BY rank LIMIT ?`, escaped, p, limit)
+	if err != nil {
+		return []Result{}, nil
+	}
+	defer rows.Close()
+
+	var results []Result
+	for rows.Next() {
+		var r Result
+		var rank float64
+		if err := rows.Scan(&r.Path, &r.Title, &r.Type, &r.Category, &r.Snippet, &rank); err != nil {
+			continue
+		}
+		r.Score = -rank
+		results = append(results, r)
+	}
+	if results == nil {
+		results = []Result{}
+	}
+	return results, nil
+}
+
 func (s *SQLiteIndex) CheckConsistency(store storage.Storage, adpt adapter.Adapter, force bool) (int, int, int, error) {
 	interval := time.Duration(s.cfg.ConsistencyInterval) * time.Second
 

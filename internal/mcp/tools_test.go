@@ -53,6 +53,7 @@ type mockIndex struct {
 
 func (m *mockIndex) Add(path, content string, meta map[string]string) error { return m.addFn(path, content, meta) }
 func (m *mockIndex) Search(query string, limit int) ([]index.Result, error) { return m.searchFn(query, limit) }
+func (m *mockIndex) SearchSimilar(path string, limit int) ([]index.Result, error) { return []index.Result{}, nil }
 func (m *mockIndex) Remove(path string) error                               { return m.removeFn(path) }
 func (m *mockIndex) Rebuild(store storage.Storage, adpt adapter.Adapter) error { return m.rebuildFn(store, adpt) }
 func (m *mockIndex) CheckConsistency(store storage.Storage, adpt adapter.Adapter, force bool) (int, int, int, error) { return m.checkConsistencyFn(store, adpt, force) }
