@@ -31,8 +31,17 @@
 - 선택 frontmatter: `category` (`article` | `legal` | `reference`)
 - 필수 섹션: ## 요약, ## 핵심 포인트, ## 관련 페이지
 
-### 자유 타입 (선택)
-entity, concept, synthesis 등 자유롭게 생성 가능. `type` 필드 포함 권장.
+### entity
+인물·조직·제품 등. 권장: `type: entity`, `entity_type` (person/org/product/project).
+
+### concept
+개념·용어·방법론. 권장: `type: concept`.
+
+### synthesis
+여러 페이지 교차 분석. 권장: `type: synthesis`, `sources` (관련 source 목록).
+
+### 기타
+자유 타입 가능. `type` 필드 포함 권장.
 
 ## Ingest 워크플로우
 인제스트는 자동이다. `cogvault ingest`가 소스 디렉토리를 스캔·요약해 `sources/` 아래 source 페이지를 만든다. 에이전트는 수동 인제스트를 수행하지 않는다. 대신 기존 페이지를 확장·연결한다:

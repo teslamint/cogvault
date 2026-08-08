@@ -84,7 +84,7 @@ Inspired by [llm-wiki-for-scientists][llm-wiki].
 | ~~`wiki_write` warnings (frontmatter validation feedback)~~ | **Done** (PR #20, 2026-08-08). `validateFrontmatter` returns warnings array. | [project-background](docs/context/project-background.md) §Carry-Overs |
 | SSE transport (remote access via tunnel or cloud deploy) | | [project-background](docs/context/project-background.md) §Carry-Overs |
 | ~~Code-block wikilink exclusion (state machine for fenced/inline code)~~ | **Done** (PR #19, 2026-08-08). `codeSpans` filter in `extractWikilinks`. | [project-background](docs/context/project-background.md) §Carry-Overs |
-| Page-type expansion (entity/concept/synthesis schemas when usage justifies it) | Synthesis layer의 선행 조건; schema 정의 후 자동 생성 가능 | [project-background](docs/context/project-background.md) §Carry-Overs |
+| ~~Page-type expansion (entity/concept/synthesis schemas when usage justifies it)~~ | **Done** (2026-08-08). entity/concept/synthesis 타입 스키마 `_schema.md`에 추가. | [project-background](docs/context/project-background.md) §Carry-Overs |
 
 ### Longer horizon
 
