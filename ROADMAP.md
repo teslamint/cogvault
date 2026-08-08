@@ -61,7 +61,7 @@ Each later phase gets its own spec when work begins
 | Item | Context | Owner |
 |------|---------|-------|
 | ~~Local LLM backend (second `llm.Adapter` — ollama / llama.cpp)~~ | **Done** (2026-08-08). `Ollama` adapter via `/api/generate`; `llm.backend: ollama` + `base_url` config. | [0021](docs/decisions/0021-v2-refounding.md) D3, [project-background](docs/context/project-background.md) |
-| Periodic digest (`cogvault digest` — daily/weekly summary page) | S6 in [SPEC](SPEC.md) §1.3 | [project-background](docs/context/project-background.md) §Later Phases |
+| ~~Periodic digest (`cogvault digest` — daily/weekly summary page)~~ | **Done** (2026-08-08). `cogvault digest --days N` generates `digests/weekly-YYYY-MM-DD.md` from recent sources. | [project-background](docs/context/project-background.md) §Later Phases |
 | ~~Batch report sum verification (assert `sum(counts) == scanned`)~~ | **Done** (PR #15, 2026-08-07). Retro: `docs/retros/2026-08-07-batch-report-sum-verification.md` | [SPEC](SPEC.md) §10.4 |
 
 ### Knowledge synthesis
