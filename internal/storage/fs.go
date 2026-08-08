@@ -76,6 +76,32 @@ func (fs *FSStorage) Write(path string, data []byte) error {
 	return nil
 }
 
+func (fs *FSStorage) Delete(path string) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	absPath, cleaned, err := fs.resolvePath(path)
+	if err != nil {
+		return err
+	}
+
+	if fs.isExcludeRead(cleaned) {
+		return fmt.Errorf("storage.Delete %s: %w", path, cverr.ErrPermission)
+	}
+
+	if cleaned == filepath.Clean(fs.cfg.SchemaPath()) {
+		return fmt.Errorf("storage.Delete %s: %w", path, cverr.ErrPermission)
+	}
+
+	if err := os.Remove(absPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("storage.Delete %s: %w", path, cverr.ErrNotFound)
+		}
+		return fmt.Errorf("storage.Delete %s: %w", path, err)
+	}
+	return nil
+}
+
 // WriteSchema writes data to the configured schema path for init bootstrap.
 // Idempotent: returns nil if the file already exists.
 // Reuses resolvePath for symlink/traversal security.

@@ -1618,6 +1618,9 @@ func (c *countingStorage) Exists(path string) (bool, error) {
 func (c *countingStorage) Move(src, dst string) error {
 	return c.inner.Move(src, dst)
 }
+func (c *countingStorage) Delete(path string) error {
+	return c.inner.Delete(path)
+}
 func (c *countingStorage) Stat(path string) (int64, time.Time, error) {
 	return c.inner.Stat(path)
 }
@@ -1644,6 +1647,9 @@ func (f *failingStorage) List(prefix string) ([]storage.ListEntry, error) {
 }
 func (f *failingStorage) Exists(path string) (bool, error) {
 	return f.inner.Exists(path)
+}
+func (f *failingStorage) Delete(path string) error {
+	return f.inner.Delete(path)
 }
 func (f *failingStorage) Move(src, dst string) error {
 	return f.inner.Move(src, dst)

@@ -30,6 +30,7 @@ type mockStorage struct {
 
 func (m *mockStorage) Read(path string) ([]byte, error)          { return m.readFn(path) }
 func (m *mockStorage) Write(path string, data []byte) error      { return m.writeFn(path, data) }
+func (m *mockStorage) Delete(path string) error                  { return nil }
 func (m *mockStorage) Move(src, dst string) error                { return nil }
 func (m *mockStorage) List(prefix string) ([]storage.ListEntry, error) { return m.listFn(prefix) }
 func (m *mockStorage) Exists(path string) (bool, error)          { return m.existsFn(path) }

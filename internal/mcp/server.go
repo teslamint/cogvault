@@ -62,10 +62,18 @@ func noExtra(t mcp.Tool) mcp.Tool {
 func registerTools(s *server.MCPServer, root string, cfg *config.Config, store storage.Storage, idx index.Index, adpt adapter.Adapter) {
 	s.AddTool(noExtra(wikiReadTool()), handleWikiRead(store))
 	s.AddTool(noExtra(wikiWriteTool()), handleWikiWrite(root, cfg, store, idx, adpt))
+	s.AddTool(noExtra(wikiDeleteTool()), handleWikiDelete(root, store, idx))
 	s.AddTool(noExtra(wikiListTool()), handleWikiList(cfg, store, idx, adpt))
 	s.AddTool(noExtra(wikiSearchTool()), handleWikiSearch(cfg, store, idx, adpt))
 	s.AddTool(noExtra(wikiScanTool()), handleWikiScan(root, cfg, adpt))
 	s.AddTool(noExtra(wikiParseTool()), handleWikiParse(root, adpt))
+}
+
+func wikiDeleteTool() mcp.Tool {
+	return mcp.NewTool("wiki_delete",
+		mcp.WithDescription("Delete a file from the wiki root. Auto-commits the deletion to git if the wiki is a git repository."),
+		mcp.WithString("path", mcp.Required(), mcp.Description("Wiki root-relative file path to delete")),
+	)
 }
 
 func wikiReadTool() mcp.Tool {

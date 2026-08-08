@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -97,6 +98,44 @@ func handleWikiWrite(root string, cfg *config.Config, store storage.Storage, idx
 			"warnings": warnings,
 		}
 		return mcp.NewToolResultJSON(result)
+	}
+}
+
+func handleWikiDelete(root string, store storage.Storage, idx index.Index) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		path, err := req.RequireString("path")
+		if err != nil {
+			return mcp.NewToolResultError("missing required parameter: path"), nil
+		}
+
+		if err := store.Delete(path); err != nil {
+			return mapError(err, path), nil
+		}
+
+		if strings.HasSuffix(strings.ToLower(path), ".md") {
+			_ = idx.Remove(path)
+		}
+
+		gitAutoCommit(root, path)
+
+		result := map[string]any{
+			"status": "deleted",
+			"path":   path,
+		}
+		return mcp.NewToolResultJSON(result)
+	}
+}
+
+func gitAutoCommit(root, path string) {
+	absPath := filepath.Join(root, path)
+	cmd := exec.Command("git", "-C", root, "add", absPath)
+	if err := cmd.Run(); err != nil {
+		slog.Warn("git add failed", "path", path, "error", err)
+		return
+	}
+	commitCmd := exec.Command("git", "-C", root, "commit", "-m", fmt.Sprintf("wiki: delete %s", path))
+	if err := commitCmd.Run(); err != nil {
+		slog.Warn("git commit failed", "path", path, "error", err)
 	}
 }
 
