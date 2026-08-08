@@ -58,6 +58,9 @@ func (c *ClaudeCode) digest(ctx context.Context, req DigestRequest) (*DigestResu
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return nil, fmt.Errorf("timeout after %s: %w", timeout, ErrTransient)
 	}
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return nil, fmt.Errorf("context cancelled: %w", ErrTransient)
+	}
 	if runErr != nil {
 		if isRefusalText(stdout.String()) || isRefusalText(stderr.String()) {
 			return nil, fmt.Errorf("claude policy refusal: %w", ErrRefused)

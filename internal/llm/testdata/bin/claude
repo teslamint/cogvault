@@ -59,6 +59,9 @@ refusal_exitN_stderr)
 	printf '%s\n' 'API Error: refused' >&2
 	exit 1
 	;;
+empty)
+	printf '%s' '[{"type":"result","subtype":"success","is_error":false,"result":""}]'
+	;;
 notrefusal_success)
 	printf '%s' '[{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","result":"---\ntitle: Safeguards Overview\ntype: source\nsource_path: notes/x.pdf\ningested_at: 2024-01-15\n---\n\n# Safeguards Overview\n\nThis page discusses api error handling and safeguards in general."}]'
 	;;

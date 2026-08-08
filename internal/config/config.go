@@ -86,7 +86,13 @@ func Save(configPath string) error {
 	if err != nil {
 		return fmt.Errorf("save config: %w", err)
 	}
-	return os.WriteFile(configPath, data, 0o644)
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		return fmt.Errorf("save config: %w", err)
+	}
+	if err := os.WriteFile(configPath, data, 0o644); err != nil {
+		return fmt.Errorf("save config: %w", err)
+	}
+	return nil
 }
 
 func (c *Config) applyDefaults() {
@@ -141,6 +147,17 @@ func (c *Config) SchemaPath() string {
 }
 
 func (c *Config) validate() error {
+	if hasUnexpandedTilde(c.WikiDir) {
+		return fmt.Errorf("wiki_dir: cannot expand \"~\": home directory not available")
+	}
+	if hasUnexpandedTilde(c.DBPath) {
+		return fmt.Errorf("db_path: cannot expand \"~\": home directory not available")
+	}
+	for i, s := range c.Sources {
+		if hasUnexpandedTilde(s.Path) {
+			return fmt.Errorf("sources[%d].path: cannot expand \"~\": home directory not available", i)
+		}
+	}
 	if err := validateAbsPath("wiki_dir", c.WikiDir); err != nil {
 		return err
 	}
@@ -148,8 +165,9 @@ func (c *Config) validate() error {
 		return err
 	}
 	cleanedDB := filepath.Clean(c.DBPath)
-	if strings.HasSuffix(c.DBPath, "/") || strings.HasSuffix(c.DBPath, string(os.PathSeparator)) ||
-		cleanedDB != c.DBPath && strings.HasSuffix(c.DBPath, ".") {
+	isTrailingSlash := strings.HasSuffix(c.DBPath, "/") || strings.HasSuffix(c.DBPath, string(os.PathSeparator))
+	isTrailingDot := cleanedDB != c.DBPath && strings.HasSuffix(c.DBPath, ".")
+	if isTrailingSlash || isTrailingDot {
 		return fmt.Errorf("db_path: must be a file path, not a directory")
 	}
 	cleanWiki := filepath.Clean(c.WikiDir)
@@ -167,12 +185,12 @@ func (c *Config) validate() error {
 		}
 	}
 	for i, e := range c.Exclude {
-		if err := validatePath(fmt.Sprintf("exclude[%d]", i), e, false); err != nil {
+		if err := validatePath(fmt.Sprintf("exclude[%d]", i), e); err != nil {
 			return err
 		}
 	}
 	for i, e := range c.ExcludeRead {
-		if err := validatePath(fmt.Sprintf("exclude_read[%d]", i), e, false); err != nil {
+		if err := validatePath(fmt.Sprintf("exclude_read[%d]", i), e); err != nil {
 			return err
 		}
 	}
@@ -198,7 +216,7 @@ func validateAbsPath(field, path string) error {
 	return nil
 }
 
-func validatePath(field, path string, allowDot bool) error {
+func validatePath(field, path string) error {
 	if path == "" {
 		return fmt.Errorf("%s: must not be empty", field)
 	}
@@ -208,8 +226,7 @@ func validatePath(field, path string, allowDot bool) error {
 	if containsDotDot(path) {
 		return fmt.Errorf("%s: path traversal (..) not allowed", field)
 	}
-	cleaned := filepath.Clean(path)
-	if !allowDot && cleaned == "." {
+	if filepath.Clean(path) == "." {
 		return fmt.Errorf("%s: %q not allowed; use a subdirectory", field, path)
 	}
 	return nil
@@ -235,6 +252,10 @@ func expandTilde(path string) string {
 		return home
 	}
 	return filepath.Join(home, path[2:])
+}
+
+func hasUnexpandedTilde(path string) bool {
+	return path == "~" || strings.HasPrefix(path, "~/")
 }
 
 func containsDotDot(path string) bool {

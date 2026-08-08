@@ -243,6 +243,8 @@ func (r *Runner) scan(report *Report) []scanEntry {
 				report.PerFile = append(report.PerFile, FileResult{Path: abs, Action: actionDeferred, Error: "within settle window"})
 				continue
 			}
+			// TOCTOU: file content may change between hashFile and the later LLM
+			// read. Accepted for single-user local use — not worth locking.
 			hash, err := hashFile(abs)
 			if err != nil {
 				report.Skipped++
@@ -292,6 +294,8 @@ func (r *Runner) digestOne(ctx context.Context, entry scanEntry, hash, schemaTex
 		return
 	}
 
+	// Index-fail after write leaves an orphan page; classInfra spares the
+	// attempt so the next run re-digests the same slug and overwrites.
 	if err := r.idx.Add(page, res.PageContent, buildMeta(fm, title)); err != nil {
 		r.recordFailure(entry, hash, origin, prev, report, "index: "+err.Error(), classInfra)
 		return
@@ -308,7 +312,7 @@ func (r *Runner) digestOne(ctx context.Context, entry scanEntry, hash, schemaTex
 		digestedAt:  r.now().UTC().Format(time.RFC3339Nano),
 		wikiPage:    page,
 		status:      "success",
-		attempts:    attemptsOf(prev),
+		attempts:    0,
 		lastError:   "",
 		runOrigin:   origin,
 		llmModel:    r.cfg.LLM.Model,
@@ -331,7 +335,7 @@ func (r *Runner) recordFailure(entry scanEntry, hash, origin string, prev *ledge
 	if class == classRefused {
 		status = "refused"
 	}
-	_ = r.ledger.upsert(ledgerRow{
+	if err := r.ledger.upsert(ledgerRow{
 		sourcePath:  entry.absPath,
 		contentHash: hash,
 		sourceDir:   entry.sourceDir,
@@ -342,7 +346,9 @@ func (r *Runner) recordFailure(entry scanEntry, hash, origin string, prev *ledge
 		lastError:   msg,
 		runOrigin:   origin,
 		llmModel:    r.cfg.LLM.Model,
-	})
+	}); err != nil {
+		slog.Error("recordFailure: ledger upsert", "path", entry.absPath, "error", err)
+	}
 	if class == classRefused {
 		report.Refused++
 		report.PerFile = append(report.PerFile, FileResult{Path: entry.absPath, Action: actionRefused, Error: msg})

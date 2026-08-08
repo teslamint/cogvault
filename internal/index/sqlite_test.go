@@ -1079,6 +1079,44 @@ func TestCheckConsistencyStatGateZeroReads(t *testing.T) {
 	}
 }
 
+// Negative boundary: when content changes but size and mtime are preserved,
+// the gate skips the file. This is the documented trade-off — the gate
+// trusts size+mtime to avoid reads on unchanged files.
+func TestCheckConsistencyStatGateBlindSpot(t *testing.T) {
+	root := t.TempDir()
+	p := filepath.Join(root, "notes", "a.md")
+	mustWriteFile(t, p, "# A\nBody x")
+
+	cfg := testCfg()
+	store := storage.NewFSStorage(root, cfg)
+	adpt := obsidian.New()
+	idx := newTestIndex(t, root, cfg)
+
+	if _, _, _, err := idx.CheckConsistency(store, adpt, true); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origMtime := info.ModTime()
+
+	// Overwrite with same-length different content, then restore mtime.
+	mustWriteFile(t, p, "# A\nBody y")
+	if err := os.Chtimes(p, origMtime, origMtime); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, updated, err := idx.CheckConsistency(store, adpt, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated != 0 {
+		t.Fatalf("gate should skip same-size+same-mtime (documented blind spot), updated = %d", updated)
+	}
+}
+
 func TestCheckConsistencyHashConsistency(t *testing.T) {
 	root := t.TempDir()
 	content := "---\ntitle: Test\ntype: source\n---\n\n# Body\nSome text"
