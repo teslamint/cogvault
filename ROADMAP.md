@@ -73,7 +73,7 @@ Inspired by [llm-wiki-for-scientists][llm-wiki].
 | Item | Context | Owner |
 |------|---------|-------|
 | Synthesis layer — ingest 후처리로 관련 기존 페이지 검색 → concept/synthesis 페이지 자동 생성/갱신 | 현재 가장 큰 기능 갭. wiki_search + wiki_write 인프라 이미 존재 | [SPEC](SPEC.md) §1.3 |
-| Question → wiki feedback loop — Q&A 답변 중 재사용 가치 있는 결과를 wiki에 저장하는 시스템 패턴 | MCP 지침이나 `_schema.md`에 권장 워크플로 추가로 시작 가능 (코드 변경 불필요) | [SPEC](SPEC.md) §8 |
+| ~~Question → wiki feedback loop~~ | **Done** (2026-08-08). `_schema.md`에 Q&A→Wiki 피드백 루프 워크플로 추가. 코드 변경 없음. | [SPEC](SPEC.md) §8 |
 
 ### Consume / tooling expansion
 
