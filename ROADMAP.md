@@ -38,7 +38,7 @@ Status lives in [v2-follow-ups.md](docs/research/v2-follow-ups.md) — not here.
 - **F2** (P3) — Deferred review minors batch
 - **F3** (P3) — FTS write-write `SQLITE_BUSY_SNAPSHOT` limitation
 - **F4** (P3) — Spec self-contradiction: renamed-file re-digest under (path,hash) key
-- **F5** (P4) — Dead code cleanup + MCP schema fallback 404
+- ~~**F5** (P4) — Dead code cleanup + MCP schema fallback 404~~ **Done** (PR #17, 2026-08-08)
 
 ---
 
