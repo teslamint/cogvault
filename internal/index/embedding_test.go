@@ -162,6 +162,11 @@ func TestEmbeddingsTableSurvivesSchemaRecreate(t *testing.T) {
 		t.Fatalf("count = %d, want 1", count)
 	}
 
+	// Force the drop-recreate branch by lowering user_version
+	if _, err := idx.db.Exec(`PRAGMA user_version = 2`); err != nil {
+		t.Fatalf("set user_version: %v", err)
+	}
+
 	if err := idx.initSchema(); err != nil {
 		t.Fatalf("re-init schema: %v", err)
 	}
@@ -171,7 +176,7 @@ func TestEmbeddingsTableSurvivesSchemaRecreate(t *testing.T) {
 		t.Fatal(err)
 	}
 	if count != 1 {
-		t.Fatalf("count after schema re-init = %d, want 1 (embeddings should survive)", count)
+		t.Fatalf("count after schema drop-recreate = %d, want 1 (embeddings should survive)", count)
 	}
 }
 

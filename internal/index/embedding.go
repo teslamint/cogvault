@@ -18,12 +18,13 @@ type EmbeddingRow struct {
 
 func (s *SQLiteIndex) InitEmbeddingsTable() error {
 	_, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS embeddings (
-		path TEXT PRIMARY KEY,
+		path TEXT NOT NULL,
 		content_hash TEXT NOT NULL,
 		model TEXT NOT NULL,
 		vector BLOB NOT NULL,
 		dims INTEGER NOT NULL,
-		updated_at TEXT NOT NULL
+		updated_at TEXT NOT NULL,
+		PRIMARY KEY (path, model)
 	)`)
 	if err != nil {
 		return fmt.Errorf("index: create embeddings table: %w", err)

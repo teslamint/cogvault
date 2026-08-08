@@ -7,7 +7,9 @@ import (
 	"unicode/utf8"
 
 	"github.com/spf13/cobra"
+	"github.com/teslamint/cogvault/internal/index"
 	"github.com/teslamint/cogvault/internal/llm"
+	"github.com/teslamint/cogvault/internal/storage"
 )
 
 func newEmbedCmd() *cobra.Command {
@@ -38,9 +40,7 @@ func runEmbed(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("embedding_model not configured; set llm.embedding_model in config")
 	}
 
-	sqIdx := idx
-
-	if err := sqIdx.InitEmbeddingsTable(); err != nil {
+	if err := idx.InitEmbeddingsTable(); err != nil {
 		return err
 	}
 
@@ -48,7 +48,7 @@ func runEmbed(cmd *cobra.Command, args []string) error {
 		cmd.PrintErrln("warning: consistency check:", ccErr)
 	}
 
-	stale, err := sqIdx.StalePaths(cfg.LLM.EmbeddingModel)
+	stale, err := idx.StalePaths(cfg.LLM.EmbeddingModel)
 	if err != nil {
 		return fmt.Errorf("find stale paths: %w", err)
 	}
@@ -69,9 +69,22 @@ func runEmbed(cmd *cobra.Command, args []string) error {
 		batchSize = 32
 	}
 
-	embedded := 0
-	failed := 0
-	ctx := context.Background()
+	result := batchEmbed(cmd.Context(), idx, store, embedder, cfg.LLM.EmbeddingModel, stale, batchSize)
+	cmd.Printf("embed: %d embedded, %d skipped, %d failed, %d total\n", result.embedded, result.skipped, result.failed, len(stale))
+	if result.failed > 0 {
+		return fmt.Errorf("%d embedding(s) failed", result.failed)
+	}
+	return nil
+}
+
+type embedResult struct {
+	embedded int
+	skipped  int
+	failed   int
+}
+
+func batchEmbed(ctx context.Context, sqIdx *index.SQLiteIndex, store *storage.FSStorage, embedder llm.Embedder, model string, stale []index.StaleEntry, batchSize int) embedResult {
+	var res embedResult
 
 	for i := 0; i < len(stale); i += batchSize {
 		end := i + batchSize
@@ -80,45 +93,52 @@ func runEmbed(cmd *cobra.Command, args []string) error {
 		}
 		batch := stale[i:end]
 
-		texts := make([]string, len(batch))
-		for j, entry := range batch {
-			texts[j] = buildEmbedText(store, entry.Path)
+		var texts []string
+		var valid []index.StaleEntry
+		for _, entry := range batch {
+			text, err := buildEmbedText(store, entry.Path)
+			if err != nil {
+				slog.Warn("embed: read failed, skipping", "path", entry.Path, "error", err)
+				res.skipped++
+				continue
+			}
+			texts = append(texts, text)
+			valid = append(valid, entry)
+		}
+
+		if len(texts) == 0 {
+			continue
 		}
 
 		vecs, err := embedder.Embed(ctx, texts)
 		if err != nil {
 			slog.Error("embed batch failed", "start", i, "error", err)
-			failed += len(batch)
+			res.failed += len(valid)
 			continue
 		}
 
-		for j, entry := range batch {
-			if err := sqIdx.StoreEmbedding(entry.Path, entry.ContentHash, cfg.LLM.EmbeddingModel, vecs[j]); err != nil {
+		for j, entry := range valid {
+			if err := sqIdx.StoreEmbedding(entry.Path, entry.ContentHash, model, vecs[j]); err != nil {
 				slog.Error("store embedding failed", "path", entry.Path, "error", err)
-				failed++
+				res.failed++
 				continue
 			}
-			embedded++
+			res.embedded++
 		}
 	}
-
-	cmd.Printf("embed: %d embedded, %d failed, %d total\n", embedded, failed, len(stale))
-	if failed > 0 {
-		return fmt.Errorf("%d embedding(s) failed", failed)
-	}
-	return nil
+	return res
 }
 
-func buildEmbedText(store interface{ Read(string) ([]byte, error) }, path string) string {
+func buildEmbedText(store *storage.FSStorage, path string) (string, error) {
 	data, err := store.Read(path)
 	if err != nil {
-		return path
+		return "", err
 	}
 	content := string(data)
 
 	title := path
-	if idx := findTitle(content); idx != "" {
-		title = idx
+	if t := findTitle(content); t != "" {
+		title = t
 	}
 
 	runes := []rune(content)
@@ -126,7 +146,7 @@ func buildEmbedText(store interface{ Read(string) ([]byte, error) }, path string
 		runes = runes[:embedTextRuneCap]
 	}
 
-	return title + "\n\n" + string(runes)
+	return title + "\n\n" + string(runes), nil
 }
 
 func findTitle(content string) string {
@@ -136,7 +156,7 @@ func findTitle(content string) string {
 			j++
 		}
 		line := content[i:j]
-		if len(line) > 8 && line[:7] == "title: " {
+		if len(line) > 7 && line[:7] == "title: " {
 			return line[7:]
 		}
 		if len(line) > 2 && line[:2] == "# " {

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -89,13 +88,12 @@ func runIngest(cmd *cobra.Command, args []string) error {
 }
 
 func postIngestEmbed(cmd *cobra.Command, idx *index.SQLiteIndex, store *storage.FSStorage, model, baseURL string) {
-	sqIdx := idx
-	if err := sqIdx.InitEmbeddingsTable(); err != nil {
+	if err := idx.InitEmbeddingsTable(); err != nil {
 		slog.Error("post-ingest embed: init table", "error", err)
 		return
 	}
 
-	stale, err := sqIdx.StalePaths(model)
+	stale, err := idx.StalePaths(model)
 	if err != nil {
 		slog.Error("post-ingest embed: find stale", "error", err)
 		return
@@ -109,25 +107,9 @@ func postIngestEmbed(cmd *cobra.Command, idx *index.SQLiteIndex, store *storage.
 	}
 	embedder := llm.NewOllamaEmbedder(baseURL, model)
 
-	texts := make([]string, len(stale))
-	for i, entry := range stale {
-		texts[i] = buildEmbedText(store, entry.Path)
+	res := batchEmbed(cmd.Context(), idx, store, embedder, model, stale, 32)
+	cmd.Printf("post-ingest embed: %d embedded, %d skipped, %d failed\n", res.embedded, res.skipped, res.failed)
+	if res.failed > 0 {
+		cmd.PrintErrln("warning: some post-ingest embeddings failed")
 	}
-
-	vecs, err := embedder.Embed(context.Background(), texts)
-	if err != nil {
-		slog.Error("post-ingest embed: embed call failed", "error", err)
-		cmd.PrintErrln("warning: post-ingest embedding failed:", err)
-		return
-	}
-
-	embedded := 0
-	for i, entry := range stale {
-		if err := sqIdx.StoreEmbedding(entry.Path, entry.ContentHash, model, vecs[i]); err != nil {
-			slog.Error("post-ingest embed: store", "path", entry.Path, "error", err)
-			continue
-		}
-		embedded++
-	}
-	cmd.Printf("post-ingest embed: %d/%d pages embedded\n", embedded, len(stale))
 }

@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -16,7 +17,7 @@ type OllamaEmbedder struct {
 	baseURL string
 	model   string
 	client  *http.Client
-	dims    int
+	dims    atomic.Int32
 }
 
 func NewOllamaEmbedder(baseURL, model string) *OllamaEmbedder {
@@ -80,15 +81,15 @@ func (o *OllamaEmbedder) Embed(ctx context.Context, texts []string) ([][]float32
 		normalizeVec(result.Embeddings[i])
 	}
 
-	if o.dims == 0 && len(result.Embeddings) > 0 {
-		o.dims = len(result.Embeddings[0])
+	if o.dims.Load() == 0 && len(result.Embeddings) > 0 {
+		o.dims.Store(int32(len(result.Embeddings[0])))
 	}
 
 	return result.Embeddings, nil
 }
 
 func (o *OllamaEmbedder) Dims() int {
-	return o.dims
+	return int(o.dims.Load())
 }
 
 func normalizeVec(v []float32) {

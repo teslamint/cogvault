@@ -195,6 +195,7 @@ func (s *SQLiteIndex) removeTx(tx *sql.Tx, path string) error {
 	if _, err := tx.Exec(`DELETE FROM file_meta WHERE path = ?`, path); err != nil {
 		return fmt.Errorf("index.Remove %s: %w", path, err)
 	}
+	tx.Exec(`DELETE FROM embeddings WHERE path = ?`, path)
 	return nil
 }
 
@@ -334,7 +335,9 @@ func (s *SQLiteIndex) SearchSimilar(path string, limit int) ([]Result, error) {
 
 	if s.embeddingModel != "" {
 		results, err := s.searchSimilarEmbedding(p, limit)
-		if err == nil && len(results) > 0 {
+		if err != nil {
+			slog.Debug("embedding search fallback to FTS", "path", p, "error", err)
+		} else if len(results) > 0 {
 			return results, nil
 		}
 	}
@@ -348,7 +351,7 @@ func (s *SQLiteIndex) searchSimilarEmbedding(path string, limit int) ([]Result, 
 
 	var queryBlob []byte
 	err := s.db.QueryRow(
-		`SELECT vector FROM embeddings WHERE path = ? AND model = ?`,
+		`SELECT e.vector FROM embeddings e JOIN file_meta f ON e.path = f.path WHERE e.path = ? AND e.model = ?`,
 		path, s.embeddingModel,
 	).Scan(&queryBlob)
 	if err != nil {
@@ -373,13 +376,14 @@ func (s *SQLiteIndex) searchSimilarEmbedding(path string, limit int) ([]Result, 
 	}
 	var candidates []scored
 	for rows.Next() {
-		var s scored
+		var c scored
 		var blob []byte
-		if err := rows.Scan(&s.Path, &blob, &s.Title, &s.Type, &s.Category); err != nil {
+		if err := rows.Scan(&c.Path, &blob, &c.Title, &c.Type, &c.Category); err != nil {
+			slog.Debug("embedding scan skip", "error", err)
 			continue
 		}
-		s.score = dotProduct(queryVec, blobToVec(blob))
-		candidates = append(candidates, s)
+		c.score = dotProduct(queryVec, blobToVec(blob))
+		candidates = append(candidates, c)
 	}
 
 	sort.Slice(candidates, func(i, j int) bool {
