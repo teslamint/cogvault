@@ -287,6 +287,27 @@ func TestRunOversizedAndTypeExcluded(t *testing.T) {
 	}
 }
 
+func TestRunSymlinkSilentlySkipped(t *testing.T) {
+	h := newHarness(t, []string{"md"}, okLLM())
+	h.write(t, "real.md", "content")
+	target := filepath.Join(h.srcDir, "real.md")
+	link := filepath.Join(h.srcDir, "link.md")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks not supported: %v", err)
+	}
+
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "interactive"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Scanned != 1 {
+		t.Errorf("scanned = %d, want 1 (symlink silently skipped pre-scan)", rep.Scanned)
+	}
+	if rep.Digested != 1 {
+		t.Errorf("digested = %d, want 1 (only real.md)", rep.Digested)
+	}
+}
+
 func TestRunConfigMaxFileSize(t *testing.T) {
 	root := t.TempDir()
 	wikiDir := filepath.Join(root, "wiki")
