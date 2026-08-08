@@ -51,7 +51,7 @@ Each later phase gets its own spec when work begins
 
 | Item | Context | Owner |
 |------|---------|-------|
-| Phone capture (share-sheet → synced inbox → pipeline) | S5 in [SPEC](SPEC.md) §1.3 | [project-background](docs/context/project-background.md) §Later Phases |
+| ~~Phone capture (share-sheet → synced inbox → pipeline)~~ | **Done** (2026-08-08). No native app needed: share-sheet → iCloud Drive/Dropbox folder → configure as `sources[].path` → scheduled ingest picks up files automatically. Pattern documented in README. | [project-background](docs/context/project-background.md) §Later Phases |
 | ~~URL / web-article extraction (fetch + extract before digest)~~ | **Done** (2026-08-08). `cogvault fetch <url>` downloads content to source dir for ingest. | [project-background](docs/context/project-background.md) §Later Phases |
 | ~~Markdown-source digestion (restore v1 full-text coverage)~~ | **Done** (PR #16, 2026-08-08): `buildPrompt` type-aware, `SourceExt` in `DigestRequest`. Users add `md` to `sources[].types`. | [project-background](docs/context/project-background.md) §Later Phases |
 | ~~Supplementary file types (xlsx/csv/tsv alongside PDFs)~~ | **Done** (2026-08-08). `sourceTypePhrase` extended for csv/tsv/xlsx; pipeline already type-agnostic via `sources[].types` config. | [SPEC](SPEC.md) §1.3 |
@@ -82,7 +82,7 @@ Inspired by [llm-wiki-for-scientists][llm-wiki].
 | ~~`wiki_delete` + git auto-commit (paired — deletion unsafe without auto-commit)~~ | **Done** (2026-08-08). `wiki_delete` MCP tool + `gitAutoCommit` on delete. Storage.Delete added to interface. | [project-background](docs/context/project-background.md) §Carry-Overs |
 | ~~Lint (contradictions, orphans, broken links, frontmatter compliance; introduces `ResolveLink`)~~ | **Done** (2026-08-08). `cogvault lint` checks broken links, orphans, frontmatter compliance with `resolveWikilink`. | [project-background](docs/context/project-background.md) §Carry-Overs |
 | ~~`wiki_write` warnings (frontmatter validation feedback)~~ | **Done** (PR #20, 2026-08-08). `validateFrontmatter` returns warnings array. | [project-background](docs/context/project-background.md) §Carry-Overs |
-| SSE transport (remote access via tunnel or cloud deploy) | | [project-background](docs/context/project-background.md) §Carry-Overs |
+| ~~SSE transport (remote access via tunnel or cloud deploy)~~ | **Done** (2026-08-08). `cogvault serve --transport sse --addr host:port` via mcp-go SSEServer. | [project-background](docs/context/project-background.md) §Carry-Overs |
 | ~~Code-block wikilink exclusion (state machine for fenced/inline code)~~ | **Done** (PR #19, 2026-08-08). `codeSpans` filter in `extractWikilinks`. | [project-background](docs/context/project-background.md) §Carry-Overs |
 | ~~Page-type expansion (entity/concept/synthesis schemas when usage justifies it)~~ | **Done** (2026-08-08). entity/concept/synthesis 타입 스키마 `_schema.md`에 추가. | [project-background](docs/context/project-background.md) §Carry-Overs |
 
