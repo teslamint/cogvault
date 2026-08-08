@@ -48,8 +48,9 @@ func TestDigestModelPassthrough(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read argv: %v", err)
 	}
-	if !strings.Contains(string(argv), "--model opus") {
-		t.Errorf("argv %q missing %q", argv, "--model opus")
+	wantArgv := "--print --output-format json --allowedTools Read --model opus"
+	if got := strings.TrimSpace(string(argv)); got != wantArgv {
+		t.Errorf("argv = %q, want %q", got, wantArgv)
 	}
 }
 
@@ -87,21 +88,23 @@ func TestDigestHappy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read argv: %v", err)
 	}
-	for _, want := range []string{"--print", "--output-format", "json", "--allowedTools", "Read"} {
-		if !strings.Contains(string(argv), want) {
-			t.Errorf("argv %q missing %q", argv, want)
-		}
+	wantArgv := "--print --output-format json --allowedTools Read"
+	if got := strings.TrimSpace(string(argv)); got != wantArgv {
+		t.Errorf("argv = %q, want %q", got, wantArgv)
 	}
 
 	stdin, err := os.ReadFile(stdinFile)
 	if err != nil {
 		t.Fatalf("read stdin: %v", err)
 	}
-	if !strings.Contains(string(stdin), "SCHEMA-MARKER") {
-		t.Errorf("stdin missing schema text: %q", stdin)
-	}
-	if !strings.Contains(string(stdin), "notes/x.pdf") {
-		t.Errorf("stdin missing source path: %q", stdin)
+	for _, want := range []string{
+		"SCHEMA-MARKER",
+		"notes/x.pdf",
+		"wiki page slug: x",
+	} {
+		if !strings.Contains(string(stdin), want) {
+			t.Errorf("stdin missing %q in:\n%s", want, stdin)
+		}
 	}
 	for _, want := range []string{"category:", "article", "legal", "reference"} {
 		if !strings.Contains(string(stdin), want) {
@@ -240,6 +243,43 @@ func TestDigestSuccessBodyNotRefused(t *testing.T) {
 	}
 	if !strings.HasPrefix(res.PageContent, "---") {
 		t.Errorf("expected a page, got %q", res.PageContent)
+	}
+}
+
+func TestDigestEmptyResultPermanent(t *testing.T) {
+	c, _, _ := newFake(t, "empty")
+
+	_, err := c.Digest(context.Background(), DigestRequest{SourcePath: "notes/x.pdf"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if errors.Is(err, ErrTransient) {
+		t.Errorf("empty result should be permanent, got transient: %v", err)
+	}
+	if errors.Is(err, ErrRefused) {
+		t.Errorf("empty result should not be refused: %v", err)
+	}
+}
+
+func TestDigestContextCancelledTransient(t *testing.T) {
+	c, _, _ := newFake(t, "sleep")
+	c.timeout = 10 * time.Second
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	_, err := c.Digest(ctx, DigestRequest{SourcePath: "notes/x.pdf"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, ErrTransient) {
+		t.Errorf("context cancellation should be transient, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "context cancelled") {
+		t.Errorf("error should mention context cancelled, got %q", err)
 	}
 }
 
