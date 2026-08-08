@@ -18,6 +18,7 @@ type SourceDir struct {
 type LLMConfig struct {
 	Backend string `yaml:"backend"`
 	Model   string `yaml:"model"`
+	BaseURL string `yaml:"base_url"`
 }
 
 type Config struct {
@@ -200,8 +201,8 @@ func (c *Config) validate() error {
 	if c.Adapter != "obsidian" && c.Adapter != "markdown" {
 		return fmt.Errorf("adapter: %q not supported; use \"obsidian\" or \"markdown\"", c.Adapter)
 	}
-	if c.LLM.Backend != "claudecode" {
-		return fmt.Errorf("llm.backend: %q not supported; use \"claudecode\"", c.LLM.Backend)
+	if c.LLM.Backend != "claudecode" && c.LLM.Backend != "ollama" {
+		return fmt.Errorf("llm.backend: %q not supported; use \"claudecode\" or \"ollama\"", c.LLM.Backend)
 	}
 	return nil
 }

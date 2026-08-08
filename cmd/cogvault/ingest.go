@@ -38,11 +38,16 @@ func runIngest(cmd *cobra.Command, args []string) error {
 
 	var adpt llm.Adapter
 	if !dryRun {
-		binPath, err := exec.LookPath("claude")
-		if err != nil {
-			return fmt.Errorf("claude CLI not found in PATH; install Claude Code or add it to PATH")
+		switch cfg.LLM.Backend {
+		case "ollama":
+			adpt = llm.NewOllama(cfg.LLM.BaseURL, cfg.LLM.Model)
+		default:
+			binPath, err := exec.LookPath("claude")
+			if err != nil {
+				return fmt.Errorf("claude CLI not found in PATH; install Claude Code or add it to PATH")
+			}
+			adpt = llm.NewClaudeCode(binPath, cfg.LLM.Model)
 		}
-		adpt = llm.NewClaudeCode(binPath, cfg.LLM.Model)
 	}
 
 	runner, err := ingest.New(cfg, store, idx, adpt, cfg.DBPath)
