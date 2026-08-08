@@ -54,7 +54,7 @@ Each later phase gets its own spec when work begins
 | Phone capture (share-sheet → synced inbox → pipeline) | S5 in [SPEC](SPEC.md) §1.3 | [project-background](docs/context/project-background.md) §Later Phases |
 | URL / web-article extraction (fetch + extract before digest) | [SPEC](SPEC.md) §1.3 | [project-background](docs/context/project-background.md) §Later Phases |
 | ~~Markdown-source digestion (restore v1 full-text coverage)~~ | **Done** (PR #16, 2026-08-08): `buildPrompt` type-aware, `SourceExt` in `DigestRequest`. Users add `md` to `sources[].types`. | [project-background](docs/context/project-background.md) §Later Phases |
-| Supplementary file types (xlsx/csv/tsv alongside PDFs) | Separate resource layer for tables/data; inspired by [llm-wiki §ch.8][llm-wiki] | [SPEC](SPEC.md) §1.3 |
+| ~~Supplementary file types (xlsx/csv/tsv alongside PDFs)~~ | **Done** (2026-08-08). `sourceTypePhrase` extended for csv/tsv/xlsx; pipeline already type-agnostic via `sources[].types` config. | [SPEC](SPEC.md) §1.3 |
 
 ### Digest expansion
 

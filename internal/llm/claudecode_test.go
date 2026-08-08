@@ -301,6 +301,9 @@ func TestSourceTypePhrase(t *testing.T) {
 		{".PDF", "Read the PDF file at path: "},
 		{".md", "Read the markdown file at path: "},
 		{".markdown", "Read the markdown file at path: "},
+		{".csv", "Read the CSV file at path: "},
+		{".tsv", "Read the TSV file at path: "},
+		{".xlsx", "Read the Excel spreadsheet at path: "},
 		{".txt", "Read the file at path: "},
 		{"", "Read the file at path: "},
 	}

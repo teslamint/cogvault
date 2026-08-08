@@ -151,6 +151,12 @@ func sourceTypePhrase(ext string) string {
 		return "Read the PDF file at path: "
 	case ".md", ".markdown":
 		return "Read the markdown file at path: "
+	case ".csv":
+		return "Read the CSV file at path: "
+	case ".tsv":
+		return "Read the TSV file at path: "
+	case ".xlsx":
+		return "Read the Excel spreadsheet at path: "
 	default:
 		return "Read the file at path: "
 	}
