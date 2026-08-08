@@ -16,6 +16,7 @@ import (
 	"github.com/teslamint/cogvault/internal/config"
 	cverr "github.com/teslamint/cogvault/internal/errors"
 	"github.com/teslamint/cogvault/internal/index"
+	"github.com/teslamint/cogvault/internal/schema"
 	"github.com/teslamint/cogvault/internal/storage"
 )
 
@@ -672,6 +673,16 @@ func TestSchemaInstructions(t *testing.T) {
 		if !strings.Contains(result, "# Wiki Schema") {
 			t.Error("fallback should contain embedded schema content")
 		}
+		if strings.Contains(result, `wiki_read("_schema.md")`) {
+			t.Error("fallback must not reference wiki_read for a missing file")
+		}
 	})
+}
+
+func TestDefaultContentFitsMaxSchemaLen(t *testing.T) {
+	runes := []rune(schema.DefaultContent)
+	if len(runes) > maxSchemaLen {
+		t.Errorf("schema.DefaultContent is %d runes, exceeds maxSchemaLen %d — fallback would truncate and lose wiki_read pointer context", len(runes), maxSchemaLen)
+	}
 }
 

@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -41,13 +42,16 @@ func schemaInstructions(cfg *config.Config, store storage.Storage) string {
 	return string(runes[:maxSchemaLen]) + fmt.Sprintf("\n\n[Full schema: wiki_read(%q)]", schemaPath)
 }
 
-func defaultSchemaInstructions(cfg *config.Config) string {
-	content := schema.DefaultContent
+func defaultSchemaInstructions(_ *config.Config) string {
+	content := strings.Replace(schema.DefaultContent,
+		"전문은 `wiki_read(\"_schema.md\")`로 읽는다.",
+		"전문이 아래에 포함되어 있다.",
+		1)
 	runes := []rune(content)
 	if len(runes) <= maxSchemaLen {
 		return content
 	}
-	return string(runes[:maxSchemaLen]) + fmt.Sprintf("\n\n[Full schema: wiki_read(%q)]", cfg.SchemaPath())
+	return string(runes[:maxSchemaLen])
 }
 
 func registerTools(s *server.MCPServer, root string, cfg *config.Config, store storage.Storage, idx index.Index, adpt adapter.Adapter) {
