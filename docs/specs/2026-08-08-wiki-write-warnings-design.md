@@ -1,6 +1,6 @@
 # wiki_write Warnings — Design Spec
 
-Status: draft
+Status: approved
 Date: 2026-08-08
 Owner: ROADMAP.md § Consume / tooling expansion
 

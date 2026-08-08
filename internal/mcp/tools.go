@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/adrg/frontmatter"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/teslamint/cogvault/internal/adapter"
@@ -80,11 +82,19 @@ func handleWikiWrite(root string, cfg *config.Config, store storage.Storage, idx
 			}
 		}
 
+		var warnings []string
+		if strings.HasSuffix(strings.ToLower(path), ".md") {
+			warnings = validateFrontmatter(content)
+		}
+		if warnings == nil {
+			warnings = []string{}
+		}
+
 		result := map[string]any{
 			"status":   "written",
 			"path":     path,
 			"bytes":    len(content),
-			"warnings": []string{},
+			"warnings": warnings,
 		}
 		return mcp.NewToolResultJSON(result)
 	}
@@ -223,4 +233,33 @@ func handleWikiParse(root string, adpt adapter.Adapter) server.ToolHandlerFunc {
 
 		return mcp.NewToolResultJSON(src)
 	}
+}
+
+func validateFrontmatter(content string) []string {
+	if !strings.HasPrefix(strings.TrimSpace(content), "---") {
+		return []string{"missing YAML frontmatter"}
+	}
+	var fm map[string]any
+	if _, err := frontmatter.Parse(bytes.NewReader([]byte(content)), &fm); err != nil {
+		return []string{"missing YAML frontmatter"}
+	}
+	if fm == nil {
+		fm = map[string]any{}
+	}
+
+	var warnings []string
+	if _, ok := fm["title"]; !ok {
+		warnings = append(warnings, "missing frontmatter field: title")
+	}
+
+	typ, _ := fm["type"].(string)
+	if typ == "source" {
+		if _, ok := fm["source_path"]; !ok {
+			warnings = append(warnings, "source page missing field: source_path")
+		}
+		if _, ok := fm["ingested_at"]; !ok {
+			warnings = append(warnings, "source page missing field: ingested_at")
+		}
+	}
+	return warnings
 }
