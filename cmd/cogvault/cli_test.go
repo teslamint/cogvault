@@ -371,16 +371,7 @@ func fakeClaudeOnPath(t *testing.T) {
 
 func newIngestVault(t *testing.T) (configPath, srcDir string) {
 	t.Helper()
-	base := t.TempDir()
-	wikiDir := filepath.Join(base, "wiki")
-	dbPath := filepath.Join(base, "index.db")
-	srcDir = filepath.Join(base, "src")
-	configPath = filepath.Join(base, "config.yaml")
-	for _, d := range []string{wikiDir, srcDir} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
+	configPath, srcDir, wikiDir, dbPath := setupIngestVault(t)
 	writeConfigFile(t, configPath, wikiDir, dbPath, srcDir)
 	return configPath, srcDir
 }

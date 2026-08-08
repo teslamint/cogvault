@@ -355,9 +355,16 @@ func TestE2ESupersedeOnContentChange(t *testing.T) {
 	if len(rows) != 2 {
 		t.Fatalf("expected 2 ledger rows (superseded + success), got %d", len(rows))
 	}
-	var superseded, success int
+	hashStatus := make(map[string]string, len(rows))
 	for _, r := range rows {
-		switch r.status {
+		hashStatus[r.contentHash] = r.status
+	}
+	if len(hashStatus) != 2 {
+		t.Fatalf("expected 2 distinct hashes, got %d", len(hashStatus))
+	}
+	var superseded, success int
+	for _, st := range hashStatus {
+		switch st {
 		case "superseded":
 			superseded++
 		case "success":
@@ -633,13 +640,17 @@ func TestE2EConcurrentIndexWriteDuringRead(t *testing.T) {
 	}
 }
 
+func testDSN(dbPath string) string {
+	return dbPath + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
+}
+
 func TestE2EBusyTimeoutSerializesWriters(t *testing.T) {
 	// Covers the busy_timeout guarantee for the ledger's cross-process write
 	// path: two independent connection pools with the production DSN, running
 	// write-first transactions (the ledger's INSERT OR REPLACE pattern),
 	// serialize under busy_timeout instead of erroring "database is locked".
 	dbPath := filepath.Join(t.TempDir(), "ledger.db")
-	dsn := dbPath + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
+	dsn := testDSN(dbPath)
 	open := func() *sql.DB {
 		db, err := sql.Open("sqlite", dsn)
 		if err != nil {
