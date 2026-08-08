@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -29,6 +30,7 @@ type SQLiteIndex struct {
 	mu              sync.RWMutex
 	ccMu            sync.Mutex
 	useTrigram      bool
+	embeddingModel  string
 }
 
 func NewSQLiteIndex(root, dbPath string, cfg *config.Config) (*SQLiteIndex, error) {
@@ -193,6 +195,7 @@ func (s *SQLiteIndex) removeTx(tx *sql.Tx, path string) error {
 	if _, err := tx.Exec(`DELETE FROM file_meta WHERE path = ?`, path); err != nil {
 		return fmt.Errorf("index.Remove %s: %w", path, err)
 	}
+	tx.Exec(`DELETE FROM embeddings WHERE path = ?`, path)
 	return nil
 }
 
@@ -319,13 +322,91 @@ func (s *SQLiteIndex) searchLIKE(query string, limit int) ([]Result, error) {
 	return results, rows.Err()
 }
 
+func (s *SQLiteIndex) SetEmbeddingModel(model string) {
+	s.embeddingModel = model
+}
+
 func (s *SQLiteIndex) SearchSimilar(path string, limit int) ([]Result, error) {
+	if limit <= 0 {
+		limit = 5
+	}
+
+	p := normalizePath(path)
+
+	if s.embeddingModel != "" {
+		results, err := s.searchSimilarEmbedding(p, limit)
+		if err != nil {
+			slog.Debug("embedding search fallback to FTS", "path", p, "error", err)
+		} else if len(results) > 0 {
+			return results, nil
+		}
+	}
+
+	return s.searchSimilarFTS(p, limit)
+}
+
+func (s *SQLiteIndex) searchSimilarEmbedding(path string, limit int) ([]Result, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	p := normalizePath(path)
+	var queryBlob []byte
+	err := s.db.QueryRow(
+		`SELECT e.vector FROM embeddings e JOIN file_meta f ON e.path = f.path WHERE e.path = ? AND e.model = ?`,
+		path, s.embeddingModel,
+	).Scan(&queryBlob)
+	if err != nil {
+		return nil, err
+	}
+	queryVec := blobToVec(queryBlob)
+
+	rows, err := s.db.Query(
+		`SELECT e.path, e.vector, f.title, f.type, f.category
+		FROM embeddings e JOIN file_meta f ON e.path = f.path
+		WHERE e.model = ? AND e.path != ?`,
+		s.embeddingModel, path,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type scored struct {
+		Result
+		score float64
+	}
+	var candidates []scored
+	for rows.Next() {
+		var c scored
+		var blob []byte
+		if err := rows.Scan(&c.Path, &blob, &c.Title, &c.Type, &c.Category); err != nil {
+			slog.Debug("embedding scan skip", "error", err)
+			continue
+		}
+		c.score = dotProduct(queryVec, blobToVec(blob))
+		candidates = append(candidates, c)
+	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].score > candidates[j].score
+	})
+	if len(candidates) > limit {
+		candidates = candidates[:limit]
+	}
+
+	results := make([]Result, len(candidates))
+	for i, c := range candidates {
+		c.Result.Score = c.score
+		results[i] = c.Result
+	}
+	return results, nil
+}
+
+func (s *SQLiteIndex) searchSimilarFTS(path string, limit int) ([]Result, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	var title, content string
-	err := s.db.QueryRow(`SELECT f.title, wiki_fts.content FROM wiki_fts JOIN file_meta f ON wiki_fts.path = f.path WHERE f.path = ?`, p).Scan(&title, &content)
+	err := s.db.QueryRow(`SELECT f.title, wiki_fts.content FROM wiki_fts JOIN file_meta f ON wiki_fts.path = f.path WHERE f.path = ?`, path).Scan(&title, &content)
 	if err != nil {
 		return []Result{}, nil
 	}
@@ -342,16 +423,12 @@ func (s *SQLiteIndex) SearchSimilar(path string, limit int) ([]Result, error) {
 		return []Result{}, nil
 	}
 
-	if limit <= 0 {
-		limit = 5
-	}
-
 	escaped := escapeMatch(query)
 	rows, err := s.db.Query(
 		`SELECT f.path, f.title, f.type, f.category, snippet(wiki_fts, 2, '', '', '...', 32), rank
 		FROM wiki_fts JOIN file_meta f ON wiki_fts.path = f.path
 		WHERE wiki_fts MATCH ? AND f.path != ?
-		ORDER BY rank LIMIT ?`, escaped, p, limit)
+		ORDER BY rank LIMIT ?`, escaped, path, limit)
 	if err != nil {
 		return []Result{}, nil
 	}

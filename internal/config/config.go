@@ -16,9 +16,11 @@ type SourceDir struct {
 }
 
 type LLMConfig struct {
-	Backend string `yaml:"backend"`
-	Model   string `yaml:"model"`
-	BaseURL string `yaml:"base_url"`
+	Backend          string `yaml:"backend"`
+	Model            string `yaml:"model"`
+	BaseURL          string `yaml:"base_url"`
+	EmbeddingModel   string `yaml:"embedding_model"`
+	EmbeddingBaseURL string `yaml:"embedding_base_url"`
 }
 
 type Config struct {
@@ -203,6 +205,9 @@ func (c *Config) validate() error {
 	}
 	if c.LLM.Backend != "claudecode" && c.LLM.Backend != "ollama" {
 		return fmt.Errorf("llm.backend: %q not supported; use \"claudecode\" or \"ollama\"", c.LLM.Backend)
+	}
+	if c.LLM.EmbeddingBaseURL != "" && c.LLM.EmbeddingModel == "" {
+		return fmt.Errorf("llm.embedding_base_url: requires embedding_model to be set")
 	}
 	return nil
 }

@@ -3,11 +3,14 @@ package main
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os/exec"
 
 	"github.com/spf13/cobra"
+	"github.com/teslamint/cogvault/internal/index"
 	"github.com/teslamint/cogvault/internal/ingest"
 	"github.com/teslamint/cogvault/internal/llm"
+	"github.com/teslamint/cogvault/internal/storage"
 )
 
 func newIngestCmd() *cobra.Command {
@@ -77,5 +80,36 @@ func runIngest(cmd *cobra.Command, args []string) error {
 		}
 		return err
 	}
+
+	if !dryRun && cfg.LLM.EmbeddingModel != "" && report != nil && report.Digested > 0 {
+		postIngestEmbed(cmd, idx, store, cfg.LLM.EmbeddingModel, cfg.LLM.EmbeddingBaseURL)
+	}
 	return nil
+}
+
+func postIngestEmbed(cmd *cobra.Command, idx *index.SQLiteIndex, store *storage.FSStorage, model, baseURL string) {
+	if err := idx.InitEmbeddingsTable(); err != nil {
+		slog.Error("post-ingest embed: init table", "error", err)
+		return
+	}
+
+	stale, err := idx.StalePaths(model)
+	if err != nil {
+		slog.Error("post-ingest embed: find stale", "error", err)
+		return
+	}
+	if len(stale) == 0 {
+		return
+	}
+
+	if baseURL == "" {
+		baseURL = "http://localhost:11434"
+	}
+	embedder := llm.NewOllamaEmbedder(baseURL, model)
+
+	res := batchEmbed(cmd.Context(), idx, store, embedder, model, stale, 32)
+	cmd.Printf("post-ingest embed: %d embedded, %d skipped, %d failed\n", res.embedded, res.skipped, res.failed)
+	if res.failed > 0 {
+		cmd.PrintErrln("warning: some post-ingest embeddings failed")
+	}
 }
