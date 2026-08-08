@@ -1,6 +1,6 @@
 ---
 title: "F5 Cleanup: MCP Schema Fallback Fix + Dead Fixture Removal"
-status: draft
+status: approved
 feature: f5-cleanup
 follow_up: F5
 ---

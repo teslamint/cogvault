@@ -8,6 +8,7 @@ import (
 	"github.com/teslamint/cogvault/internal/adapter"
 	"github.com/teslamint/cogvault/internal/config"
 	"github.com/teslamint/cogvault/internal/index"
+	"github.com/teslamint/cogvault/internal/schema"
 	"github.com/teslamint/cogvault/internal/storage"
 )
 
@@ -41,10 +42,12 @@ func schemaInstructions(cfg *config.Config, store storage.Storage) string {
 }
 
 func defaultSchemaInstructions(cfg *config.Config) string {
-	return fmt.Sprintf(`Wiki pages live under %q. Each page is a Markdown file with YAML frontmatter.
-Use wiki_read/wiki_write/wiki_list/wiki_search/wiki_scan/wiki_parse to interact with the wiki root.
-Read the schema with wiki_read(%q) for detailed formatting rules.`,
-		cfg.WikiDir, cfg.SchemaPath())
+	content := schema.DefaultContent
+	runes := []rune(content)
+	if len(runes) <= maxSchemaLen {
+		return content
+	}
+	return string(runes[:maxSchemaLen]) + fmt.Sprintf("\n\n[Full schema: wiki_read(%q)]", cfg.SchemaPath())
 }
 
 func registerTools(s *server.MCPServer, root string, cfg *config.Config, store storage.Storage, idx index.Index, adpt adapter.Adapter) {
