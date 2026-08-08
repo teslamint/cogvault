@@ -54,13 +54,18 @@ func defaultSchemaInstructions(_ *config.Config) string {
 	return string(runes[:maxSchemaLen])
 }
 
+func noExtra(t mcp.Tool) mcp.Tool {
+	t.InputSchema.AdditionalProperties = false
+	return t
+}
+
 func registerTools(s *server.MCPServer, root string, cfg *config.Config, store storage.Storage, idx index.Index, adpt adapter.Adapter) {
-	s.AddTool(wikiReadTool(), handleWikiRead(store))
-	s.AddTool(wikiWriteTool(), handleWikiWrite(root, cfg, store, idx, adpt))
-	s.AddTool(wikiListTool(), handleWikiList(cfg, store, idx, adpt))
-	s.AddTool(wikiSearchTool(), handleWikiSearch(cfg, store, idx, adpt))
-	s.AddTool(wikiScanTool(), handleWikiScan(root, cfg, adpt))
-	s.AddTool(wikiParseTool(), handleWikiParse(root, adpt))
+	s.AddTool(noExtra(wikiReadTool()), handleWikiRead(store))
+	s.AddTool(noExtra(wikiWriteTool()), handleWikiWrite(root, cfg, store, idx, adpt))
+	s.AddTool(noExtra(wikiListTool()), handleWikiList(cfg, store, idx, adpt))
+	s.AddTool(noExtra(wikiSearchTool()), handleWikiSearch(cfg, store, idx, adpt))
+	s.AddTool(noExtra(wikiScanTool()), handleWikiScan(root, cfg, adpt))
+	s.AddTool(noExtra(wikiParseTool()), handleWikiParse(root, adpt))
 }
 
 func wikiReadTool() mcp.Tool {
