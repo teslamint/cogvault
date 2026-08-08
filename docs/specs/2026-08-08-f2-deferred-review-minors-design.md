@@ -1,6 +1,6 @@
 # F2 Deferred Review Minors — Design Spec
 
-Status: draft
+Status: approved
 Date: 2026-08-08
 Owner: v2-follow-ups.md F2
 
