@@ -239,6 +239,8 @@ func TestValidationErrors(t *testing.T) {
 		{"adapter invalid", "wiki_dir: /data/wiki\ndb_path: /state/db.db\nadapter: notion\n", "adapter", []string{"not supported"}},
 		{"llm backend invalid", "wiki_dir: /data/wiki\ndb_path: /state/db.db\nllm:\n  backend: local\n", "llm.backend", []string{"not supported"}},
 		{"max_file_size_mb negative", "wiki_dir: /data/wiki\ndb_path: /state/db.db\nmax_file_size_mb: -1\n", "max_file_size_mb", []string{"positive"}},
+		{"db_path equals wiki_dir", "wiki_dir: /data/wiki\ndb_path: /data/wiki\n", "db_path", []string{"wiki_dir"}},
+		{"tilde-user not expanded", "wiki_dir: ~x/wiki\ndb_path: /state/db.db\n", "wiki_dir", []string{"absolute"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
