@@ -140,7 +140,9 @@ func (s *SQLiteIndex) Add(path, content string, meta map[string]string) error {
 	}
 	defer tx.Rollback()
 
-	if err := s.addTx(tx, normalizePath(path), []byte(content), meta, 0, ""); err != nil {
+	// Size from content length; mtime left empty (caller is MCP write, not
+	// a filesystem stat). AddAll may re-read once on mtime mismatch — accepted.
+	if err := s.addTx(tx, normalizePath(path), []byte(content), meta, int64(len(content)), ""); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -359,6 +361,9 @@ func (s *SQLiteIndex) CheckConsistency(store storage.Storage, adpt adapter.Adapt
 			delete(indexed, p)
 			return nil
 		}
+		// RFC3339Nano includes TZ offset; cross-TZ processes may produce
+		// different strings for the same instant, causing an extra re-index
+		// (safe direction: never misses a real change).
 		mtimeStr := mtime.Format(time.RFC3339Nano)
 
 		st, indexedAlready := indexed[p]
