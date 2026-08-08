@@ -81,14 +81,69 @@ func (a *ObsidianAdapter) Parse(root, relPath string, includeContent bool) (*ada
 	return src, nil
 }
 
+func codeSpans(body string) [][2]int {
+	var spans [][2]int
+	lines := strings.Split(body, "\n")
+	offset := 0
+	inFence := false
+	fenceStart := 0
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !inFence && (strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~")) {
+			inFence = true
+			fenceStart = offset
+		} else if inFence && (strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~")) {
+			spans = append(spans, [2]int{fenceStart, offset + len(line)})
+			inFence = false
+		}
+		offset += len(line) + 1
+	}
+	if inFence {
+		spans = append(spans, [2]int{fenceStart, len(body)})
+	}
+
+	for i := 0; i < len(body); i++ {
+		if body[i] != '`' || inCodeSpan(i, spans) {
+			continue
+		}
+		ticks := 1
+		for i+ticks < len(body) && body[i+ticks] == '`' {
+			ticks++
+		}
+		start := i
+		end := strings.Index(body[i+ticks:], strings.Repeat("`", ticks))
+		if end < 0 {
+			break
+		}
+		end += i + ticks + ticks
+		spans = append(spans, [2]int{start, end})
+		i = end - 1
+	}
+	return spans
+}
+
+func inCodeSpan(pos int, spans [][2]int) bool {
+	for _, s := range spans {
+		if pos >= s[0] && pos < s[1] {
+			return true
+		}
+	}
+	return false
+}
+
 func extractWikilinks(body string) ([]string, []string) {
 	matches := wikilinkRe.FindAllStringSubmatchIndex(body, -1)
+	spans := codeSpans(body)
 	linkSeen := map[string]bool{}
 	attachSeen := map[string]bool{}
 	var links, attachments []string
 
 	for _, loc := range matches {
 		matchStart := loc[0]
+		if inCodeSpan(matchStart, spans) {
+			continue
+		}
 		captured := body[loc[2]:loc[3]]
 
 		target := captured
