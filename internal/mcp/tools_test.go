@@ -16,6 +16,7 @@ import (
 	"github.com/teslamint/cogvault/internal/config"
 	cverr "github.com/teslamint/cogvault/internal/errors"
 	"github.com/teslamint/cogvault/internal/index"
+	"github.com/teslamint/cogvault/internal/schema"
 	"github.com/teslamint/cogvault/internal/storage"
 )
 
@@ -659,7 +660,7 @@ func TestSchemaInstructions(t *testing.T) {
 		}
 	})
 
-	t.Run("read failure fallback", func(t *testing.T) {
+	t.Run("read failure fallback uses embedded schema", func(t *testing.T) {
 		store := &mockStorage{
 			readFn: func(path string) ([]byte, error) {
 				return nil, fmt.Errorf("read: %w", cverr.ErrNotFound)
@@ -669,27 +670,19 @@ func TestSchemaInstructions(t *testing.T) {
 		if result == "" {
 			t.Error("fallback should not be empty")
 		}
-		if !strings.Contains(result, "_wiki") {
-			t.Error("fallback should reference wiki_dir")
+		if !strings.Contains(result, "# Wiki Schema") {
+			t.Error("fallback should contain embedded schema content")
+		}
+		if strings.Contains(result, `wiki_read("_schema.md")`) {
+			t.Error("fallback must not reference wiki_read for a missing file")
 		}
 	})
+}
 
-	t.Run("uses cfg.SchemaPath dynamically", func(t *testing.T) {
-		cfg := &config.Config{
-			WikiDir:             "my_wiki",
-			DBPath:              ".cogvault.db",
-			Adapter:             "obsidian",
-			ConsistencyInterval: 5,
-		}
-		store := &mockStorage{
-			readFn: func(path string) ([]byte, error) {
-				return nil, cverr.ErrNotFound
-			},
-		}
-		result := schemaInstructions(cfg, store)
-		if !strings.Contains(result, "my_wiki") {
-			t.Error("fallback should use configured wiki_dir")
-		}
-	})
+func TestDefaultContentFitsMaxSchemaLen(t *testing.T) {
+	runes := []rune(schema.DefaultContent)
+	if len(runes) > maxSchemaLen {
+		t.Errorf("schema.DefaultContent is %d runes, exceeds maxSchemaLen %d — fallback would truncate and lose wiki_read pointer context", len(runes), maxSchemaLen)
+	}
 }
 

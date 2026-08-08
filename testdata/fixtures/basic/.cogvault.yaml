@@ -1,7 +1,0 @@
-wiki_dir: _wiki
-db_path: .cogvault.db
-exclude:
-  - .obsidian
-  - .trash
-adapter: obsidian
-consistency_interval: 0
