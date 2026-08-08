@@ -166,7 +166,27 @@ func TestStatDirectory(t *testing.T) {
 	if mtime.IsZero() {
 		t.Fatalf("Stat() dir mtime is zero")
 	}
-	_ = size
+	if size < 0 {
+		t.Fatalf("Stat() dir size = %d, want >= 0", size)
+	}
+}
+
+func TestStatSymlinkRejected(t *testing.T) {
+	root := t.TempDir()
+	store := newTestStorage(t, root, &config.Config{})
+
+	realDir := filepath.Join(root, "real")
+	mustMkdirAll(t, realDir)
+	mustWriteFile(t, filepath.Join(realDir, "page.md"), "content")
+
+	if err := os.Symlink(filepath.Join(realDir, "page.md"), filepath.Join(root, "link.md")); err != nil {
+		t.Skipf("symlinks not supported: %v", err)
+	}
+
+	_, _, err := store.Stat("link.md")
+	if !errors.Is(err, cverr.ErrSymlink) {
+		t.Fatalf("Stat() symlink error = %v, want ErrSymlink", err)
+	}
 }
 
 func TestListBehavior(t *testing.T) {
