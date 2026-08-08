@@ -83,7 +83,7 @@ Inspired by [llm-wiki-for-scientists][llm-wiki].
 | Lint (contradictions, orphans, broken links, frontmatter compliance; introduces `ResolveLink`) | Orphan audit: link graph로 고립 페이지 탐지 ([llm-wiki §ch.6][llm-wiki] 참고) | [project-background](docs/context/project-background.md) §Carry-Overs |
 | `wiki_write` warnings (frontmatter validation feedback) | | [project-background](docs/context/project-background.md) §Carry-Overs |
 | SSE transport (remote access via tunnel or cloud deploy) | | [project-background](docs/context/project-background.md) §Carry-Overs |
-| Code-block wikilink exclusion (state machine for fenced/inline code) | | [project-background](docs/context/project-background.md) §Carry-Overs |
+| ~~Code-block wikilink exclusion (state machine for fenced/inline code)~~ | **Done** (PR #19, 2026-08-08). `codeSpans` filter in `extractWikilinks`. | [project-background](docs/context/project-background.md) §Carry-Overs |
 | Page-type expansion (entity/concept/synthesis schemas when usage justifies it) | Synthesis layer의 선행 조건; schema 정의 후 자동 생성 가능 | [project-background](docs/context/project-background.md) §Carry-Overs |
 
 ### Longer horizon
