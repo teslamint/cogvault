@@ -99,11 +99,17 @@ func runServe(cmd *cobra.Command, args []string) error {
 }
 
 // newHTTPServer constructs the *http.Server used for the "sse" and "http"
-// transports. WriteTimeout is deliberately left unset: it would cut off the
-// long-lived SSE and Streamable HTTP event streams these transports serve,
-// which can legitimately stay open far longer than a single request-response
-// round trip. The per-stream deadline that bounds those instead lives in the
-// httpauth middleware, which runs after headers are already parsed.
+// transports. WriteTimeout is deliberately left unset: it applies to the
+// whole connection from the moment headers are read, so it would cut off
+// the long-lived SSE and Streamable HTTP event streams these transports
+// serve, which can legitimately stay open far longer than a single
+// request-response round trip. The per-stream bound that these transports
+// need instead lives in the httpauth middleware, which sets a per-request
+// socket read/write deadline (via http.ResponseController, after headers
+// are already parsed) computed from auth.max_stream_seconds and, in oauth
+// mode, the earlier token expiry — enforceable at the socket level like
+// WriteTimeout, but scoped to one request instead of severing every stream
+// on the connection.
 func newHTTPServer(addr string, handler http.Handler) *http.Server {
 	return &http.Server{
 		Addr:              addr,

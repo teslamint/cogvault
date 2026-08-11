@@ -146,8 +146,42 @@ func Middleware(cfg Config) func(http.Handler) http.Handler {
 			if hasExpiry && expiresAt.Before(deadline) {
 				deadline = expiresAt
 			}
+
+			// A token accepted inside the parser's clock-skew leeway (see
+			// NewOAuthValidator) can carry an exp that is already in the
+			// past: the deadline computed above would then already be
+			// elapsed, so context.WithDeadline below would hand the
+			// handler an already-cancelled context and the client would
+			// see an opaque stream failure instead of learning to refresh.
+			// Reject it as an invalid credential instead. hasExpiry is
+			// only true after a successful oauth Validate call, so this
+			// never fires in "none" or "bearer" mode.
+			if hasExpiry && !deadline.After(time.Now()) {
+				logRejection("invalid_credential", r)
+				writeUnauthorized(w, cfg, true)
+				return
+			}
+
 			ctx, cancel := context.WithDeadline(r.Context(), deadline)
 			defer cancel()
+
+			// ctx's deadline only bounds code that re-checks ctx.Done(); it
+			// cannot interrupt a goroutine already blocked inside
+			// r.Body.Read (a client trickling a request body) or a Write
+			// stalled on a full socket send buffer (a client that stops
+			// reading a stream). Setting the socket-level deadlines here
+			// bounds both of those. A ResponseWriter that does not support
+			// deadlines (e.g. httptest.ResponseRecorder in tests) returns
+			// http.ErrNotSupported from both calls; that must not break
+			// the request, so the request degrades to the context-only
+			// bound above instead.
+			rc := http.NewResponseController(w)
+			if err := rc.SetReadDeadline(deadline); err != nil && !errors.Is(err, http.ErrNotSupported) {
+				slog.Warn("httpauth: SetReadDeadline failed", "err", err)
+			}
+			if err := rc.SetWriteDeadline(deadline); err != nil && !errors.Is(err, http.ErrNotSupported) {
+				slog.Warn("httpauth: SetWriteDeadline failed", "err", err)
+			}
 
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
