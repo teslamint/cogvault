@@ -94,11 +94,11 @@ resource path, instead of following the `resource_metadata` pointer in the
 `https://<host>/.well-known/oauth-protected-resource/sub/mcp` — a path
 cogvault does not serve; it only serves the well-known path bare and suffixed
 with `--endpoint-path` alone (not the public URL's own subpath), per the
-bullet above. This is a **caveat, not a breakage**: clients that follow the
-`401` challenge's `resource_metadata` pointer — which is what the MCP
-specification and the Claude apps do — are unaffected either way. Use a
-path-less `--public-url` in `oauth` mode unless you have a specific reason
-for a subpath deployment.
+bullet above. This is a **caveat, not a breakage**: clients that discover the
+document through the `401` challenge's `resource_metadata` pointer — the route
+the MCP specification defines — or through the bare well-known fallback are
+unaffected either way. Use a path-less `--public-url` in `oauth` mode unless
+you have a specific reason for a subpath deployment.
 
 ## 4. Identity provider prerequisites (`oauth` mode)
 
