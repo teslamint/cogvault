@@ -51,8 +51,9 @@ setup, byte for byte, including any path component. A trailing slash, a
 different subdomain, or `http://` instead of `https://` produces a
 working-looking server that no hosted client can actually reach or
 authenticate against. `--public-url` must be an absolute `https://` URL with
-no trailing slash, query, or fragment (a path component, for a tunnel mounted
-under a subpath, is allowed as long as it doesn't end in `/`).
+no userinfo (`user:pass@host`), trailing slash, query, or fragment (a path
+component, for a tunnel mounted under a subpath, is allowed as long as it
+doesn't end in `/`).
 
 **The advertised `resource`, the expected token `aud` (in `oauth` mode), and
 the path the server actually answers on are all the same value**:
@@ -136,7 +137,7 @@ verifiable against this repository's code). Choose `bearer` mode knowing this;
 |---|---|
 | `auth.mode: none` and `--addr` is not a loopback address (`localhost`, `127.0.0.1`, `::1` — matched as literal strings, not resolved through DNS) | `none` mode applies no credential check, so it may only bind where only the local machine can reach it. |
 | `auth.mode: oauth` and `--public-url` is unset | The audience/resource cannot be computed. |
-| `--public-url` is set but not an absolute `https://` URL, or carries a trailing slash, query, or fragment | Guards the exact-match requirement in §3. |
+| `--public-url` is set but not an absolute `https://` URL, or carries userinfo, a trailing slash, a query, or a fragment | Guards the exact-match requirement in §3; userinfo would otherwise leak into the advertised resource, the expected token `aud`, and the `WWW-Authenticate` challenge. |
 | `auth.mode: bearer` and `COGVAULT_BEARER_TOKEN` is unset or under 32 bytes | Refuses a missing or weak credential. |
 | `auth.oauth.audience` is set and disagrees with `<public-url><endpoint-path>` | A confused-deputy misconfiguration is caught at startup instead of silently rejecting every token later. |
 | `--endpoint-path` normalizes to empty (e.g. `/` or `""`) | There would be no meaningful path to serve or advertise. |

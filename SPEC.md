@@ -528,8 +528,8 @@ cogvault serve [--config <path>] [--transport stdio|sse|http] [--addr <host:port
   slash) and `404`s elsewhere. `sse` ignores this flag and keeps mcp-go's
   fixed `/sse` and `/message` paths.
 - `--public-url` (required when `auth.mode: oauth`; optional otherwise): the
-  externally reachable `https://` base URL — absolute, no trailing slash,
-  query, or fragment. Also used as the SSE message-endpoint base and for
+  externally reachable `https://` base URL — absolute, no userinfo, trailing
+  slash, query, or fragment. Also used as the SSE message-endpoint base and for
   `Origin` checks. Effectively required for a usable remote `sse` deployment
   too: without it, a remote client is handed a loopback message endpoint it
   cannot reach.

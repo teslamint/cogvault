@@ -253,7 +253,16 @@ ignores the path entirely when used as a bare `http.Handler` via
 404s elsewhere — and mounts everything through `httpauth.Mount` (§2.10). The
 `sse` transport keeps mcp-go's default `/sse` and `/message` paths —
 `--endpoint-path` deliberately does not apply to it — and points its message
-endpoint at `--public-url` when set, `http://<addr>` otherwise.
+endpoint at `--public-url` when set, `http://<addr>` otherwise. `newHTTPServer`
+sets `ReadHeaderTimeout=10s` and `IdleTimeout=2m` on the `*http.Server` for
+both network transports — the httpauth stream deadline only starts once a
+handler runs, after headers are parsed, so nothing else bounds a
+slowloris-style client dribbling headers at this public endpoint;
+`WriteTimeout` is deliberately left unset so it doesn't cut off long-lived
+SSE/Streamable HTTP event streams. `validatePublicURL` also rejects userinfo
+(`user:pass@host`) in `--public-url`, alongside the query/fragment/
+trailing-slash checks, since it would otherwise leak into the advertised
+resource, the token `aud`, and the `WWW-Authenticate` challenge.
 
 ### 2.10 httpauth (new)
 
