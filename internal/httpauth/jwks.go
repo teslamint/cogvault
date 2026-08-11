@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/big"
 	"net/http"
 	"net/url"
@@ -16,6 +17,13 @@ import (
 	"sync"
 	"time"
 )
+
+// maxJWKSResponseBytes bounds how much of a discovery or JWKS response body
+// this cache will read. Both documents are untrusted content fetched from a
+// URL derived from config (the issuer) or from that config's own response
+// (jwks_uri), so a compromised or malicious endpoint must not be able to
+// stream an unbounded body at the process that also serves the wiki.
+const maxJWKSResponseBytes = 1 << 20
 
 // defaultJWKSClientTimeout bounds every discovery and JWKS request made with
 // a caller-supplied nil *http.Client. http.DefaultClient has no timeout, and
@@ -64,25 +72,38 @@ type JWKSCache struct {
 	ttl    time.Duration
 	client *http.Client
 
-	mu         sync.Mutex
-	keys       map[string]crypto.PublicKey
-	fetchedAt  time.Time
-	lastForced time.Time
-	fetching   chan struct{}
-	lastErr    error
+	mu          sync.Mutex
+	keys        map[string]crypto.PublicKey
+	fetchedAt   time.Time
+	lastForced  time.Time
+	lastAttempt time.Time
+	fetching    chan struct{}
+	lastErr     error
 }
 
 // NewJWKSCache builds a cache for issuer's key set. client is injected so
 // tests can point it at a stub server; a nil client gets a default timeout
 // rather than http.DefaultClient, which has none.
+//
+// The client is shallow-copied and given a CheckRedirect that refuses to
+// follow redirects, rather than mutating the caller's client in place. The
+// https check on jwks_uri in fetchKeys only ever inspects the initial URL;
+// without this, a compromised or misconfigured issuer could 302 a request
+// from https to a plain http URL and this cache would silently follow it,
+// fetching key material in plaintext. Refusing the redirect surfaces the 3xx
+// response itself, which the existing status-code check in fetchJSON rejects.
 func NewJWKSCache(issuer string, ttl time.Duration, client *http.Client) *JWKSCache {
 	if client == nil {
 		client = &http.Client{Timeout: defaultJWKSClientTimeout}
 	}
+	c2 := *client
+	c2.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
 	return &JWKSCache{
 		issuer: issuer,
 		ttl:    ttl,
-		client: client,
+		client: &c2,
 		keys:   make(map[string]crypto.PublicKey),
 	}
 }
@@ -124,10 +145,21 @@ func (c *JWKSCache) KeyFor(ctx context.Context, kid string) (crypto.PublicKey, e
 	}
 
 	// The cache is fresh but kid is missing: this is a forced refetch, and
-	// subject to the floor. A stale cache (TTL expired) refetches freely.
+	// subject to the floor. A stale cache (TTL expired) refetches freely,
+	// unless the previous attempt itself failed recently: an issuer that is
+	// down, or that has never answered successfully (fetchedAt is always
+	// zero, so fresh and forced are always false), must not be hammered by a
+	// stream of unknown-kid tokens either. lastAttempt records every attempt,
+	// success or failure, so that case is bounded too.
 	forced := fresh
-	if forced && !c.lastForced.IsZero() && time.Since(c.lastForced) < minForcedRefetchInterval {
+	forcedFloorActive := forced && !c.lastForced.IsZero() && time.Since(c.lastForced) < minForcedRefetchInterval
+	errorFloorActive := c.lastErr != nil && !c.lastAttempt.IsZero() && time.Since(c.lastAttempt) < minForcedRefetchInterval
+	if forcedFloorActive || errorFloorActive {
+		err := c.lastErr
 		c.mu.Unlock()
+		if err != nil {
+			return nil, err
+		}
 		return nil, fmt.Errorf("httpauth: no signing key found for kid %q", kid)
 	}
 
@@ -135,7 +167,11 @@ func (c *JWKSCache) KeyFor(ctx context.Context, kid string) (crypto.PublicKey, e
 	c.fetching = ch
 	c.mu.Unlock()
 
-	keys, err := c.fetchKeys(ctx)
+	// The fetch runs on a context detached from ctx's cancellation: multiple
+	// waiters can be collapsed onto this one in-flight fetch, and the first
+	// caller canceling its own request must not fail every other waiter's
+	// round. The client timeout already bounds how long this can run.
+	keys, err := c.fetchKeys(context.WithoutCancel(ctx))
 
 	c.mu.Lock()
 	if err == nil {
@@ -143,6 +179,7 @@ func (c *JWKSCache) KeyFor(ctx context.Context, kid string) (crypto.PublicKey, e
 		c.fetchedAt = time.Now()
 	}
 	c.lastErr = err
+	c.lastAttempt = time.Now()
 	if forced {
 		c.lastForced = time.Now()
 	}
@@ -218,6 +255,12 @@ func (c *JWKSCache) fetchKeys(ctx context.Context) (map[string]crypto.PublicKey,
 			// the requested kid happens to be this one.
 			continue
 		}
+		if k.Kid == "" {
+			// A key with no kid can never be looked up by KeyFor (kid is
+			// required there), so storing it under the empty string would
+			// only create an unreachable dead entry.
+			continue
+		}
 		keys[k.Kid] = pub
 	}
 	return keys, nil
@@ -237,7 +280,12 @@ func (c *JWKSCache) fetchJSON(ctx context.Context, url string, out any) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("unexpected status %d from %s", resp.StatusCode, url)
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	// The body is untrusted content from a URL derived from config or from
+	// that config's own response; a compromised or malicious endpoint must
+	// not be able to stream an unbounded body into this process. A body that
+	// hits the cap fails JSON decoding as truncated input, so no separate
+	// truncation check is needed.
+	return json.NewDecoder(io.LimitReader(resp.Body, maxJWKSResponseBytes)).Decode(out)
 }
 
 // discoveryURLFor builds the OIDC discovery URL for issuer. It owns the
@@ -258,7 +306,7 @@ func discoveryURLFor(issuer string) (string, error) {
 	if u.Host == "" {
 		return "", fmt.Errorf("httpauth: issuer %q has no host", issuer)
 	}
-	if u.RawQuery != "" {
+	if u.RawQuery != "" || u.ForceQuery {
 		return "", fmt.Errorf("httpauth: issuer %q must not carry a query", issuer)
 	}
 	if u.Fragment != "" {
@@ -295,9 +343,25 @@ func decodeRSAPublicKey(k jwk) (*rsa.PublicKey, error) {
 	if len(nBytes) == 0 || len(eBytes) == 0 {
 		return nil, fmt.Errorf("httpauth: jwk %q has empty n or e", k.Kid)
 	}
+	// e must fit in a Go int (rsa.PublicKey.E's type). int(int64(...)) is
+	// undefined for values over 64 bits and truncates further on 32-bit
+	// platforms, silently producing a garbage exponent instead of failing;
+	// capping the byte length first and then bounding the parsed value keeps
+	// this a decode error instead.
+	if len(eBytes) > 4 {
+		return nil, fmt.Errorf("httpauth: jwk %q has oversized e", k.Kid)
+	}
+	eInt := new(big.Int).SetBytes(eBytes)
+	if !eInt.IsInt64() {
+		return nil, fmt.Errorf("httpauth: jwk %q has invalid e", k.Kid)
+	}
+	e64 := eInt.Int64()
+	if e64 < 3 || e64 > (1<<31-1) {
+		return nil, fmt.Errorf("httpauth: jwk %q has out-of-range e", k.Kid)
+	}
 	return &rsa.PublicKey{
 		N: new(big.Int).SetBytes(nBytes),
-		E: int(new(big.Int).SetBytes(eBytes).Int64()),
+		E: int(e64),
 	}, nil
 }
 
@@ -320,9 +384,21 @@ func decodeECPublicKey(k jwk) (*ecdsa.PublicKey, error) {
 	if len(xBytes) == 0 || len(yBytes) == 0 {
 		return nil, fmt.Errorf("httpauth: jwk %q has empty x or y", k.Kid)
 	}
+	// JWK EC coordinates are fixed-width, big-endian encodings sized to the
+	// curve (RFC 7518 §6.2.1.2/6.2.1.3): a coordinate of the wrong length is
+	// already malformed input, independent of the on-curve check below.
+	coordSize := (curve.Params().BitSize + 7) / 8
+	if len(xBytes) != coordSize || len(yBytes) != coordSize {
+		return nil, fmt.Errorf("httpauth: jwk %q has coordinate length %d/%d, want %d", k.Kid, len(xBytes), len(yBytes), coordSize)
+	}
+	x := new(big.Int).SetBytes(xBytes)
+	y := new(big.Int).SetBytes(yBytes)
+	if !curve.IsOnCurve(x, y) {
+		return nil, fmt.Errorf("httpauth: jwk %q point is not on curve %q", k.Kid, k.Crv)
+	}
 	return &ecdsa.PublicKey{
 		Curve: curve,
-		X:     new(big.Int).SetBytes(xBytes),
-		Y:     new(big.Int).SetBytes(yBytes),
+		X:     x,
+		Y:     y,
 	}, nil
 }

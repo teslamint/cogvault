@@ -12,6 +12,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -319,11 +320,227 @@ func TestDiscoveryURLForJoinsPathCorrectly(t *testing.T) {
 	}
 }
 
+// TestJWKSRejectsHTTPSToHTTPRedirect proves the https check on jwks_uri
+// cannot be bypassed by a redirect: the discovered jwks_uri itself is https
+// (so it passes the scheme check), but the https endpoint responds with a
+// 302 to a plaintext target. The plaintext server's hit counter proves the
+// redirect was never followed.
+func TestJWKSRejectsHTTPSToHTTPRedirect(t *testing.T) {
+	var plaintextHits int64
+	plaintextSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt64(&plaintextHits, 1)
+		fmt.Fprint(w, `{"keys":[]}`)
+	}))
+	defer plaintextSrv.Close()
+
+	var tlsSrv *httptest.Server
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `{"jwks_uri":"%s/jwks.json"}`, tlsSrv.URL)
+	})
+	mux.HandleFunc("/jwks.json", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, plaintextSrv.URL+"/jwks.json", http.StatusFound)
+	})
+	tlsSrv = httptest.NewTLSServer(mux)
+	defer tlsSrv.Close()
+
+	cache := NewJWKSCache(tlsSrv.URL, time.Hour, tlsSrv.Client())
+	if _, err := cache.KeyFor(context.Background(), "any-kid"); err == nil {
+		t.Fatal("KeyFor: want error when jwks_uri redirects to http, got nil")
+	}
+	if got := atomic.LoadInt64(&plaintextHits); got != 0 {
+		t.Errorf("plaintext server hits = %d, want 0 (redirect must not be followed)", got)
+	}
+}
+
+// TestJWKSRejectsOversizedBody proves fetchJSON bounds how much of a
+// response body it will read: a jwks.json body far larger than the cap must
+// fail decoding rather than being read in full.
+func TestJWKSRejectsOversizedBody(t *testing.T) {
+	stub := newStubServerWithJWKSBody(t, func(w http.ResponseWriter) {
+		fmt.Fprint(w, `{"keys":[{"kty":"RSA","kid":"`)
+		fmt.Fprint(w, strings.Repeat("a", maxJWKSResponseBytes+1024))
+		fmt.Fprint(w, `"}]}`)
+	})
+	cache := NewJWKSCache(stub.srv.URL, time.Hour, stub.srv.Client())
+
+	if _, err := cache.KeyFor(context.Background(), "any-kid"); err == nil {
+		t.Fatal("KeyFor: want error for oversized jwks body, got nil")
+	}
+}
+
+// newStubServerWithJWKSBody is like newStubServer but lets the caller write
+// an arbitrary jwks.json response body, for tests that need to control the
+// body's size or shape rather than serve a well-formed key set.
+func newStubServerWithJWKSBody(t *testing.T, writeBody func(w http.ResponseWriter)) *stubServer {
+	t.Helper()
+	s := &stubServer{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt64(&s.discoveryHits, 1)
+		fmt.Fprintf(w, `{"jwks_uri":"%s/jwks.json"}`, s.srv.URL)
+	})
+	mux.HandleFunc("/jwks.json", func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt64(&s.jwksHits, 1)
+		writeBody(w)
+	})
+	s.srv = httptest.NewTLSServer(mux)
+	t.Cleanup(s.srv.Close)
+	return s
+}
+
+// TestJWKSSkipsAndRejectsMalformedKeys is a table-style test covering the
+// skip-not-fatal and reject-single-key paths that TestJWKSSkipsUnsupportedKeyTypeWithoutFailingFetch
+// alone did not exercise: every prior test JWK set use to "sig", so an
+// inverted use check would still have passed. It also covers the M1 (RSA e
+// overflow) and M2 (EC point not on curve) decode fixes.
+func TestJWKSSkipsAndRejectsMalformedKeys(t *testing.T) {
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa.GenerateKey: %v", err)
+	}
+	ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("ecdsa.GenerateKey: %v", err)
+	}
+
+	encOnly := rsaJWK("enc-1", &rsaKey.PublicKey)
+	encOnly.Use = "enc"
+
+	unknownCurve := ecJWK("unknown-crv-1", &ecKey.PublicKey)
+	unknownCurve.Crv = "P-999"
+
+	emptyCoords := testJWK{Kty: "EC", Use: "sig", Kid: "empty-coord-1", Crv: "P-256"}
+
+	oversizedE := rsaJWK("oversized-e-1", &rsaKey.PublicKey)
+	oversizedE.E = b64([]byte{1, 2, 3, 4, 5})
+
+	offCurve := testJWK{
+		Kty: "EC",
+		Use: "sig",
+		Kid: "off-curve-1",
+		Crv: "P-256",
+		X:   b64(big.NewInt(1).FillBytes(make([]byte, 32))),
+		Y:   b64(big.NewInt(1).FillBytes(make([]byte, 32))),
+	}
+
+	stub := newStubServer(t, []testJWK{
+		rsaJWK("good-1", &rsaKey.PublicKey),
+		encOnly,
+		unknownCurve,
+		emptyCoords,
+		oversizedE,
+		offCurve,
+	})
+	cache := NewJWKSCache(stub.srv.URL, time.Hour, stub.srv.Client())
+
+	if _, err := cache.KeyFor(context.Background(), "good-1"); err != nil {
+		t.Fatalf("KeyFor(good-1): control key with sibling malformed keys present: %v", err)
+	}
+
+	for _, kid := range []string{"enc-1", "unknown-crv-1", "empty-coord-1", "oversized-e-1", "off-curve-1"} {
+		t.Run(kid, func(t *testing.T) {
+			if _, err := cache.KeyFor(context.Background(), kid); err == nil {
+				t.Fatalf("KeyFor(%s): want error (key skipped at decode), got nil", kid)
+			}
+		})
+	}
+}
+
+// TestJWKSFailedFetchFloorSuppressesRetry proves the M3 fix: when the issuer
+// is unreachable (or has never answered successfully), the minimum-refetch
+// floor still bounds retries. Before the fix, fetchedAt stays zero forever
+// on a down issuer, so "fresh" and "forced" were always false and the floor
+// never engaged, letting every KeyFor call drive a fresh round trip.
+func TestJWKSFailedFetchFloorSuppressesRetry(t *testing.T) {
+	var discoveryHits int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt64(&discoveryHits, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	srv := httptest.NewTLSServer(mux)
+	defer srv.Close()
+
+	cache := NewJWKSCache(srv.URL, time.Hour, srv.Client())
+
+	if _, err := cache.KeyFor(context.Background(), "any-kid"); err == nil {
+		t.Fatal("KeyFor: want error from failing issuer, got nil")
+	}
+	if got := atomic.LoadInt64(&discoveryHits); got != 1 {
+		t.Fatalf("discovery hits after first failure = %d, want 1", got)
+	}
+
+	if _, err := cache.KeyFor(context.Background(), "any-kid"); err == nil {
+		t.Fatal("KeyFor: want error from failing issuer, got nil")
+	}
+	if got := atomic.LoadInt64(&discoveryHits); got != 1 {
+		t.Errorf("discovery hits after second failure = %d, want still 1 (floor must suppress retry)", got)
+	}
+}
+
+// TestJWKSLeaderCancellationDoesNotFailOtherWaiters proves the M4 fix: the
+// goroutine that becomes the in-flight fetch leader has its context canceled
+// mid-fetch, but other callers collapsed onto the same fetch (with their own
+// live contexts) must still get the key, not the leader's cancellation
+// error.
+func TestJWKSLeaderCancellationDoesNotFailOtherWaiters(t *testing.T) {
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa.GenerateKey: %v", err)
+	}
+
+	handlerEntered := make(chan struct{})
+	release := make(chan struct{})
+	var srv *httptest.Server
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `{"jwks_uri":"%s/jwks.json"}`, srv.URL)
+	})
+	mux.HandleFunc("/jwks.json", func(w http.ResponseWriter, _ *http.Request) {
+		close(handlerEntered)
+		<-release
+		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []testJWK{rsaJWK("k1", &rsaKey.PublicKey)}})
+	})
+	srv = httptest.NewTLSServer(mux)
+	defer srv.Close()
+
+	cache := NewJWKSCache(srv.URL, time.Hour, srv.Client())
+
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	go func() {
+		_, _ = cache.KeyFor(leaderCtx, "k1")
+	}()
+	<-handlerEntered // the leader is now the in-flight fetcher, blocked on release
+
+	const n = 5
+	var wg sync.WaitGroup
+	results := make([]error, n)
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			_, results[i] = cache.KeyFor(context.Background(), "k1")
+		}(i)
+	}
+	time.Sleep(20 * time.Millisecond) // let the waiters reach the ch-wait select
+	cancelLeader()
+	close(release)
+	wg.Wait()
+
+	for i, err := range results {
+		if err != nil {
+			t.Errorf("waiter %d: KeyFor returned error after leader's context was canceled: %v", i, err)
+		}
+	}
+}
+
 func TestDiscoveryURLForRejectsMalformedIssuer(t *testing.T) {
 	cases := []string{
 		"http://auth.example.com",
 		"https://",
 		"https://auth.example.com/?x=1",
+		"https://auth.example.com/?",
 		"https://auth.example.com/#f",
 		"https://user:pass@auth.example.com",
 	}
