@@ -3,6 +3,7 @@ package httpauth
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,10 @@ import (
 	"testing"
 	"time"
 )
+
+// errValidatorRejected is a sentinel error a stubValidator returns to
+// simulate an oauth validator rejecting a token.
+var errValidatorRejected = errors.New("validator rejected token")
 
 // stubValidator is a test double for TokenValidator. The real implementation
 // arrives in a later unit; this package only depends on the interface.
@@ -110,6 +115,11 @@ func TestBearerMode(t *testing.T) {
 			wantCode:   http.StatusUnauthorized,
 		},
 		{
+			name:       "empty token after the Bearer prefix",
+			authHeader: "Bearer ",
+			wantCode:   http.StatusUnauthorized,
+		},
+		{
 			name:       "token is a prefix of the correct one",
 			authHeader: "Bearer " + correctToken[:len(correctToken)-3],
 			wantCode:   http.StatusUnauthorized,
@@ -159,6 +169,58 @@ func TestBearerMode(t *testing.T) {
 				if got != "Bearer" {
 					t.Fatalf("WWW-Authenticate = %q, want %q (bearer mode must not advertise resource_metadata)", got, "Bearer")
 				}
+			}
+		})
+	}
+}
+
+func TestOAuthMode(t *testing.T) {
+	const publicURL = "https://mcp.example.com"
+	wantChallenge := `Bearer resource_metadata="` + publicURL + `/.well-known/oauth-protected-resource"`
+
+	tests := []struct {
+		name       string
+		authHeader string
+		validator  stubValidator
+	}{
+		{
+			name: "missing Authorization header",
+		},
+		{
+			name:       "validator returns an error",
+			authHeader: "Bearer whatever-the-stub-rejects",
+			validator:  stubValidator{err: errValidatorRejected},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var ran bool
+			cfg := Config{
+				Mode:             "oauth",
+				PublicURL:        publicURL,
+				MaxBodyBytes:     1024,
+				MaxStreamSeconds: 30,
+				Validator:        tt.validator,
+			}
+			h := Middleware(cfg)(sentinelHandler(&ran))
+
+			req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader("{}"))
+			if tt.authHeader != "" {
+				req.Header.Set("Authorization", tt.authHeader)
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if ran {
+				t.Fatal("next handler ran for a rejected oauth request")
+			}
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+			}
+			got := rec.Header().Get("WWW-Authenticate")
+			if got != wantChallenge {
+				t.Fatalf("WWW-Authenticate = %q, want %q", got, wantChallenge)
 			}
 		})
 	}
@@ -326,4 +388,45 @@ func TestStreamDeadline(t *testing.T) {
 			t.Fatalf("handler released too late: elapsed = %v, want ~1s", elapsed)
 		}
 	})
+}
+
+func TestMiddlewarePanicsOnUnusableConfig(t *testing.T) {
+	baseCfg := Config{
+		PublicURL:        "https://mcp.example.com",
+		MaxBodyBytes:     1024,
+		MaxStreamSeconds: 30,
+	}
+
+	tests := []struct {
+		name string
+		cfg  Config
+	}{
+		{
+			name: "empty Mode",
+			cfg:  baseCfg,
+		},
+		{
+			name: "unknown Mode value",
+			cfg:  func() Config { c := baseCfg; c.Mode = "Bearer"; return c }(),
+		},
+		{
+			name: "bearer mode with empty BearerToken",
+			cfg:  func() Config { c := baseCfg; c.Mode = "bearer"; return c }(),
+		},
+		{
+			name: "oauth mode with nil Validator",
+			cfg:  func() Config { c := baseCfg; c.Mode = "oauth"; return c }(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r == nil {
+					t.Error("Middleware did not panic for an unusable config")
+				}
+			}()
+			Middleware(tt.cfg)
+		})
+	}
 }

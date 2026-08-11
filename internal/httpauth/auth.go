@@ -38,11 +38,42 @@ type Config struct {
 
 const bearerPrefix = "Bearer "
 
+// validateConfig checks that cfg is usable and panics with a clear message
+// if it is not. Mode must be one of "none", "bearer", or "oauth" — the zero
+// value "" and any typo (e.g. "Bearer") are rejected rather than silently
+// falling open. "bearer" mode requires a non-empty BearerToken, since an
+// empty configured token would authenticate an empty submitted token.
+// "oauth" mode requires a non-nil Validator, since Middleware dereferences
+// it on every request in that mode.
+func validateConfig(cfg Config) {
+	switch cfg.Mode {
+	case "none":
+	case "bearer":
+		if cfg.BearerToken == "" {
+			panic(`httpauth: Mode "bearer" requires a non-empty BearerToken`)
+		}
+	case "oauth":
+		if cfg.Validator == nil {
+			panic(`httpauth: Mode "oauth" requires a non-nil Validator`)
+		}
+	default:
+		panic(fmt.Sprintf("httpauth: Mode: unknown value %q; expected one of \"none\", \"bearer\", \"oauth\"", cfg.Mode))
+	}
+}
+
 // Middleware returns an http.Handler wrapper that enforces the resource
 // bounds (body size, request Origin, stream deadline) in every mode, and the
 // credential check for "bearer" and "oauth" modes. "none" mode skips only
 // the credential check.
+//
+// Middleware panics if cfg is unusable: Mode must be one of "none", "bearer",
+// or "oauth"; "bearer" mode requires a non-empty BearerToken; "oauth" mode
+// requires a non-nil Validator. This package has no error return to report a
+// misconfiguration through, and turning it into a startup-time panic the
+// operator sees once is strictly safer than a per-request authorization
+// failure on a public endpoint.
 func Middleware(cfg Config) func(http.Handler) http.Handler {
+	validateConfig(cfg)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.ContentLength > 0 && r.ContentLength > cfg.MaxBodyBytes {
@@ -86,6 +117,14 @@ func Middleware(cfg Config) func(http.Handler) http.Handler {
 				}
 				expiresAt = exp
 				hasExpiry = true
+			default:
+				// Defense in depth: validateConfig already rejects any mode
+				// outside {none, bearer, oauth} at construction, so this
+				// should be unreachable. Fail closed rather than fall
+				// through to the wrapped handler if it is ever hit.
+				logRejection("unknown_mode", r)
+				writeUnauthorized(w, cfg)
+				return
 			}
 
 			deadline := time.Now().Add(time.Duration(cfg.MaxStreamSeconds) * time.Second)
