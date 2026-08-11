@@ -736,7 +736,10 @@ Reports, one line per issue as `<kind> <path> <message>`:
 
 - `parse` — the page could not be parsed.
 - `frontmatter` — missing `title`, missing `type`, or, for `type: source`
-  pages, a missing `source_path` or `ingested_at` (§11).
+  pages, a missing `source_path` or `ingested_at` (§11). `_schema.md` is exempt
+  from this check: it defines the page contract rather than being written under
+  it. Its links are still checked. A freshly initialized wiki is therefore
+  lint-clean, which is what makes `--strict` usable from the first run.
 - `broken-link` — a `[[wikilink]]` that resolves to no page. Resolution tries
   `<link>.md`, `sources/<link>.md`, and `<link>` verbatim, then falls back to a
   case-insensitive match on any page's basename.
