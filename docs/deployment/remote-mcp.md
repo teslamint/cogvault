@@ -96,9 +96,12 @@ cogvault does not serve; it only serves the well-known path bare and suffixed
 with `--endpoint-path` alone (not the public URL's own subpath), per the
 bullet above. This is a **caveat, not a breakage**: clients that discover the
 document through the `401` challenge's `resource_metadata` pointer — the route
-the MCP specification defines — or through the bare well-known fallback are
-unaffected either way. Use a path-less `--public-url` in `oauth` mode unless
-you have a specific reason for a subpath deployment.
+the MCP specification defines — are unaffected. Do not count on the bare
+well-known fallback here: a subpath deployment only works behind a
+path-stripping proxy, and a probe to `https://<host>/.well-known/…` sits
+outside the forwarded `/sub/*` prefix, so it never reaches cogvault. Use a
+path-less `--public-url` in `oauth` mode unless you have a specific reason for
+a subpath deployment.
 
 ## 4. Identity provider prerequisites (`oauth` mode)
 
