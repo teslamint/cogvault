@@ -4,6 +4,7 @@ go 1.26.1
 
 require (
 	github.com/adrg/frontmatter v0.2.0
+	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/mark3labs/mcp-go v0.47.0
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/sys v0.47.0
