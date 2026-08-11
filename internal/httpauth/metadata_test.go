@@ -35,6 +35,7 @@ func TestMetadataHandler(t *testing.T) {
 
 		var doc struct {
 			Resource               string   `json:"resource"`
+			ResourceName           string   `json:"resource_name"`
 			AuthorizationServers   []string `json:"authorization_servers"`
 			ScopesSupported        []string `json:"scopes_supported"`
 			BearerMethodsSupported []string `json:"bearer_methods_supported"`
@@ -44,6 +45,9 @@ func TestMetadataHandler(t *testing.T) {
 		}
 		if want := cfg.PublicURL + cfg.EndpointPath; doc.Resource != want {
 			t.Errorf("resource = %q, want %q", doc.Resource, want)
+		}
+		if doc.ResourceName != "cogvault" {
+			t.Errorf("resource_name = %q, want %q", doc.ResourceName, "cogvault")
 		}
 		if len(doc.AuthorizationServers) != 1 || doc.AuthorizationServers[0] != cfg.Issuer {
 			t.Errorf("authorization_servers = %v, want [%q]", doc.AuthorizationServers, cfg.Issuer)

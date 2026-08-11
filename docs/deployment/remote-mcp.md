@@ -79,11 +79,16 @@ Endpoint shapes differ by transport:
   at `/.well-known/oauth-protected-resource` and at that path suffixed with
   `--endpoint-path`; Claude probes the suffixed form first.
 
-**In `oauth` mode, use `--transport http`**: this is a limitation of the
-`oauth`+`sse` combination specifically (not a general `sse` warning) — `sse`'s
-fixed `/sse` path can never match the advertised `resource`
-(`<public-url><endpoint-path>`), and Claude probes the well-known path
-suffixed with the user-entered path.
+**In `oauth` mode, `--transport http` is required — `--transport sse` refuses
+to start** (§6): this is a limitation of the `oauth`+`sse` combination
+specifically (not a general `sse` warning) — `sse`'s fixed `/sse` path can
+never match the advertised `resource` (`<public-url><endpoint-path>`), so a
+conformant client discovering the Protected Resource Metadata document
+through the `WWW-Authenticate` challenge's `resource_metadata` pointer (RFC
+9728 §3.3, which requires the returned `resource` to be identical to the URL
+the client requested) is required to discard it, and the OAuth flow can never
+complete. No amount of documentation works around a combination no conformant
+client can complete.
 
 **In `oauth` mode, prefer a `--public-url` with no path component** (e.g.
 `https://cogvault.example.com`, not `https://cogvault.example.com/sub`).
@@ -131,6 +136,44 @@ real request:
   table, not independently re-verified here). If your identity provider sits
   behind a firewall allowlist, that range needs to reach it too, in addition
   to reaching your `--public-url`.
+- **Leaving `auth.oauth.required_scopes` unset — the documented default — is
+  not a "safer default", it is a narrower check.** With no required scopes
+  configured, authorization reduces to issuer plus audience: any token the
+  provider issued for this resource is accepted, with no per-tool gate on
+  `wiki_write` or `wiki_delete`. `oauth` mode is not inherently safer than
+  `bearer` mode on the write/delete surface unless you also configure
+  `required_scopes` and have your identity provider actually gate scope
+  issuance.
+- **The scope claim name is hardcoded to `scope`** (a space-delimited string
+  or a JSON array, both accepted). If your identity provider emits scopes
+  under a different claim — Azure AD uses `scp` or `roles`, not `scope` — set
+  `required_scopes` and every token will be rejected as
+  `error="insufficient_scope"`: fail-closed, but a silent lockout with no
+  runtime hint pointing at the claim name. Confirm your provider's scope
+  claim name before setting `required_scopes` against it.
+- **The signing-algorithm allowlist is `RS256` and `ES256` only,
+  deliberately.** This is a hardening choice against algorithm-confusion
+  attacks, not an oversight, and it is not planned to widen: neither OAuth
+  2.1 nor RFC 9068 mandates a specific algorithm, so a conformant provider
+  signing with `PS256` or `EdDSA` will have every token rejected. Confirm
+  your provider signs with `RS256` or `ES256` before enabling `oauth` mode.
+- **Immediately after an identity-provider key rotation, a token carrying the
+  new `kid` can be rejected for up to 60 seconds**, even though the provider
+  has already published the new key. `KeyFor`'s forced-refetch floor
+  (`minForcedRefetchInterval`, `internal/httpauth/jwks.go`) bounds how often
+  an unseen `kid` can trigger a fresh JWKS fetch, so a burst of tokens
+  carrying the new key can still hit the stale cache for up to a minute after
+  rotation. This is intentional — a hammering guard, not a bug — but expect a
+  short window of `401`s across a rotation.
+- **Size `auth.oauth.jwks_ttl_seconds` (default 900) against how long your
+  identity provider can be down.** The freshness gate applies to the whole
+  cache, not per-key: once the TTL lapses during a provider outage, *every*
+  `oauth` token starts failing, not only ones carrying a `kid` the cache
+  hasn't seen. It self-heals as soon as the provider answers again, but a
+  short TTL turns a brief provider outage into an availability incident for
+  every client. Raise `jwks_ttl_seconds` if your provider's availability
+  history warrants it; there is no mechanism here that serves a stale key
+  past its TTL.
 
 ## 5. `bearer` mode
 
@@ -166,7 +209,9 @@ verifiable against this repository's code). Choose `bearer` mode knowing this;
 | Condition | Why |
 |---|---|
 | `auth.mode: none` and `--addr` is not a loopback address (`localhost`, `127.0.0.1`, `::1` — matched as literal strings, not resolved through DNS) | `none` mode applies no credential check, so it may only bind where only the local machine can reach it. |
+| `auth.mode: none` and `--public-url` is set | A public URL has no legitimate function in `none` mode; its presence signals unauthenticated tunnel-exposure intent the code cannot see the tunnel for, but can see the contradictory config for. |
 | `auth.mode: oauth` and `--public-url` is unset | The audience/resource cannot be computed. |
+| `auth.mode: oauth` and `--transport sse` | `sse`'s fixed `/sse`/`/message` paths can never match the advertised `resource`; no conformant OAuth client can complete the flow (§3, RFC 9728 §3.3). |
 | `--public-url` is set but not an absolute `https://` URL, or carries userinfo, a trailing slash, a query, or a fragment | Guards the exact-match requirement in §3; userinfo would otherwise leak into the advertised resource, the expected token `aud`, and the `WWW-Authenticate` challenge. |
 | `auth.mode: bearer` and `COGVAULT_BEARER_TOKEN` is unset or under 32 bytes | Refuses a missing or weak credential. |
 | `auth.oauth.audience` is set and disagrees with `<public-url><endpoint-path>` | A confused-deputy misconfiguration is caught at startup instead of silently rejecting every token later. |
@@ -238,3 +283,12 @@ any credential you would not trust with root on this machine.
   the tunnel or network layer — cogvault does not provide it.
 - **Opaque access tokens are unsupported.** `oauth` mode requires a JWT
   access token; see §4.
+
+`auth.max_stream_seconds` (and, in `oauth` mode, an earlier token expiry) is
+enforced as a **socket-level** read/write deadline (`http.ResponseController`
+in `internal/httpauth`), not only a request-context cancellation a blocked
+`Read`/`Write` can't observe. A client trickling a request body a few bytes
+at a time, or one that opens a stream and stops reading it, is cut off at the
+deadline like any other connection — this is what lets `WriteTimeout` stay
+unset on the underlying `*http.Server` (`cmd/cogvault/serve.go`) without
+leaving those two cases unbounded.

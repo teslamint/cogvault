@@ -13,12 +13,18 @@ import (
 // would be an authorization bypass.
 const wellKnownPRMPath = "/.well-known/oauth-protected-resource"
 
+// resourceName is the human-readable name advertised in the Protected
+// Resource Metadata document's resource_name field (RFC 9728 §2, RECOMMENDED).
+// A consent screen that cannot show this falls back to the raw resource URL.
+const resourceName = "cogvault"
+
 // protectedResourceMetadata is the RFC 9728 Protected Resource Metadata
 // document cogvault publishes in "oauth" mode. ScopesSupported is omitted
 // entirely, rather than serialized as an empty array, when cfg.RequiredScopes
 // is empty.
 type protectedResourceMetadata struct {
 	Resource               string   `json:"resource"`
+	ResourceName           string   `json:"resource_name"`
 	AuthorizationServers   []string `json:"authorization_servers"`
 	ScopesSupported        []string `json:"scopes_supported,omitempty"`
 	BearerMethodsSupported []string `json:"bearer_methods_supported"`
@@ -31,6 +37,7 @@ type protectedResourceMetadata struct {
 func MetadataHandler(cfg Config) http.Handler {
 	doc := protectedResourceMetadata{
 		Resource:               cfg.PublicURL + cfg.EndpointPath,
+		ResourceName:           resourceName,
 		AuthorizationServers:   []string{cfg.Issuer},
 		ScopesSupported:        cfg.RequiredScopes,
 		BearerMethodsSupported: []string{"header"},

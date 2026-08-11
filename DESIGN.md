@@ -242,9 +242,13 @@ endpoints and Origin checks). `stdio` calls `server.ServeStdio` directly.
 `sse`/`http` route through `buildServeHandler`, which runs the startup guards
 (SPEC §9.3) before ever listening — `auth.mode: none` refuses a non-loopback
 `--addr` (`isLoopbackAddr` matches `localhost` as a literal string, not
-through DNS resolution); `oauth` mode requires `--public-url`; `bearer` mode
-requires `COGVAULT_BEARER_TOKEN` at least 32 bytes; an explicitly configured
-`auth.oauth.audience` that disagrees with the advertised resource
+through DNS resolution) and refuses a non-empty `--public-url` (a public URL
+has no function in `none` mode and signals tunnel-exposure intent); `oauth`
+mode requires `--public-url` and refuses `--transport sse` (`sse`'s fixed
+`/sse`/`/message` paths can never match the advertised `resource`, so no
+conformant OAuth client can complete the RFC 9728 §3.3 metadata flow); `bearer`
+mode requires `COGVAULT_BEARER_TOKEN` at least 32 bytes; an explicitly
+configured `auth.oauth.audience` that disagrees with the advertised resource
 (`<public-url><endpoint-path>`) is rejected. It then builds `httpauth.Config`
 (wiring the JWKS cache and `OAuthValidator` in `oauth` mode), wraps the `http`
 transport in `exactPathHandler` — mcp-go's `StreamableHTTPServer.ServeHTTP`
@@ -258,9 +262,11 @@ sets `ReadHeaderTimeout=10s` and `IdleTimeout=2m` on the `*http.Server` for
 both network transports — the httpauth stream deadline only starts once a
 handler runs, after headers are parsed, so nothing else bounds a
 slowloris-style client dribbling headers at this public endpoint;
-`WriteTimeout` is deliberately left unset so it doesn't cut off long-lived
-SSE/Streamable HTTP event streams. `validatePublicURL` also rejects userinfo
-(`user:pass@host`) in `--public-url`, alongside the query/fragment/
+`WriteTimeout` is deliberately left unset, since it would apply to the whole
+connection and cut off long-lived SSE/Streamable HTTP event streams — the
+per-request bound those need instead lives in the httpauth middleware's
+socket-level read/write deadline (§2.10). `validatePublicURL` also rejects
+userinfo (`user:pass@host`) in `--public-url`, alongside the query/fragment/
 trailing-slash checks, since it would otherwise leak into the advertised
 resource, the token `aud`, and the `WWW-Authenticate` challenge.
 
@@ -299,11 +305,19 @@ on mismatch), then the mode-specific credential check (`none` skips it;
 delegates to `Validator.Validate`, mapping `ErrInsufficientScope` to `403`
 and everything else to `401`). On success it derives a stream deadline
 (`MaxStreamSeconds` from now, tightened to the token's `exp` when the
-validator reports one) and wraps the request context with it — the Stream
-lifetime bound (CONCEPTS.md). `Middleware` and `Mount` both panic on an
-unusable `Config` (bad `Mode`, empty `BearerToken` in `bearer` mode, nil
-`Validator` in `oauth` mode) so a misconfiguration fails at server
-construction, once, rather than per request.
+validator reports one) — the Stream lifetime bound (CONCEPTS.md). A deadline
+that has already elapsed (an `exp` inside the JWT parser's 60s leeway but
+still in the past) is rejected as `401 invalid_token` rather than handed to
+the handler dead. Otherwise `Middleware` wraps the request context with the
+deadline **and** sets it as a socket-level read/write deadline via
+`http.NewResponseController` — the context alone bounds only code that
+re-checks `ctx.Done()`, not a goroutine already blocked in `r.Body.Read` or a
+`Write` stalled on a full send buffer; a `ResponseWriter` that doesn't
+support socket deadlines (`http.ErrNotSupported`) degrades to the
+context-only bound instead of failing the request. `Middleware` and `Mount`
+both panic on an unusable `Config` (bad `Mode`, empty `BearerToken` in
+`bearer` mode, nil `Validator` in `oauth` mode) so a misconfiguration fails
+at server construction, once, rather than per request.
 
 `Mount` additionally serves the Protected Resource Metadata document
 (CONCEPTS.md) in `oauth` mode, unauthenticated, at exactly two paths matched
@@ -311,7 +325,10 @@ by string equality — `/.well-known/oauth-protected-resource` and that path
 suffixed with `cfg.EndpointPath` (Claude probes the suffixed form first) —
 never a prefix match, which would let any path merely starting with the
 well-known prefix bypass `Middleware`. Every other path, in every mode,
-routes through `Middleware` first.
+routes through `Middleware` first. The document carries a hardcoded
+`resource_name: "cogvault"` (RFC 9728 §2, RECOMMENDED) alongside `resource`,
+so a consent screen has a human-readable name instead of falling back to the
+raw resource URL.
 
 `oauth.go`'s `OAuthValidator` parses and verifies JWTs with
 `github.com/golang-jwt/jwt/v5`, restricted to `RS256`/`ES256`, with `exp`
@@ -323,13 +340,19 @@ per differing identity-provider conventions), returning
 
 `jwks.go`'s `JWKSCache` resolves signing keys by `kid` via OIDC discovery
 (`<issuer>/.well-known/openid-configuration` → `jwks_uri`), enforcing
-`https` on both the issuer and the discovered `jwks_uri`, refusing to follow
-redirects (a compromised issuer 302'ing from `https` to `http` must not be
-followed silently), and capping both response bodies at 1MiB. Concurrent
-misses for the same `kid` collapse onto one in-flight fetch; an unknown `kid`
-on an otherwise-fresh cache forces at most one refetch per
+`https` on both the issuer and the discovered `jwks_uri`, comparing the
+discovery document's `issuer` field against the configured issuer and
+rejecting a mismatch (OIDC Discovery 1.0 §4.3), refusing to follow redirects
+(a compromised issuer 302'ing from `https` to `http` must not be followed
+silently), and capping both response bodies at 1MiB. Concurrent misses for
+the same `kid` collapse onto one in-flight fetch; an unknown `kid` on an
+otherwise-fresh cache forces at most one refetch per
 `minForcedRefetchInterval` (60s), so a stream of unknown-`kid` tokens cannot
-drive unbounded outbound requests to the issuer.
+drive unbounded outbound requests to the issuer. The in-flight fetch's
+`c.fetching`/channel-close cleanup runs in a `defer` registered immediately
+after the channel is created, so a future panic inside the fetch can't leave
+`c.fetching` permanently non-nil and every later `KeyFor` call waiting
+forever on a channel that never closes.
 
 No rejection path in this package logs a credential, a bearer token, or a raw
 JWT — `logRejection` records only a reason class and remote address.

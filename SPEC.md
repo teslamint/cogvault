@@ -410,10 +410,16 @@ Source {
   Bearer` header for a missing credential, or the same header additionally
   carrying `error="invalid_token"` for an invalid one (the `oauth`-mode
   challenge additionally carries `resource_metadata` pointing at the
-  Protected Resource Metadata document in both cases); `403` with
-  `error="insufficient_scope"` for a valid `oauth` token missing a required
-  scope, and for a request whose `Origin` header names neither a loopback
-  origin nor `--public-url`; `413` for a request body over `auth.max_body_mb`.
+  Protected Resource Metadata document in both cases). Two distinct `403`s:
+  `error="insufficient_scope"` with a `WWW-Authenticate` header for a valid
+  `oauth` token missing a required scope; a bare `403` with no
+  `WWW-Authenticate` header at all for a request whose `Origin` header names
+  neither a loopback origin nor `--public-url` — the `insufficient_scope`
+  error code never applies to an `Origin` rejection. `413` for a request
+  whose `Content-Length` header declares a size over `auth.max_body_mb`; a
+  chunked request with no `Content-Length` is instead cut off mid-body by
+  `MaxBytesReader` once it crosses the same limit, which surfaces as a
+  JSON-RPC parse error, not a `413`.
 - `path`: relative to `wiki_dir`.
 - Sentinel → message mapping:
 
