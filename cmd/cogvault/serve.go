@@ -145,13 +145,13 @@ func buildServeHandler(cfg *config.Config, mcpSrv *server.MCPServer, f serveFlag
 	if err != nil {
 		return nil, err
 	}
-	if cfg.Auth.Mode == "none" && !loopback {
+	if cfg.Auth.Mode == config.AuthModeNone && !loopback {
 		return nil, fmt.Errorf("addr: %q is not a loopback address; expected a loopback address (or set auth.mode to \"bearer\" or \"oauth\") when auth.mode is \"none\"", f.addr)
 	}
-	if cfg.Auth.Mode == "none" && f.publicURL != "" {
+	if cfg.Auth.Mode == config.AuthModeNone && f.publicURL != "" {
 		return nil, fmt.Errorf("public-url: %q must not be set when auth.mode is \"none\"; expected no public URL (a public URL has no function in \"none\" mode and signals unauthenticated tunnel exposure; set auth.mode to \"bearer\" or \"oauth\" instead)", f.publicURL)
 	}
-	if cfg.Auth.Mode == "oauth" && f.transport == "sse" {
+	if cfg.Auth.Mode == config.AuthModeOAuth && f.transport == "sse" {
 		return nil, fmt.Errorf("transport: %q is not supported when auth.mode is \"oauth\"; expected \"http\" (the sse transport serves fixed /sse and /message paths, so its protected resource metadata can never advertise the exact URL a conformant OAuth client requested, per RFC 9728 §3.3)", f.transport)
 	}
 
@@ -163,12 +163,12 @@ func buildServeHandler(cfg *config.Config, mcpSrv *server.MCPServer, f serveFlag
 		}
 		publicURL = u.String()
 	}
-	if cfg.Auth.Mode == "oauth" && publicURL == "" {
+	if cfg.Auth.Mode == config.AuthModeOAuth && publicURL == "" {
 		return nil, fmt.Errorf("public-url: must be set when auth.mode is \"oauth\"; expected an absolute https:// URL")
 	}
 
 	var bearerToken string
-	if cfg.Auth.Mode == "bearer" {
+	if cfg.Auth.Mode == config.AuthModeBearer {
 		bearerToken = os.Getenv(bearerTokenEnvVar)
 		if len(bearerToken) < minBearerTokenBytes {
 			return nil, fmt.Errorf("%s: must be set to at least %d bytes when auth.mode is \"bearer\"", bearerTokenEnvVar, minBearerTokenBytes)
@@ -189,7 +189,7 @@ func buildServeHandler(cfg *config.Config, mcpSrv *server.MCPServer, f serveFlag
 		MaxStreamSeconds: cfg.Auth.MaxStreamSeconds,
 	}
 
-	if cfg.Auth.Mode == "oauth" {
+	if cfg.Auth.Mode == config.AuthModeOAuth {
 		resource := publicURL + endpointPath
 		audience, err := resolveAudience(cfg.Auth.OAuth.Audience, resource)
 		if err != nil {
