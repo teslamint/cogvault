@@ -6,13 +6,13 @@ import (
 )
 
 const (
-	actionDigested    = "digested"
-	actionWouldDigest = "would-digest"
-	actionFailed      = "failed"
-	actionRefused     = "refused"
-	actionSkipped     = "skipped"
-	actionDeferred    = "deferred"
-	actionExhausted   = "exhausted"
+	actionDigested     = "digested"
+	actionWouldDigest  = "would-digest"
+	actionFailed       = "failed"
+	actionRefused      = "refused"
+	actionSkipped      = "skipped"
+	actionDeferred     = "deferred"
+	actionExhausted    = "exhausted"
 	actionSourceError  = "source-error"
 	actionArchived     = "archived"
 	actionWouldArchive = "would-archive"
