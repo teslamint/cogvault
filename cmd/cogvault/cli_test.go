@@ -616,6 +616,7 @@ func TestServePublicURLValidation(t *testing.T) {
 		{"query", "https://mcp.example.com?x=1"},
 		{"fragment", "https://mcp.example.com#frag"},
 		{"empty host", "https:///mcp"},
+		{"userinfo", "https://user:pass@mcp.example.com"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -643,6 +644,24 @@ func TestServePublicURLValidation(t *testing.T) {
 			t.Errorf("unexpected error for a valid --public-url with a path: %v", err)
 		}
 	})
+}
+
+// TestNewHTTPServerHasReadHeaderTimeout proves the *http.Server serving the
+// sse and http transports bounds the pre-handler header-read phase: the
+// httpauth stream deadline only starts once the handler runs, so nothing
+// else stops a slowloris-style client from holding a connection open
+// indefinitely on this deliberately public endpoint.
+func TestNewHTTPServerHasReadHeaderTimeout(t *testing.T) {
+	srv := newHTTPServer("localhost:0", http.NotFoundHandler())
+	if srv.ReadHeaderTimeout <= 0 {
+		t.Errorf("ReadHeaderTimeout = %v, want > 0", srv.ReadHeaderTimeout)
+	}
+	if srv.IdleTimeout <= 0 {
+		t.Errorf("IdleTimeout = %v, want > 0", srv.IdleTimeout)
+	}
+	if srv.WriteTimeout != 0 {
+		t.Errorf("WriteTimeout = %v, want 0 (unset): a non-zero value would cut off long-lived SSE/Streamable HTTP event streams", srv.WriteTimeout)
+	}
 }
 
 // TestServeAudienceResolution unit-tests resolveAudience directly: the

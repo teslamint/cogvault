@@ -28,6 +28,19 @@ const bearerTokenEnvVar = "COGVAULT_BEARER_TOKEN"
 // credential.
 const minBearerTokenBytes = 32
 
+// readHeaderTimeout bounds how long the http.Server will wait for a client
+// to finish sending request headers. The httpauth middleware's stream
+// deadline only starts once the handler runs, i.e. after headers are fully
+// parsed, so nothing else bounds this phase. Without it, a slowloris-style
+// client dribbling headers at this deliberately public endpoint can hold a
+// connection and goroutine open indefinitely.
+const readHeaderTimeout = 10 * time.Second
+
+// idleTimeout closes keep-alive connections that sit idle between requests,
+// bounding the same class of resource exhaustion as readHeaderTimeout for
+// connections that did complete a request.
+const idleTimeout = 2 * time.Minute
+
 func newServeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "serve",
@@ -79,9 +92,24 @@ func runServe(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		cmd.Printf("%s server listening on %s\n", transport, addr)
-		return (&http.Server{Addr: addr, Handler: handler}).ListenAndServe()
+		return newHTTPServer(addr, handler).ListenAndServe()
 	default:
 		return fmt.Errorf("--transport: %q not supported; use \"stdio\", \"sse\", or \"http\"", transport)
+	}
+}
+
+// newHTTPServer constructs the *http.Server used for the "sse" and "http"
+// transports. WriteTimeout is deliberately left unset: it would cut off the
+// long-lived SSE and Streamable HTTP event streams these transports serve,
+// which can legitimately stay open far longer than a single request-response
+// round trip. The per-stream deadline that bounds those instead lives in the
+// httpauth middleware, which runs after headers are already parsed.
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: readHeaderTimeout,
+		IdleTimeout:       idleTimeout,
 	}
 }
 
@@ -247,6 +275,9 @@ func validatePublicURL(raw string) (*url.URL, error) {
 	}
 	if u.Scheme != "https" || u.Host == "" {
 		return nil, fmt.Errorf("public-url: %q is not an absolute https:// URL; expected a scheme-qualified https URL", raw)
+	}
+	if u.User != nil {
+		return nil, fmt.Errorf("public-url: %q must not carry userinfo; expected no \"user:pass@\" component", raw)
 	}
 	if u.RawQuery != "" || u.ForceQuery {
 		return nil, fmt.Errorf("public-url: %q must not carry a query; expected no \"?\" component", raw)
