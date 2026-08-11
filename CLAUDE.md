@@ -35,6 +35,8 @@ Read these non-obvious invariants before editing:
 - `docs/deviations/`: committed post-approval behavior addenda that authorize separately approved remediation plans.
 - `docs/plans/`: non-canonical working notes; useful for execution context, but stale-prone and never higher priority than canon.
 - `docs/specs/2026-07-22-refound-capture-pipeline-design.md`: approved v2 refounding design that complements, not overrides, `SPEC.md`/`DESIGN.md`.
+- `docs/specs/2026-08-11-remote-mcp-server-design.md`: approved remote MCP server design (transport, `internal/httpauth` authorization boundary) that complements, not overrides, `SPEC.md`/`DESIGN.md`.
+- `docs/deployment/remote-mcp.md`: operator-facing deployment guide for the `sse`/`http` transports — tunnel setup, `--public-url`, identity-provider prerequisites, startup guards, and the security posture; referenced by Working Context invariant 6.
 - `docs/context/project-background.md`: neutral background, archaeology, rejected alternatives, and historical v1 context.
 - `docs/decisions/0022-repository-working-conventions.md`: neutral owner for repository-wide completion and verification conventions; `docs/decisions/0023-stale-agent-convention-reconciliation.md` resolves two stale agent-only rules.
 

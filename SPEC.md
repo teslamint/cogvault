@@ -47,6 +47,8 @@ directories the ingest pipeline reads directly (0021).
 - Watch mode / resident daemon (batch + launchd chosen instead).
 - Periodic `cogvault digest` command.
 - vector search, ontology graph, `ResolveLink`.
+- General git auto-commit. `wiki_delete` auto-commits its own deletion
+  (§8.8); `wiki_write` and `cogvault ingest` still never commit.
 
 ---
 
