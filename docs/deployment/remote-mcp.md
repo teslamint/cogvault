@@ -111,9 +111,18 @@ a subpath deployment.
 ## 4. Identity provider prerequisites (`oauth` mode)
 
 `auth.mode: oauth` makes cogvault an OAuth 2.1 **resource server**: it
-validates tokens, it does not issue them. Confirm all of the following before
-turning it on — cogvault cannot detect a failure of these until the first
-real request:
+validates tokens, it does not issue them. The dotted names below are nested
+keys in `~/.config/cogvault/config.yaml`; the minimum runnable form is:
+
+```yaml
+auth:
+  mode: oauth
+  oauth:
+    issuer: https://issuer.example.com
+```
+
+Confirm all of the following before turning it on — cogvault cannot detect a
+failure of these until the first real request:
 
 - **The provider must issue JWT access tokens.** Opaque tokens are
   **unsupported in this release** — `internal/httpauth/oauth.go` parses and
@@ -179,6 +188,15 @@ real request:
 
 For Claude Code and other local/single-operator use, `auth.mode: bearer` is
 simpler than running an identity provider: a single static shared secret.
+
+Select the mode in `~/.config/cogvault/config.yaml`. The key is nested, and the
+server refuses to start with `--public-url` under the default `auth.mode: none`
+(see §6), so this edit is required, not optional:
+
+```yaml
+auth:
+  mode: bearer
+```
 
 Generate a high-entropy token and export it as `COGVAULT_BEARER_TOKEN` before
 starting the server — cogvault reads it **only** from that environment
