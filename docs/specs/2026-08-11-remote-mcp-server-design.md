@@ -99,7 +99,9 @@ authorization-code flow without the user editing any configuration.
 - MCP tool annotations (`readOnlyHint`, `destructiveHint`) on all seven tools.
 - Config schema additions under a new `auth:` block, with the bearer token read
   from an environment variable and never from the config file.
-- Deployment documentation for exposing the server through an HTTPS tunnel.
+- Deployment documentation for exposing the server through an HTTPS tunnel,
+  including an explicit statement that cogvault provides no recovery from a
+  compromised credential and that backups are the operator's responsibility.
 - Canonical documentation updates: `SPEC.md` §3.1, §8, §9; `DESIGN.md` §2.8,
   §2.9, and a new component section; `CONCEPTS.md`.
 
@@ -174,8 +176,14 @@ transport exists.
 
 Request flow in `oauth` mode:
 
-1. Request arrives at the mux. `/.well-known/oauth-protected-resource` (and its
-   RFC 9728 path-suffixed form) is served unauthenticated.
+1. Request arrives at the mux. Exactly two paths are served unauthenticated:
+   `/.well-known/oauth-protected-resource` and its RFC 9728 path-suffixed form
+   `/.well-known/oauth-protected-resource<endpoint-path>`. The match is
+   **exact-string, never prefix** — a near-miss such as
+   `/.well-known/oauth-protected-resource-x` or
+   `/.well-known/oauth-protected-resource/../mcp` enters the middleware like
+   any other path. A prefix match here would be an authorization bypass, so a
+   negative test covers it.
 2. Any other path enters the middleware. A missing or malformed
    `Authorization: Bearer <jwt>` header yields `401` with
    `WWW-Authenticate: Bearer resource_metadata="<public-url>/.well-known/oauth-protected-resource"`.
@@ -206,6 +214,12 @@ Four properties of this flow are requirements, not incidental:
 - **Credentials never reach the logs.** No log line may contain an
   `Authorization` header value, a bearer token, or a raw JWT. Rejections log
   the reason class and the remote address only.
+- **`Origin` is validated when present.** The MCP Streamable HTTP transport
+  requires servers to check `Origin` as a DNS-rebinding defense. A request
+  carrying an `Origin` that is neither the configured `--public-url` nor a
+  loopback origin is rejected with `403`. A request with no `Origin` header —
+  the normal shape for the server-to-server calls Claude and ChatGPT make — is
+  unaffected.
 
 ## Interface
 
@@ -254,21 +268,47 @@ in `internal/config`:
 - `auth.max_body_mb` or `auth.oauth.jwks_ttl_seconds` zero or negative → error,
   matching the existing `max_file_size_mb` rejection style in
   `internal/config`.
-- `mode: oauth` with an empty `issuer` or `audience` → error.
+- `mode: oauth` with an empty `issuer` → error.
 - `issuer` that is not an absolute `https://` URL → error.
+- `jwks_uri` from OIDC discovery that is not `https://` → error. The issuer is
+  trusted config, but its discovery document is fetched content; an `http://`
+  `jwks_uri` would let a network attacker supply signing keys and forge tokens.
+- `--public-url` that is not an absolute `https://` URL, or that carries a
+  trailing slash, query, or fragment → error. This value flows verbatim into
+  both the `WWW-Authenticate` challenge and the PRM `resource`, so it gets the
+  same rigor as `issuer`.
+- `audience` explicitly set to something other than `<public-url><endpoint-path>`
+  → error (see above).
 - `mode: none` with a non-loopback `--addr` → startup error (S5).
 - `mode: oauth` with no `--public-url` → startup error.
+- `mode: bearer` with a `COGVAULT_BEARER_TOKEN` shorter than 32 bytes →
+  startup error. The comparison is constant-time, but nothing else bounds an
+  online guessing attack across a public tunnel, and this release ships no rate
+  limiting (Open Decision D5).
 
 ### Protected Resource Metadata response
 
 ```json
 {
-  "resource": "<public-url>/mcp",
+  "resource": "<public-url><endpoint-path>",
   "authorization_servers": ["<issuer>"],
   "scopes_supported": ["<required_scopes...>"],
   "bearer_methods_supported": ["header"]
 }
 ```
+
+The `resource` value is built from `--endpoint-path`, not a hardcoded `/mcp`.
+
+**The `resource` and `audience` values must be identical.** RFC 8707 clients
+request a token for the advertised `resource`; the validator checks the
+returned `aud`. If the two disagree, every token is rejected as wrong-audience
+and the failure is indistinguishable from an expired token at the client.
+`auth.oauth.audience` therefore **defaults to** `<public-url><endpoint-path>`,
+and an explicitly configured value that differs from it is a startup error
+rather than a silent runtime rejection. Keeping the audience resource-specific
+is also the only defense against a confused deputy: a broad IdP-default
+audience would let a token minted for an unrelated application authorize wiki
+writes here.
 
 ### Tool annotations
 
@@ -291,7 +331,10 @@ only: a `map[kid]crypto.PublicKey` with a fetch timestamp, a TTL from
 `auth.oauth.jwks_ttl_seconds` (default 900), and a minimum 60-second interval
 between forced refetches so an attacker cannot drive unbounded outbound
 requests with unknown `kid` values. Concurrent requests that miss the cache
-collapse onto a single in-flight fetch rather than each issuing one.
+collapse onto a single in-flight fetch via a `sync.Mutex`-guarded in-flight
+marker — named explicitly because "at most once per interval" without a
+primitive invites N concurrent refetches under a burst of unknown-`kid`
+requests.
 
 ## Integration
 
@@ -314,6 +357,15 @@ collapse onto a single in-flight fetch rather than each issuing one.
   - `SPEC.md` §8.5: the note claiming mcp-go does not set
     `additionalProperties:false` is stale; `internal/mcp/server.go` now applies
     `noExtra` to every tool. Fixed here for the same reason.
+  - `SPEC.md` §1.2 says "MCP stdio server: six tools (read, write, list,
+    search, scan, parse)". Both halves are now wrong — three transports, seven
+    tools. Fixed here.
+  - `CLAUDE.md` Working Context invariant 6 reads "Deletion stays unsafe
+    without auto-commit, so there is no `wiki_delete`". The tool exists and
+    auto-commits (`internal/mcp/tools.go:119`). This is a briefing that
+    actively misleads any agent reading it, so it is corrected here rather
+    than deferred — and the correction must state what the P0 risk analysis
+    established: the auto-commit does not make the wiki recoverable.
   - `SPEC.md` §3.1: add the `auth:` block. §9: add the new `serve` flags.
   - `DESIGN.md` §2.8 (mcp) and §2.9 (cmd), plus a new component section for
     `internal/httpauth`.
@@ -347,6 +399,16 @@ for the new package. Unit tests reach no network — the JWKS endpoint is a loca
     sink (asserted against a captured `slog` handler)
 - Protected Resource Metadata handler returns the documented JSON at both the
   bare and path-suffixed well-known paths, and stays reachable without a token.
+  Its `resource` reflects a non-default `--endpoint-path`.
+- Negative routing test: near-miss well-known paths
+  (`/.well-known/oauth-protected-resource-x`,
+  `/.well-known/oauth-protected-resource/../mcp`) are **not** served
+  unauthenticated and return `401` under `mode: bearer`.
+- `Origin` handling: a foreign `Origin` returns `403`; an absent `Origin`
+  passes; the configured `--public-url` origin passes.
+- Startup validation table test: short bearer token, `http://` public URL,
+  public URL with a trailing slash, an `audience` that disagrees with the
+  advertised `resource`, and a non-`https` `jwks_uri` each refuse to start.
 - `cmd/cogvault` tests: `--transport http` starts and serves; an unknown
   transport value errors; the `mode: none` plus non-loopback address
   combination refuses to start **for both `http` and `sse`**; `mode: oauth`
@@ -367,7 +429,7 @@ for the new package. Unit tests reach no network — the JWKS endpoint is a loca
 
 | Risk | Mitigation |
 |---|---|
-| Exposing `wiki_write`/`wiki_delete` to the internet; a token leak means wiki loss | The S5 startup guard blocks the worst misconfiguration on both network transports. `wiki_delete` already auto-commits to git via `gitAutoCommit` (`internal/mcp/tools.go:129`) when the wiki is a repository, so deletions are recoverable there. Documented explicitly in the deployment section. |
+| **A leaked credential can destroy the wiki irrecoverably.** | Partially mitigated, and the residue is accepted rather than hidden. The S5 startup guard blocks the worst misconfiguration on both network transports, and the credential itself is the access boundary. But there is **no recovery path in cogvault**: `wiki_write` overwrites unconditionally and does not commit, and the cheapest total-destruction path for an attacker is overwriting every page rather than deleting it. The existing `gitAutoCommit` (`internal/mcp/tools.go:129`) fires **only** from `handleWikiDelete`, and nothing anywhere in `internal/` or `cmd/` commits on write or on ingest — so a delete-commit typically records the removal of content that was never tracked, recovering nothing. Backups are therefore an operator precondition, stated as such in the deployment section, not a property of this feature. See Open Decision D6. |
 | Bearer tokens are guessable under sustained brute force, and the server has no rate limiting | The token is expected to be high-entropy and machine-generated; the deployment docs say so and give a generation command. Rate limiting is not implemented — recorded as Open Decision D5 rather than silently omitted. |
 | Claude Code stores the bearer token as plaintext config in `~/.claude.json`, unlike OAuth client secrets which it puts in the keychain | Out of cogvault's control. Documented in the deployment section so the user chooses bearer mode knowingly; OAuth mode avoids it. |
 | Hand-rolled JWT validation is a classic source of vulnerabilities | Use `github.com/golang-jwt/jwt/v5` with an explicit allowed-algorithms list (`RS256`, `ES256`) rather than trusting the token header; never accept `none`. Negative tests above cover each rejection path. |
@@ -422,6 +484,14 @@ for the new package. Unit tests reach no network — the JWKS endpoint is a loca
      step, the `--public-url` requirement, the identity-provider prerequisites
      (JWT access tokens, issuer, audience), and the token-leak risk, with no
      step left as "configure appropriately."
+10. The documentation states plainly that cogvault provides no recovery from a
+    compromised credential, and names backups as an operator precondition.
+    - **Measured by**: reviewer rubric — the deployment section says `wiki_write`
+      overwrites without committing, says the `wiki_delete` auto-commit does not
+      make the wiki recoverable, and gives a concrete backup instruction. A
+      section that implies git makes the wiki recoverable fails this criterion.
+11. Near-miss well-known paths are not an authorization bypass.
+    - **Measured by**: `go test ./internal/httpauth/ -run TestWellKnownExactMatch -v`
 
 ## Open Decisions
 
@@ -443,3 +513,11 @@ for the new package. Unit tests reach no network — the JWKS endpoint is a loca
   release. Whether it is needed depends on whether the deployment sits at a
   stable public URL or behind a Tailscale-style private tunnel, which follows
   from the deployment choice. _Resolved by: user, after first deployment._
+- **D6 — Whether cogvault should auto-commit on write, or otherwise provide a
+  real recovery path.** The P0 risk analysis established that the wiki has no
+  recovery from a compromised credential: `wiki_write` overwrites without
+  committing, and nothing commits on ingest. Adding auto-commit on write is a
+  behavior change well beyond a transport feature, and `docs/decisions/0021`
+  treats deletion safety as a settled boundary, so it is not folded in here.
+  This release ships the honest documentation instead. _Resolved by: user, as
+  its own feature._
