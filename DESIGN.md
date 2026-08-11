@@ -202,12 +202,27 @@ printing is the CLI's job.
 
 ### 2.8 mcp
 
-`server.go`/`tools.go`: the `wiki_search` tool drops the `scope` parameter; tool
-descriptions say "wiki root" instead of "vault". `handleWikiSearch` calls
-`idx.Search(query, limit)`. mcp-go does not enforce `additionalProperties:false`,
-so a stray `scope` arg is ignored, not rejected — the enforceable contract is
-schema absence of `scope`. Instructions/`mapError`/write-then-index otherwise
-unchanged.
+`server.go`: registers seven tools (`wiki_read`, `wiki_write`, `wiki_delete`,
+`wiki_list`, `wiki_search`, `wiki_scan`, `wiki_parse`) via `registerTools`,
+each wrapped in `noExtra`, which sets `InputSchema.AdditionalProperties =
+false` on every tool's advertised schema (`mcp.NewTool` itself does not).
+mcp-go's dispatcher never validates call arguments against the schema, so this
+changes only what `tools/list` advertises, not runtime enforcement — a stray
+argument (e.g. the `scope` param `wiki_search` no longer takes) is still
+silently ignored by the handler, not rejected. Every tool also declares
+`ReadOnlyHintAnnotation`/`DestructiveHintAnnotation` explicitly: `wiki_write`
+and `wiki_delete` are the only two marked non-read-only/destructive; the other
+five are read-only, non-destructive. `IdempotentHint`/`OpenWorldHint` stay at
+`mcp.NewTool`'s library defaults and are not part of this contract.
+
+`tools.go`: `wiki_search` drops the `scope` parameter; tool descriptions say
+"wiki root" instead of "vault". `handleWikiSearch` calls `idx.Search(query,
+limit)`. `handleWikiDelete` calls `store.Delete`, removes the path from the
+index if it was indexed, then `gitAutoCommit` best-effort `git add`s and
+`git commit`s the deletion when `wiki_dir` is a git repository — failures are
+logged, not returned as a tool error (§2.10 covers the authorization layer
+that gates this over the network). Instructions/`mapError`/write-then-index
+otherwise unchanged.
 
 ### 2.9 cmd/cogvault
 
@@ -218,6 +233,97 @@ vault flag is deleted. `wire.go`: `resolveConfigPath(cmd)` + `bootstrap(configPa
 flow (SPEC §9.1). `ingest.go` (new): flags → `ingest.RunOptions`, `exec.LookPath`
 for `claude` → `llm.NewClaudeCode`, prints `report.String()`, nonzero exit only on
 run-level failure.
+
+`serve.go`: `serve` takes `--transport` (`stdio` default, `sse`, or `http`),
+`--addr` (default `localhost:8080`, `sse`/`http` only), `--endpoint-path`
+(default `/mcp`, `http` only — normalized to a leading slash, no trailing
+slash), and `--public-url` (required in `oauth` mode; also feeds SSE message
+endpoints and Origin checks). `stdio` calls `server.ServeStdio` directly.
+`sse`/`http` route through `buildServeHandler`, which runs the startup guards
+(SPEC §9.3) before ever listening — `auth.mode: none` refuses a non-loopback
+`--addr` (`isLoopbackAddr` matches `localhost` as a literal string, not
+through DNS resolution); `oauth` mode requires `--public-url`; `bearer` mode
+requires `COGVAULT_BEARER_TOKEN` at least 32 bytes; an explicitly configured
+`auth.oauth.audience` that disagrees with the advertised resource
+(`<public-url><endpoint-path>`) is rejected. It then builds `httpauth.Config`
+(wiring the JWKS cache and `OAuthValidator` in `oauth` mode), wraps the `http`
+transport in `exactPathHandler` — mcp-go's `StreamableHTTPServer.ServeHTTP`
+ignores the path entirely when used as a bare `http.Handler` via
+`server.NewStreamableHTTPServer`, so this restores exact-path matching and
+404s elsewhere — and mounts everything through `httpauth.Mount` (§2.10). The
+`sse` transport keeps mcp-go's default `/sse` and `/message` paths —
+`--endpoint-path` deliberately does not apply to it — and points its message
+endpoint at `--public-url` when set, `http://<addr>` otherwise.
+
+### 2.10 httpauth (new)
+
+```go
+type Config struct {
+    Mode             string   // "none" | "bearer" | "oauth"
+    BearerToken      string
+    PublicURL        string
+    EndpointPath     string
+    MaxBodyBytes     int64
+    MaxStreamSeconds int
+    Validator        TokenValidator  // non-nil only in "oauth" mode
+    Issuer           string
+    RequiredScopes   []string
+}
+func Middleware(cfg Config) func(http.Handler) http.Handler
+func Mount(cfg Config, mcp http.Handler) http.Handler
+func MetadataHandler(cfg Config) http.Handler
+type TokenValidator interface {
+    Validate(ctx context.Context, token string) (expiresAt time.Time, err error)
+}
+func NewOAuthValidator(issuer, audience string, requiredScopes []string, keys *JWKSCache) *OAuthValidator
+func NewJWKSCache(issuer string, ttl time.Duration, client *http.Client) *JWKSCache
+```
+
+**Responsibility**: the entire HTTP access boundary for the `sse` and `http`
+transports (see Resource server, CONCEPTS.md). `Middleware` runs, in order,
+for every request: the `MaxBodyBytes` cap (`413` over it), the `Origin` check
+(`originAllowed` — absent header passes, a loopback origin passes on any
+port/scheme, otherwise scheme+host+port must match `PublicURL` exactly; `403`
+on mismatch), then the mode-specific credential check (`none` skips it;
+`bearer` does a length-then-`subtle.ConstantTimeCompare` match against
+`BearerToken`; `oauth` requires a bearer-format `Authorization` header and
+delegates to `Validator.Validate`, mapping `ErrInsufficientScope` to `403`
+and everything else to `401`). On success it derives a stream deadline
+(`MaxStreamSeconds` from now, tightened to the token's `exp` when the
+validator reports one) and wraps the request context with it — the Stream
+lifetime bound (CONCEPTS.md). `Middleware` and `Mount` both panic on an
+unusable `Config` (bad `Mode`, empty `BearerToken` in `bearer` mode, nil
+`Validator` in `oauth` mode) so a misconfiguration fails at server
+construction, once, rather than per request.
+
+`Mount` additionally serves the Protected Resource Metadata document
+(CONCEPTS.md) in `oauth` mode, unauthenticated, at exactly two paths matched
+by string equality — `/.well-known/oauth-protected-resource` and that path
+suffixed with `cfg.EndpointPath` (Claude probes the suffixed form first) —
+never a prefix match, which would let any path merely starting with the
+well-known prefix bypass `Middleware`. Every other path, in every mode,
+routes through `Middleware` first.
+
+`oauth.go`'s `OAuthValidator` parses and verifies JWTs with
+`github.com/golang-jwt/jwt/v5`, restricted to `RS256`/`ES256`, with `exp`
+mandatory (`jwt.WithExpirationRequired`), `iss`/`aud` pinned at construction,
+and 60s leeway. It additionally requires every scope in `requiredScopes` to
+appear in the token's `scope` claim (space-delimited string or JSON array,
+per differing identity-provider conventions), returning
+`ErrInsufficientScope` when one is missing.
+
+`jwks.go`'s `JWKSCache` resolves signing keys by `kid` via OIDC discovery
+(`<issuer>/.well-known/openid-configuration` → `jwks_uri`), enforcing
+`https` on both the issuer and the discovered `jwks_uri`, refusing to follow
+redirects (a compromised issuer 302'ing from `https` to `http` must not be
+followed silently), and capping both response bodies at 1MiB. Concurrent
+misses for the same `kid` collapse onto one in-flight fetch; an unknown `kid`
+on an otherwise-fresh cache forces at most one refetch per
+`minForcedRefetchInterval` (60s), so a stream of unknown-`kid` tokens cannot
+drive unbounded outbound requests to the issuer.
+
+No rejection path in this package logs a credential, a bearer token, or a raw
+JWT — `logRejection` records only a reason class and remote address.
 
 ---
 
@@ -247,7 +353,11 @@ run 2: Load (valid) → MkdirAll(wiki_dir) → WriteSchema → MkdirAll(dir(db_p
 
 ```
 resolveConfigPath → Load → bootstrap(store/index/adapter) → CheckConsistency(force)
-  → mcp.NewServer(wiki root) → ServeStdio (blocking) → cleanup
+  → mcp.NewServer(wiki root) → transport switch:
+       stdio      → ServeStdio (blocking)
+       sse | http → buildServeHandler (startup guards, httpauth.Config, exact-path
+                     wrapper for http) → httpauth.Mount → http.Server.ListenAndServe (blocking)
+  → cleanup
 ```
 
 ---
@@ -284,8 +394,12 @@ resolveConfigPath → Load → bootstrap(store/index/adapter) → CheckConsisten
 | `ingest/ingest.go` | Runner: scan, hash, digest, validate, write, index, ledger, lock, ctx |
 | `ingest/ledger.go` | `ingest_ledger` DDL + transitions; own DB connection |
 | `ingest/report.go` | Report struct + String() |
-| `mcp/server.go` | MCP server, instructions |
-| `mcp/tools.go` | six tools, mapError, listWithMeta (no scope) |
+| `mcp/server.go` | MCP server, instructions, tool registration + annotations |
+| `mcp/tools.go` | seven tools, mapError, listWithMeta (no scope), gitAutoCommit |
+| `httpauth/auth.go` | Config, Middleware, Mount, credential checks, resource bounds |
+| `httpauth/metadata.go` | Protected Resource Metadata handler |
+| `httpauth/oauth.go` | OAuthValidator (JWT validation via golang-jwt/jwt/v5) |
+| `httpauth/jwks.go` | JWKSCache (OIDC discovery + JWKS fetch, key decode) |
 | `cmd/cogvault/*` | cobra CLI: `--config`, init/search/serve/ingest |
 | `Makefile` | build/install (with adhoc codesign at destination), test, clean |
 | `schema/schema.go` + `default_schema.md` | `go:embed` default schema |
@@ -321,8 +435,9 @@ serialized with other wiki writes.
 | index/sqlite | temp DB; user_version recreation; stat-gate Read-count |
 | llm | fake `claude` in `testdata/bin` (argv/stdin/mode) |
 | ingest | mock `llm.Adapter` + real temp dirs; ledger transitions; lock; ctx |
-| mcp | mcp-go test client; schema has no scope |
-| cmd | in-process cobra; `--config` temp files; ingest via fake `claude` on PATH |
+| mcp | mcp-go test client; schema has no scope; tool annotation coverage |
+| httpauth | `httptest` stub JWKS server + locally generated RSA/EC keys; auth-mode, challenge-shape, and body/Origin/stream-bound unit tests |
+| cmd | in-process cobra; `--config` temp files; ingest via fake `claude` on PATH; `--transport http/sse` startup guards |
 | integration (U9) | backlog/incremental/contention e2e |
 | race | `go test -race ./...` |
 

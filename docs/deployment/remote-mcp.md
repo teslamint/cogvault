@@ -1,0 +1,209 @@
+# Remote MCP deployment
+
+cogvault's MCP server can serve the wiki tools to the hosted Claude apps
+(claude.ai, Desktop, mobile) and to ChatGPT Developer Mode, in addition to a
+local `stdio` client. This document covers the `sse` and `http` (Streamable
+HTTP) transports: how to expose them safely over the internet, and — because
+a valid credential grants full read/write/delete access — what the server
+does and does not protect you from.
+
+See `SPEC.md` §8.1/§9.3 for the tool/CLI contract this implements and
+`DESIGN.md` §2.10 for the `internal/httpauth` package that enforces it.
+
+If you only ever run `cogvault serve` (stdio, the default) for a local MCP
+client such as Claude Code on the same machine, none of this applies — stdio
+has no network boundary.
+
+## 1. What this is for
+
+cogvault runs on hardware you control — your own machine, not a hosted
+service. The Claude apps and ChatGPT connect to your server from vendor cloud
+infrastructure, not from your browser or local network, so the server's
+endpoint must be reachable over the public internet at an `https://` URL. A
+`localhost`/loopback address only accepts connections from the same machine
+and **cannot** work for a hosted client — that is the entire reason a tunnel
+(§2) is necessary.
+
+## 2. Tunnel setup
+
+Expose the local listener (`--addr`, default `localhost:8080`) through an
+`https://` tunnel. cogvault does not terminate TLS itself. Concrete options,
+without endorsing one:
+
+- [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)
+  (Cloudflare Tunnel)
+- [Tailscale Funnel](https://tailscale.com/kb/1223/funnel)
+
+Use a **stable, named tunnel**, not an ephemeral one-off URL. The advertised
+`resource` value (§3) must stay fixed: a Protected Resource Metadata document,
+or a client's already-configured connector, that points at a URL which
+changes on every restart breaks every client that already connected.
+cloudflared's quick/ephemeral tunnels generate a new random hostname on each
+run — use a named tunnel instead.
+
+## 3. `--public-url`
+
+`cogvault serve` never infers its externally visible address — pass it
+explicitly via `--public-url`, e.g. `--public-url https://cogvault.example.com`.
+This is a **vendor requirement**, not a cogvault preference: the value must
+**exactly** match the URL the user types into the Claude/ChatGPT connector
+setup, byte for byte, including any path component. A trailing slash, a
+different subdomain, or `http://` instead of `https://` produces a
+working-looking server that no hosted client can actually reach or
+authenticate against. `--public-url` must be an absolute `https://` URL with
+no trailing slash, query, or fragment (a path component, for a tunnel mounted
+under a subpath, is allowed as long as it doesn't end in `/`).
+
+**The advertised `resource`, the expected token `aud` (in `oauth` mode), and
+the path the server actually answers on are all the same value**:
+`<public-url><endpoint-path>` (`--endpoint-path` defaults to `/mcp`).
+
+Endpoint shapes differ by transport:
+
+- **`http`** serves only at the normalized `--endpoint-path`; any other path
+  returns `404`.
+- **`sse`** keeps mcp-go's fixed `/sse` and `/message` paths —
+  `--endpoint-path` deliberately does not apply to it. The message endpoint a
+  client receives is `https://<public-url>/message?sessionId=<id>` when
+  `--public-url` is set, and `http://<addr>/message?sessionId=<id>`
+  otherwise — so remote SSE requires `--public-url` too, or a remote client is
+  handed a loopback address it cannot reach.
+- **Protected Resource Metadata** (`oauth` mode) is served, unauthenticated,
+  at `/.well-known/oauth-protected-resource` and at that path suffixed with
+  `--endpoint-path`; Claude probes the suffixed form first.
+
+## 4. Identity provider prerequisites (`oauth` mode)
+
+`auth.mode: oauth` makes cogvault an OAuth 2.1 **resource server**: it
+validates tokens, it does not issue them. Confirm all of the following before
+turning it on — cogvault cannot detect a failure of these until the first
+real request:
+
+- **The provider must issue JWT access tokens.** Opaque tokens are
+  **unsupported in this release** — `internal/httpauth/oauth.go` parses and
+  cryptographically verifies a JWT; there is no token-introspection fallback.
+  If your provider issues opaque tokens, `oauth` mode will not work with it.
+- **You supply the issuer URL** (`auth.oauth.issuer`): an absolute `https://`
+  URL with no query, fragment, or userinfo component. cogvault discovers the
+  JWKS endpoint from `<issuer>/.well-known/openid-configuration` and only
+  ever follows an `https://` `jwks_uri`.
+- **The audience must equal the advertised resource.** cogvault defaults
+  `auth.oauth.audience` to `<public-url><endpoint-path>` automatically — leave
+  it unset unless your provider needs the audience configured explicitly on
+  its own side to match. A configured value that disagrees with the resource
+  is a **startup error**, not a silent runtime mismatch.
+- **The authorization server itself must be reachable from the vendor's
+  egress range, not only your MCP server.** Anthropic documents its outbound
+  connections as originating from `160.79.104.0/21`
+  (`claude.com/docs/connectors/building/authentication`, "Network reference"
+  section — this claim is sourced from the approved design spec's evidence
+  table, not independently re-verified here). If your identity provider sits
+  behind a firewall allowlist, that range needs to reach it too, in addition
+  to reaching your `--public-url`.
+
+## 5. `bearer` mode
+
+For Claude Code and other local/single-operator use, `auth.mode: bearer` is
+simpler than running an identity provider: a single static shared secret.
+
+Generate a high-entropy token and export it as `COGVAULT_BEARER_TOKEN` before
+starting the server — cogvault reads it **only** from that environment
+variable, never from a flag or the config file, and requires at least 32 raw
+bytes:
+
+```bash
+export COGVAULT_BEARER_TOKEN=$(head -c 32 /dev/urandom | base64)
+cogvault serve --transport http --public-url https://cogvault.example.com
+```
+
+Configure the client with an `Authorization: Bearer <token>` header carrying
+the same value.
+
+Be aware of where the client stores it: **Claude Code stores a configured
+bearer header value as ordinary configuration text in `~/.claude.json`** —
+plaintext on disk — unlike OAuth client secrets, which Claude Code places in
+the system keychain. That storage behavior is outside cogvault's control (this
+claim describes Claude Code's own behavior, not cogvault's, and is not
+verifiable against this repository's code). Choose `bearer` mode knowing this;
+`oauth` mode avoids it.
+
+## 6. What the server refuses to start on
+
+`cogvault serve` fails fast, before it ever listens, on any of the following
+(`cmd/cogvault/serve.go`, `buildServeHandler` and its helpers):
+
+| Condition | Why |
+|---|---|
+| `auth.mode: none` and `--addr` is not a loopback address (`localhost`, `127.0.0.1`, `::1` — matched as literal strings, not resolved through DNS) | `none` mode applies no credential check, so it may only bind where only the local machine can reach it. |
+| `auth.mode: oauth` and `--public-url` is unset | The audience/resource cannot be computed. |
+| `--public-url` is set but not an absolute `https://` URL, or carries a trailing slash, query, or fragment | Guards the exact-match requirement in §3. |
+| `auth.mode: bearer` and `COGVAULT_BEARER_TOKEN` is unset or under 32 bytes | Refuses a missing or weak credential. |
+| `auth.oauth.audience` is set and disagrees with `<public-url><endpoint-path>` | A confused-deputy misconfiguration is caught at startup instead of silently rejecting every token later. |
+| `--endpoint-path` normalizes to empty (e.g. `/` or `""`) | There would be no meaningful path to serve or advertise. |
+| `--transport` is not one of `stdio`, `sse`, `http` | Fails closed on a typo rather than falling through. |
+
+An error here means the server never bound a socket — there is nothing
+running to shut down.
+
+**Troubleshooting note**: a `401 Unauthorized` on every request can mean the
+credential is wrong, but it can *also* mean `--endpoint-path` is wrong. The
+authorization middleware gates every path except the two Protected Resource
+Metadata paths **before** cogvault's own path-matching wrapper ever runs, so a
+request to the wrong `http` path is rejected as `401`, not the `404` you
+might expect from "no such route." If every request 401s even with a
+credential you're sure is correct, double-check `--endpoint-path` against
+what the client is actually configured to call.
+
+## 7. Security posture
+
+Read this before exposing the server to the internet.
+
+A valid credential — a matching bearer token, or a valid `oauth` token
+carrying the required scopes — grants the **full tool set**, including
+`wiki_write` and `wiki_delete`. There is no read-only credential tier and no
+per-tool scope split narrower than whatever scopes you configure in `oauth`
+mode.
+
+**cogvault provides no recovery from a compromised credential.** Specifically:
+
+- `wiki_write` overwrites the target file unconditionally and does **not**
+  commit to git.
+- Nothing commits to git on write, and nothing commits on `cogvault ingest`
+  either.
+- `wiki_delete` does auto-commit its own deletion — but because nothing else
+  ever committed, that commit typically records the removal of content that
+  was **never tracked** in the first place. It does not hand you a prior
+  version to restore.
+
+In short: git inside this wiki is not a safety net for anything `wiki_write`
+touched, and it is only incidentally a record — never a restore path — for
+what `wiki_delete` removed. An attacker (or a bug, or a mistake) holding a
+valid credential can silently overwrite or delete the entire wiki, and
+cogvault has no built-in way to get it back.
+
+**Backups are the operator's responsibility.** Back up `wiki_dir` outside of
+cogvault, on a schedule independent of cogvault's own delete-only
+auto-commit — for example:
+
+```bash
+# Option A: commit the whole tree yourself, on a schedule (cron/launchd).
+# This is what actually turns "only wiki_delete commits" into a safety net —
+# cogvault will never do this step for you.
+git -C /path/to/wiki_dir add -A && git -C /path/to/wiki_dir commit -m "snapshot $(date -u +%FT%TZ)"
+
+# Option B: an independent copy (swap in your OS's snapshot/backup tool).
+rsync -a --delete /path/to/wiki_dir/ /path/to/backup/wiki_dir-$(date +%F)/
+```
+
+Put one of these on a schedule before exposing `wiki_write`/`wiki_delete` to
+any credential you would not trust with root on this machine.
+
+## 8. Known limits
+
+- **No rate limiting** on repeated authorization failures in this release. A
+  bearer token or JWT is checked in constant time per request, but nothing
+  throttles or locks out a client that fails repeatedly. If sustained
+  brute-force attempts are a concern for your deployment, add throttling at
+  the tunnel or network layer — cogvault does not provide it.
+- **Opaque access tokens are unsupported.** `oauth` mode requires a JWT
+  access token; see §4.

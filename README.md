@@ -103,6 +103,20 @@ cogvault search "your terms"       # full-text search over the wiki
 cogvault serve                     # MCP stdio server (register in your MCP client)
 ```
 
+`cogvault serve` also supports two network transports for remote clients (the
+Claude apps, ChatGPT) or Claude Code over a tunnel — `--transport sse` or
+`--transport http` (Streamable HTTP) — each gated by `auth.mode: none`
+(loopback only), `bearer`, or `oauth`:
+
+```bash
+cogvault serve --transport http --public-url https://cogvault.example.com
+```
+
+Full setup — tunneling, `--public-url`, identity-provider prerequisites, and
+the security posture — is in
+[docs/deployment/remote-mcp.md](docs/deployment/remote-mcp.md); read it
+before exposing either transport to the internet.
+
 ### 5. Schedule zero-touch ingest (launchd)
 
 ```bash

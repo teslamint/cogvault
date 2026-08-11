@@ -29,7 +29,8 @@ directories the ingest pipeline reads directly (0021).
 - `cogvault ingest`: scan sources → hash → digest each source file via the LLM adapter →
   write + index wiki pages → record a per-file outcome in the ledger → print a
   report.
-- MCP stdio server: six tools (read, write, list, search, scan, parse).
+- MCP server: three transports (`stdio`, `sse`, `http`/Streamable HTTP); seven
+  tools (read, write, delete, list, search, scan, parse).
 - CLI: `init`, `search`, `serve`, `ingest`.
 - `internal/llm` adapter interface with a `claudecode` backend (`claude --print`).
 - Single-mode config/storage: absolute `wiki_dir` root, `sources[]`, absolute
@@ -45,7 +46,7 @@ directories the ingest pipeline reads directly (0021).
   verified headless PDF reading works, see 0021 D6).
 - Watch mode / resident daemon (batch + launchd chosen instead).
 - Periodic `cogvault digest` command.
-- `wiki_delete`, auto-commit, vector search, ontology graph, `ResolveLink`.
+- vector search, ontology graph, `ResolveLink`.
 
 ---
 
@@ -114,7 +115,23 @@ exclude: string[]       # scan + index exclusion, relative to wiki_dir. Default:
 exclude_read: string[]  # read + scan + index exclusion, relative to wiki_dir. Default: []
 adapter: string         # default "obsidian". Allowed: "obsidian", "markdown".
 consistency_interval: int  # min seconds between consistency checks. Default: 5.
+auth:                   # HTTP/SSE transport authorization (§8.1, §9.3). Ignored for stdio.
+  mode: string             # "none" (default), "bearer", or "oauth".
+  max_body_mb: int         # request body cap in MB. Default: 4.
+  max_stream_seconds: int  # stream lifetime cap in seconds, applied when no token expiry governs it. Default: 3600.
+  oauth:
+    issuer: string           # required when mode: oauth. Absolute https:// URL of the identity provider.
+    audience: string         # optional. Defaults to the advertised resource (<public-url><endpoint-path>);
+                              # an explicit value that disagrees with it is a startup error.
+    required_scopes: [string]  # optional. Every scope must be present in the token's scope claim.
+    jwks_ttl_seconds: int    # JWKS cache TTL in seconds. Default: 900.
 ```
+
+`auth.max_body_mb`, `auth.max_stream_seconds`, and `auth.oauth.jwks_ttl_seconds`
+reject only negative values. An explicit `0` is indistinguishable from an
+omitted key — both are the Go zero value for a plain `int` — so it takes the
+default rather than erroring; see
+`docs/deviations/2026-08-11-auth-zero-value-indistinguishable-from-absent.md`.
 
 ### 3.2 Path handling
 
@@ -137,6 +154,12 @@ later (0001). Rejected:
 - `db_path` that is a directory-like path.
 - `adapter` outside the allowed list; `llm.backend` other than `claudecode`.
 - `max_file_size_mb` negative (zero or omitted defaults to 32).
+- `auth.mode` outside `none`/`bearer`/`oauth`.
+- `auth.oauth.issuer` empty or not an absolute `https://` URL, when `auth.mode`
+  is `oauth`.
+- `auth.max_body_mb`, `auth.max_stream_seconds`, `auth.oauth.jwks_ttl_seconds`
+  negative (zero or omitted defaults to 4/3600/900 — see the deviation
+  addendum above).
 - Unknown YAML keys (`KnownFields(true)`) and multi-document YAML.
 
 `Config.AllExcluded()` returns the effective scan/index exclusion list. It always
@@ -372,7 +395,24 @@ Source {
 
 ### 8.1 Common rules
 
-- Transport: stdio. Server name `cogvault`.
+- Transport: `stdio` (default), `sse`, or `http` (Streamable HTTP), selected
+  via `cogvault serve --transport` (§9.3). Server name `cogvault`.
+- Authorization (`sse`/`http` only — `stdio` has no network boundary and is
+  never gated): `auth.mode` (§3.1) selects one of three modes. `none` requires
+  a loopback `--addr` and applies no credential check. `bearer` requires an
+  `Authorization: Bearer <token>` header matching `COGVAULT_BEARER_TOKEN`
+  (constant-time compare). `oauth` requires a JWT access token validated
+  against an operator-configured identity provider (issuer, audience,
+  required scopes, signature via JWKS) — opaque access tokens are not
+  supported. See `docs/deployment/remote-mcp.md` for setup and the security
+  posture.
+- Rejection responses (`sse`/`http` only): `401` with a `WWW-Authenticate:
+  Bearer` header for a missing or invalid credential (the `oauth`-mode
+  challenge additionally carries `resource_metadata` pointing at the
+  Protected Resource Metadata document); `403` with
+  `error="insufficient_scope"` for a valid `oauth` token missing a required
+  scope, and for a request whose `Origin` header names neither a loopback
+  origin nor `--public-url`; `413` for a request body over `auth.max_body_mb`.
 - `path`: relative to `wiki_dir`.
 - Sentinel → message mapping:
 
@@ -407,9 +447,13 @@ Non-recursive; title/type/category from the `GetMeta` cache. Errors: `ErrNotFoun
 `[{path, title, type, category, snippet, score}]`. Empty result is not an error.
 
 - **No `scope` parameter** (removed in v2). The input schema does not advertise
-  `scope`. Note: mcp-go does not set `additionalProperties:false`, so a stray
-  `scope` argument is silently **ignored**, not schema-rejected — the contract is
-  simply that `scope` no longer exists.
+  `scope`. `internal/mcp/server.go`'s `noExtra` wrapper sets
+  `InputSchema.AdditionalProperties = false` on every tool (`mcp.NewTool`
+  itself does not), so `tools/list` now advertises no extra properties. That
+  changes only the advertisement: mcp-go's dispatcher never validates call
+  arguments against the schema, so a stray `scope` argument is still silently
+  **ignored** by the handler at runtime, not rejected — the contract is simply
+  that `scope` no longer exists.
 - `snippet`: short excerpt around the match, or empty.
 - `score`: sort-only `float64`; only relative order within one response is
   meaningful.
@@ -423,6 +467,18 @@ Non-recursive; title/type/category from the `GetMeta` cache. Errors: `ErrNotFoun
 
 `path: string` (required), `include_content: bool` (optional, default `false`) →
 Source (JSON). Errors: `ErrNotFound`, `ErrPermission`, `ErrNotMarkdown`.
+
+### 8.8 wiki_delete
+
+`path: string` (required) → `{status:"deleted", path}`. Deletes the file from
+`wiki_dir` and removes it from the index if it was indexed. Side effect:
+auto-commits the deletion to git (`git add` + `git commit -m "wiki: delete
+<path>"`) when `wiki_dir` is a git repository; a failed `git add`/`git commit`
+is logged, not returned as a tool error. This auto-commit records only the
+deletion — `wiki_write` overwrites without committing, and nothing commits on
+ingest, so it does **not** make the wiki recoverable (see
+`docs/deployment/remote-mcp.md` "Security posture"). Errors: `ErrNotFound`,
+`ErrPermission`, `ErrTraversal`, `ErrSymlink`.
 
 ---
 
@@ -460,8 +516,35 @@ No `--scope` flag (removed in v2).
 ### 9.3 serve
 
 ```
-cogvault serve [--config <path>]
+cogvault serve [--config <path>] [--transport stdio|sse|http] [--addr <host:port>]
+                [--endpoint-path <path>] [--public-url <https://...>]
 ```
+
+- `--transport` (default `stdio`): `stdio` talks over standard I/O; `sse` and
+  `http` (Streamable HTTP) serve over a TCP listener at `--addr` (default
+  `localhost:8080`).
+- `--endpoint-path` (default `/mcp`, `http` only): the `http` transport
+  answers only at this path (normalized to a leading slash, no trailing
+  slash) and `404`s elsewhere. `sse` ignores this flag and keeps mcp-go's
+  fixed `/sse` and `/message` paths.
+- `--public-url` (required when `auth.mode: oauth`; optional otherwise): the
+  externally reachable `https://` base URL — absolute, no trailing slash,
+  query, or fragment. Also used as the SSE message-endpoint base and for
+  `Origin` checks. Effectively required for a usable remote `sse` deployment
+  too: without it, a remote client is handed a loopback message endpoint it
+  cannot reach.
+- `auth.mode` (config, §3.1) gates every non-`stdio` request. `bearer` mode
+  reads its credential from the `COGVAULT_BEARER_TOKEN` environment variable
+  only — never a flag or config key, and at least 32 bytes — keeping it out
+  of the config file and shell history.
+- Startup guards (`sse`/`http` only), each a fatal error before the server
+  starts listening: `auth.mode: none` on a non-loopback `--addr`;
+  `auth.mode: oauth` without `--public-url`; `auth.mode: bearer` with
+  `COGVAULT_BEARER_TOKEN` unset or under 32 bytes; a configured
+  `auth.oauth.audience` that disagrees with the advertised resource
+  (`<public-url><endpoint-path>`).
+- See `docs/deployment/remote-mcp.md` for the full remote setup (tunneling,
+  identity-provider prerequisites, security posture).
 
 Init failure → exit 1 + stderr. Runtime tool errors are returned to the client;
 the server keeps running.
@@ -636,6 +719,7 @@ github.com/spf13/cobra          # CLI
 gopkg.in/yaml.v3                # YAML
 github.com/adrg/frontmatter     # frontmatter parsing
 golang.org/x/sys                # unix.Flock for the ingest lock
+github.com/golang-jwt/jwt/v5    # JWT parsing/validation (oauth mode)
 ```
 
 The `claudecode` backend shells out to the `claude` CLI (Claude Code); it is a
