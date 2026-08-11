@@ -1,8 +1,10 @@
 # Spec — cogvault v2
 
 Version: v2 (Phase 1)
-Scope: v2 Phase 1 — the capture→digest→consume pipeline. Later phases (URL
-capture, periodic digest, local LLM backend) get their own specs.
+Scope: the capture→digest→consume pipeline. §1.2 and §1.3 describe what the
+program does now, not what Phase 1 delivered — the delivery record is
+ROADMAP.md. A later phase large enough to need its own design still gets its
+own spec.
 Status: **implemented; validation complete** (SC1–SC4 met, 2026-07-29; see F1 in
 `docs/research/v2-follow-ups.md`). Issues found during use are folded back into
 this spec.
@@ -24,31 +26,41 @@ The v1 "MCP wiki server hosted inside an Obsidian vault" is gone. cogvault has
 one mode: `wiki_dir` is the sole storage root, and `sources` are plain external
 directories the ingest pipeline reads directly (0021).
 
-### 1.2 In scope (Phase 1)
+### 1.2 In scope
 
 - `cogvault ingest`: scan sources → hash → digest each source file via the LLM adapter →
   write + index wiki pages → record a per-file outcome in the ledger → print a
   report.
 - MCP server: three transports (`stdio`, `sse`, `http`/Streamable HTTP); seven
   tools (read, write, delete, list, search, scan, parse).
-- CLI: `init`, `search`, `serve`, `ingest`.
+- CLI: `init`, `search`, `serve`, `ingest` — specified in §9. Eight further
+  commands ship without a contract section: `digest`, `embed`, `fetch`,
+  `graph`, `index`, `lint`, `similar`, `synthesize` (F12 in
+  `docs/research/v2-follow-ups.md`).
 - `internal/llm` adapter interface with a `claudecode` backend (`claude --print`).
 - Single-mode config/storage: absolute `wiki_dir` root, `sources[]`, absolute
   `db_path` outside the synced folder.
 - SQLite FTS5 full-text search (trigram, Korean-friendly).
 - launchd template + setup docs for zero-touch scheduled ingest.
 
-### 1.3 Out of scope (Phase 1)
+### 1.3 Out of scope
 
-- Phone capture (share sheet, synced inbox), URL/web extraction, image OCR.
-- Local LLM backend implementation (interface only).
+- Image OCR.
+- Dedicated phone-capture tooling: a share-sheet target, and consume-and-archive
+  semantics for inbox directories (project-background S5/O5). A folder the phone
+  syncs into is already usable as an ordinary `sources[].path`, which needs no
+  code and is not what this entry defers.
 - `pdftotext` text-extraction step (conditional fallback; **not activated** — O1
   verified headless PDF reading works, see 0021 D6).
 - Watch mode / resident daemon (batch + launchd chosen instead).
-- Periodic `cogvault digest` command.
-- vector search, ontology graph, `ResolveLink`.
 - General git auto-commit. `wiki_delete` auto-commits its own deletion
   (§8.8); `wiki_write` and `cogvault ingest` still never commit.
+
+Six entries that this list carried through Phase 1 have since shipped and are
+gone from it: URL/web extraction, the local LLM backend, periodic `cogvault
+digest`, vector search, the ontology graph, and `ResolveLink`. They are recorded
+as delivered in ROADMAP.md. This section states current boundaries; it is not a
+record of what Phase 1 excluded.
 
 ---
 

@@ -37,7 +37,7 @@ Status lives in [v2-follow-ups.md](docs/research/v2-follow-ups.md) — not here.
 
 - ~~**F2** (P3) — Deferred review minors batch~~ **Done** (PR #18, 2026-08-08)
 - ~~**F3** (P3) — FTS write-write `SQLITE_BUSY_SNAPSHOT` limitation~~ **Done** (closed as documented/accepted, 2026-08-08)
-- **F4** (P3) — Spec self-contradiction: renamed-file re-digest under (path,hash) key
+- ~~**F4** (P3) — Spec self-contradiction: renamed-file re-digest under (path,hash) key~~ **Done** (PR #14, 2026-08-03)
 - ~~**F5** (P4) — Dead code cleanup + MCP schema fallback 404~~ **Done** (PR #17, 2026-08-08)
 
 ---
@@ -51,10 +51,10 @@ Each later phase gets its own spec when work begins
 
 | Item | Context | Owner |
 |------|---------|-------|
-| ~~Phone capture (share-sheet → synced inbox → pipeline)~~ | **Done** (2026-08-08). No native app needed: share-sheet → iCloud Drive/Dropbox folder → configure as `sources[].path` → scheduled ingest picks up files automatically. Pattern documented in README. | [project-background](docs/context/project-background.md) §Later Phases |
+| ~~Phone capture (share-sheet → synced inbox → pipeline)~~ | **Partly done** (2026-08-08). No native app needed: share-sheet → iCloud Drive/Dropbox folder → configure as `sources[].path` → scheduled ingest picks up files automatically. Pattern documented in README §How it works. Still absent, and still out of scope in [SPEC](SPEC.md) §1.3: a dedicated share-sheet target and consume-and-archive semantics for inbox dirs (S5/O5). | [project-background](docs/context/project-background.md) §Later Phases |
 | ~~URL / web-article extraction (fetch + extract before digest)~~ | **Done** (2026-08-08). `cogvault fetch <url>` downloads content to source dir for ingest. | [project-background](docs/context/project-background.md) §Later Phases |
 | ~~Markdown-source digestion (restore v1 full-text coverage)~~ | **Done** (PR #16, 2026-08-08): `buildPrompt` type-aware, `SourceExt` in `DigestRequest`. Users add `md` to `sources[].types`. | [project-background](docs/context/project-background.md) §Later Phases |
-| ~~Supplementary file types (xlsx/csv/tsv alongside PDFs)~~ | **Done** (2026-08-08). `sourceTypePhrase` extended for csv/tsv/xlsx; pipeline already type-agnostic via `sources[].types` config. | [SPEC](SPEC.md) §1.3 |
+| ~~Supplementary file types (xlsx/csv/tsv alongside PDFs)~~ | **Done** (2026-08-08). `sourceTypePhrase` extended for csv/tsv/xlsx; pipeline already type-agnostic via `sources[].types` config. | [SPEC](SPEC.md) §3.1 (`sources[].types`) |
 
 ### Digest expansion
 
@@ -72,7 +72,7 @@ Inspired by [llm-wiki-for-scientists][llm-wiki].
 
 | Item | Context | Owner |
 |------|---------|-------|
-| ~~Synthesis layer — ingest 후처리로 관련 기존 페이지 검색 → concept/synthesis 페이지 자동 생성/갱신~~ | **Done** (2026-08-08). `cogvault synthesize` creates concept pages from cross-referenced links and shared tags (≥2 pages). | [SPEC](SPEC.md) §1.3 |
+| ~~Synthesis layer — ingest 후처리로 관련 기존 페이지 검색 → concept/synthesis 페이지 자동 생성/갱신~~ | **Done** (2026-08-08). `cogvault synthesize` creates concept pages from cross-referenced links and shared tags (≥2 pages). | No contract section yet — F12 in [v2-follow-ups](docs/research/v2-follow-ups.md) |
 | ~~Question → wiki feedback loop~~ | **Done** (2026-08-08). `_schema.md`에 Q&A→Wiki 피드백 루프 워크플로 추가. 코드 변경 없음. | [SPEC](SPEC.md) §8 |
 
 ### Consume / tooling expansion
