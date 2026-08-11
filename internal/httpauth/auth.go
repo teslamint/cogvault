@@ -7,6 +7,7 @@ package httpauth
 import (
 	"context"
 	"crypto/subtle"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -115,6 +116,11 @@ func Middleware(cfg Config) func(http.Handler) http.Handler {
 				}
 				exp, err := cfg.Validator.Validate(r.Context(), token)
 				if err != nil {
+					if errors.Is(err, ErrInsufficientScope) {
+						logRejection("insufficient_scope", r)
+						writeInsufficientScope(w, cfg)
+						return
+					}
 					logRejection("invalid_credential", r)
 					writeUnauthorized(w, cfg)
 					return
@@ -242,6 +248,17 @@ func writeUnauthorized(w http.ResponseWriter, cfg Config) {
 		w.Header().Set("WWW-Authenticate", "Bearer")
 	}
 	w.WriteHeader(http.StatusUnauthorized)
+}
+
+// writeInsufficientScope writes the 403 challenge for a valid token whose
+// scopes miss cfg.RequiredScopes. It is only reachable in "oauth" mode, since
+// that is the only mode with a Validator that can return
+// ErrInsufficientScope, so it always advertises resource_metadata alongside
+// error="insufficient_scope" — RFC 6750's form for distinguishing a scope
+// failure from an authentication failure.
+func writeInsufficientScope(w http.ResponseWriter, cfg Config) {
+	w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer error="insufficient_scope", resource_metadata="%s/.well-known/oauth-protected-resource"`, cfg.PublicURL))
+	w.WriteHeader(http.StatusForbidden)
 }
 
 // logRejection logs the reason class and remote address only. Credentials

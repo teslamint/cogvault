@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -221,6 +222,68 @@ func TestOAuthMode(t *testing.T) {
 			got := rec.Header().Get("WWW-Authenticate")
 			if got != wantChallenge {
 				t.Fatalf("WWW-Authenticate = %q, want %q", got, wantChallenge)
+			}
+		})
+	}
+}
+
+func TestOAuthInsufficientScope(t *testing.T) {
+	const publicURL = "https://mcp.example.com"
+	wantChallenge := `Bearer error="insufficient_scope", resource_metadata="` + publicURL + `/.well-known/oauth-protected-resource"`
+	wantUnauthorizedChallenge := `Bearer resource_metadata="` + publicURL + `/.well-known/oauth-protected-resource"`
+
+	tests := []struct {
+		name       string
+		validator  stubValidator
+		wantCode   int
+		wantHeader string
+	}{
+		{
+			name:       "insufficient scope returns 403 with error=insufficient_scope",
+			validator:  stubValidator{err: ErrInsufficientScope},
+			wantCode:   http.StatusForbidden,
+			wantHeader: wantChallenge,
+		},
+		{
+			name:       "wrapped ErrInsufficientScope is still detected via errors.Is",
+			validator:  stubValidator{err: fmt.Errorf("checkScopes: %w", ErrInsufficientScope)},
+			wantCode:   http.StatusForbidden,
+			wantHeader: wantChallenge,
+		},
+		{
+			name:       "other validator errors still return 401 unchanged",
+			validator:  stubValidator{err: errValidatorRejected},
+			wantCode:   http.StatusUnauthorized,
+			wantHeader: wantUnauthorizedChallenge,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var ran bool
+			cfg := Config{
+				Mode:             "oauth",
+				PublicURL:        publicURL,
+				MaxBodyBytes:     1024,
+				MaxStreamSeconds: 30,
+				Validator:        tt.validator,
+			}
+			h := Middleware(cfg)(sentinelHandler(&ran))
+
+			req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader("{}"))
+			req.Header.Set("Authorization", "Bearer whatever-the-stub-rejects")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if ran {
+				t.Fatal("next handler ran for a rejected oauth request")
+			}
+			if rec.Code != tt.wantCode {
+				t.Fatalf("status = %d, want %d", rec.Code, tt.wantCode)
+			}
+			got := rec.Header().Get("WWW-Authenticate")
+			if got != tt.wantHeader {
+				t.Fatalf("WWW-Authenticate = %q, want %q", got, tt.wantHeader)
 			}
 		})
 	}
