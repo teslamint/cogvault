@@ -407,9 +407,10 @@ Source {
   supported. See `docs/deployment/remote-mcp.md` for setup and the security
   posture.
 - Rejection responses (`sse`/`http` only): `401` with a `WWW-Authenticate:
-  Bearer` header for a missing or invalid credential (the `oauth`-mode
+  Bearer` header for a missing credential, or the same header additionally
+  carrying `error="invalid_token"` for an invalid one (the `oauth`-mode
   challenge additionally carries `resource_metadata` pointing at the
-  Protected Resource Metadata document); `403` with
+  Protected Resource Metadata document in both cases); `403` with
   `error="insufficient_scope"` for a valid `oauth` token missing a required
   scope, and for a request whose `Origin` header names neither a loopback
   origin nor `--public-url`; `413` for a request body over `auth.max_body_mb`.

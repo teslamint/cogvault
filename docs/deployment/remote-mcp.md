@@ -79,6 +79,12 @@ Endpoint shapes differ by transport:
   at `/.well-known/oauth-protected-resource` and at that path suffixed with
   `--endpoint-path`; Claude probes the suffixed form first.
 
+**In `oauth` mode, use `--transport http`**: this is a limitation of the
+`oauth`+`sse` combination specifically (not a general `sse` warning) — `sse`'s
+fixed `/sse` path can never match the advertised `resource`
+(`<public-url><endpoint-path>`), and Claude probes the well-known path
+suffixed with the user-entered path.
+
 **In `oauth` mode, prefer a `--public-url` with no path component** (e.g.
 `https://cogvault.example.com`, not `https://cogvault.example.com/sub`).
 RFC 9728 permits a client to *derive* the metadata URL itself, by inserting

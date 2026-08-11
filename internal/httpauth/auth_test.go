@@ -105,30 +105,42 @@ func TestBearerMode(t *testing.T) {
 		origin     string
 		wantCode   int
 		wantRan    bool
+		wantHeader string
 	}{
 		{
-			name:     "missing Authorization header",
-			wantCode: http.StatusUnauthorized,
+			name:       "missing Authorization header",
+			wantCode:   http.StatusUnauthorized,
+			wantHeader: "Bearer",
+		},
+		{
+			name:       "malformed non-Bearer Authorization header",
+			authHeader: "Basic dXNlcjpwYXNz",
+			wantCode:   http.StatusUnauthorized,
+			wantHeader: "Bearer",
 		},
 		{
 			name:       "wrong token",
 			authHeader: "Bearer wrongtoken",
 			wantCode:   http.StatusUnauthorized,
+			wantHeader: `Bearer error="invalid_token"`,
 		},
 		{
 			name:       "empty token after the Bearer prefix",
 			authHeader: "Bearer ",
 			wantCode:   http.StatusUnauthorized,
+			wantHeader: `Bearer error="invalid_token"`,
 		},
 		{
 			name:       "token is a prefix of the correct one",
 			authHeader: "Bearer " + correctToken[:len(correctToken)-3],
 			wantCode:   http.StatusUnauthorized,
+			wantHeader: `Bearer error="invalid_token"`,
 		},
 		{
 			name:       "token is an extension of the correct one",
 			authHeader: "Bearer " + correctToken + "extra",
 			wantCode:   http.StatusUnauthorized,
+			wantHeader: `Bearer error="invalid_token"`,
 		},
 		{
 			name:       "foreign Origin rejected even with a valid token",
@@ -167,8 +179,8 @@ func TestBearerMode(t *testing.T) {
 			}
 			if tt.wantCode == http.StatusUnauthorized {
 				got := rec.Header().Get("WWW-Authenticate")
-				if got != "Bearer" {
-					t.Fatalf("WWW-Authenticate = %q, want %q (bearer mode must not advertise resource_metadata)", got, "Bearer")
+				if got != tt.wantHeader {
+					t.Fatalf("WWW-Authenticate = %q, want %q", got, tt.wantHeader)
 				}
 			}
 		})
@@ -177,20 +189,29 @@ func TestBearerMode(t *testing.T) {
 
 func TestOAuthMode(t *testing.T) {
 	const publicURL = "https://mcp.example.com"
-	wantChallenge := `Bearer resource_metadata="` + publicURL + `/.well-known/oauth-protected-resource"`
+	wantMissingChallenge := `Bearer resource_metadata="` + publicURL + `/.well-known/oauth-protected-resource"`
+	wantInvalidChallenge := `Bearer error="invalid_token", resource_metadata="` + publicURL + `/.well-known/oauth-protected-resource"`
 
 	tests := []struct {
 		name       string
 		authHeader string
 		validator  stubValidator
+		wantHeader string
 	}{
 		{
-			name: "missing Authorization header",
+			name:       "missing Authorization header",
+			wantHeader: wantMissingChallenge,
+		},
+		{
+			name:       "malformed non-Bearer Authorization header",
+			authHeader: "Basic dXNlcjpwYXNz",
+			wantHeader: wantMissingChallenge,
 		},
 		{
 			name:       "validator returns an error",
 			authHeader: "Bearer whatever-the-stub-rejects",
 			validator:  stubValidator{err: errValidatorRejected},
+			wantHeader: wantInvalidChallenge,
 		},
 	}
 
@@ -220,8 +241,8 @@ func TestOAuthMode(t *testing.T) {
 				t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
 			}
 			got := rec.Header().Get("WWW-Authenticate")
-			if got != wantChallenge {
-				t.Fatalf("WWW-Authenticate = %q, want %q", got, wantChallenge)
+			if got != tt.wantHeader {
+				t.Fatalf("WWW-Authenticate = %q, want %q", got, tt.wantHeader)
 			}
 		})
 	}
@@ -230,7 +251,7 @@ func TestOAuthMode(t *testing.T) {
 func TestOAuthInsufficientScope(t *testing.T) {
 	const publicURL = "https://mcp.example.com"
 	wantChallenge := `Bearer error="insufficient_scope", resource_metadata="` + publicURL + `/.well-known/oauth-protected-resource"`
-	wantUnauthorizedChallenge := `Bearer resource_metadata="` + publicURL + `/.well-known/oauth-protected-resource"`
+	wantUnauthorizedChallenge := `Bearer error="invalid_token", resource_metadata="` + publicURL + `/.well-known/oauth-protected-resource"`
 
 	tests := []struct {
 		name       string
@@ -251,7 +272,7 @@ func TestOAuthInsufficientScope(t *testing.T) {
 			wantHeader: wantChallenge,
 		},
 		{
-			name:       "other validator errors still return 401 unchanged",
+			name:       "other validator errors still return 401 with error=invalid_token",
 			validator:  stubValidator{err: errValidatorRejected},
 			wantCode:   http.StatusUnauthorized,
 			wantHeader: wantUnauthorizedChallenge,

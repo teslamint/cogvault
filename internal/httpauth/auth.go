@@ -102,16 +102,21 @@ func Middleware(cfg Config) func(http.Handler) http.Handler {
 				// Credential check skipped; resource bounds above still apply.
 			case "bearer":
 				token, ok := bearerToken(r)
-				if !ok || !bearerTokenEqual(cfg.BearerToken, token) {
+				if !ok {
+					logRejection("missing_credential", r)
+					writeUnauthorized(w, cfg, false)
+					return
+				}
+				if !bearerTokenEqual(cfg.BearerToken, token) {
 					logRejection("invalid_credential", r)
-					writeUnauthorized(w, cfg)
+					writeUnauthorized(w, cfg, true)
 					return
 				}
 			case "oauth":
 				token, ok := bearerToken(r)
 				if !ok {
-					logRejection("invalid_credential", r)
-					writeUnauthorized(w, cfg)
+					logRejection("missing_credential", r)
+					writeUnauthorized(w, cfg, false)
 					return
 				}
 				exp, err := cfg.Validator.Validate(r.Context(), token)
@@ -122,7 +127,7 @@ func Middleware(cfg Config) func(http.Handler) http.Handler {
 						return
 					}
 					logRejection("invalid_credential", r)
-					writeUnauthorized(w, cfg)
+					writeUnauthorized(w, cfg, true)
 					return
 				}
 				expiresAt = exp
@@ -133,7 +138,7 @@ func Middleware(cfg Config) func(http.Handler) http.Handler {
 				// should be unreachable. Fail closed rather than fall
 				// through to the wrapped handler if it is ever hit.
 				logRejection("unknown_mode", r)
-				writeUnauthorized(w, cfg)
+				writeUnauthorized(w, cfg, false)
 				return
 			}
 
@@ -241,10 +246,23 @@ func originAllowed(origin, publicURL string) bool {
 // the protected-resource metadata document; "bearer" mode has no
 // authorization server, so it omits resource_metadata rather than pointing
 // clients at a document that names no issuer.
-func writeUnauthorized(w http.ResponseWriter, cfg Config) {
-	if cfg.Mode == "oauth" {
-		w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer resource_metadata="%s/.well-known/oauth-protected-resource"`, cfg.PublicURL))
-	} else {
+//
+// invalidCredential distinguishes the two RFC 6750 §3.1 cases: a missing
+// credential (no Authorization header, or one that is not a Bearer
+// challenge) SHOULD NOT carry an error code, while a credential that was
+// present and rejected — a wrong bearer token, or a token the validator
+// refused — carries error="invalid_token" alongside any resource_metadata
+// parameter, in the same "error=..., resource_metadata=..." ordering
+// writeInsufficientScope uses.
+func writeUnauthorized(w http.ResponseWriter, cfg Config, invalidCredential bool) {
+	switch {
+	case cfg.Mode == "oauth" && invalidCredential:
+		w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer error="invalid_token", resource_metadata="%s%s"`, cfg.PublicURL, wellKnownPRMPath))
+	case cfg.Mode == "oauth":
+		w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer resource_metadata="%s%s"`, cfg.PublicURL, wellKnownPRMPath))
+	case invalidCredential:
+		w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
+	default:
 		w.Header().Set("WWW-Authenticate", "Bearer")
 	}
 	w.WriteHeader(http.StatusUnauthorized)
@@ -257,7 +275,7 @@ func writeUnauthorized(w http.ResponseWriter, cfg Config) {
 // error="insufficient_scope" — RFC 6750's form for distinguishing a scope
 // failure from an authentication failure.
 func writeInsufficientScope(w http.ResponseWriter, cfg Config) {
-	w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer error="insufficient_scope", resource_metadata="%s/.well-known/oauth-protected-resource"`, cfg.PublicURL))
+	w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer error="insufficient_scope", resource_metadata="%s%s"`, cfg.PublicURL, wellKnownPRMPath))
 	w.WriteHeader(http.StatusForbidden)
 }
 

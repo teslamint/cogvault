@@ -329,8 +329,41 @@ func TestExpiredTokenChallenge(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
 	}
-	wantChallenge := `Bearer resource_metadata="` + publicURL + `/.well-known/oauth-protected-resource"`
+	wantChallenge := `Bearer error="invalid_token", resource_metadata="` + publicURL + `/.well-known/oauth-protected-resource"`
 	if got := rec.Header().Get("WWW-Authenticate"); got != wantChallenge {
 		t.Fatalf("WWW-Authenticate = %q, want %q", got, wantChallenge)
+	}
+}
+
+// TestExpRequired directly measures success criterion 12: a token with a
+// valid signature, the correct issuer, and the correct audience, but no exp
+// claim, must be rejected rather than treated as non-expiring, and Validate
+// must return the zero time.Time on that rejection.
+//
+// The spec measures criterion 12 with
+// `go test ./internal/httpauth/ -run 'TestExpRequired|TestStreamDeadline'`.
+// Before this test existed, that command matched no test named
+// TestExpRequired and so exercised only TestStreamDeadline, exiting 0
+// without ever running the exp-required half of criterion 12. The behavior
+// itself was already covered by TestOAuthValidatorRejections/no_exp_claim;
+// this duplicates that one case as a top-level test so the measurement
+// command actually measures what it claims to.
+func TestExpRequired(t *testing.T) {
+	issuer, key, keys := newTestOAuthFixture(t)
+	v := NewOAuthValidator(issuer, testAudience, nil, keys)
+
+	claims := baseClaims(issuer, testAudience)
+	delete(claims, "exp")
+	token := mint(t, jwt.SigningMethodRS256, key, testKid, claims)
+
+	gotExp, err := v.Validate(context.Background(), token)
+	if err == nil {
+		t.Fatal("Validate: want error for a token with no exp claim, got nil")
+	}
+	if !errors.Is(err, jwt.ErrTokenRequiredClaimMissing) {
+		t.Fatalf("Validate error = %v, want errors.Is(..., jwt.ErrTokenRequiredClaimMissing)", err)
+	}
+	if !gotExp.IsZero() {
+		t.Errorf("Validate returned non-zero expiry %v for a token rejected for missing exp", gotExp)
 	}
 }
