@@ -729,7 +729,7 @@ cogvault index [--config <path>]
 ### 9.12 lint
 
 ```
-cogvault lint [--config <path>]
+cogvault lint [--config <path>] [--strict]
 ```
 
 Reports, one line per issue as `<kind> <path> <message>`:
@@ -746,9 +746,13 @@ Reports, one line per issue as `<kind> <path> <message>`:
 
 - Prints `lint: no issues found` when clean, otherwise the issue lines and
   `N issue(s) found`.
-- **Exit code is 0 whether or not issues were found.** `lint` reports; it does
-  not gate. A CI use that needs a failing exit code must parse the output
-  (F13 in `docs/research/v2-follow-ups.md`).
+- `--strict` makes findings fail the command. It changes **only** the exit
+  code: stdout is byte-identical with and without it, so a script can add the
+  flag without re-parsing anything.
+- **Exit codes**: without `--strict`, always 0 — `lint` reports, it does not
+  gate, and that default does not change because the command shipped exiting 0
+  and a caller may depend on it. With `--strict`: nonzero when any issue was
+  reported, 0 when clean.
 
 ---
 

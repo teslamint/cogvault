@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -9,11 +10,13 @@ import (
 )
 
 func newLintCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "lint",
 		Short: "Check wiki for broken links, orphan pages, and frontmatter issues",
 		RunE:  runLint,
 	}
+	cmd.Flags().Bool("strict", false, "exit nonzero when issues are found (output is unchanged)")
+	return cmd
 }
 
 type lintIssue struct {
@@ -107,8 +110,16 @@ func runLint(cmd *cobra.Command, args []string) error {
 		cmd.Printf("%-15s %-40s %s\n", issue.Kind, issue.Path, issue.Message)
 	}
 	cmd.Printf("\n%d issue(s) found\n", len(issues))
+
+	if strict, _ := cmd.Flags().GetBool("strict"); strict {
+		return errLintIssuesFound
+	}
 	return nil
 }
+
+// errLintIssuesFound carries no count: the report on stdout already has it, and
+// --strict is defined to change only the exit code.
+var errLintIssuesFound = errors.New("lint: issues found")
 
 func resolveWikilink(link string, allPages map[string]bool) string {
 	candidates := []string{
