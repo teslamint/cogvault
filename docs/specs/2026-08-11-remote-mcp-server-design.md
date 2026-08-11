@@ -65,7 +65,8 @@ before.
 The user runs `cogvault serve --transport http --addr 0.0.0.0:8080` while
 `auth.mode` is `none`. The server refuses to start and prints an error naming
 the conflict, because that combination would expose `wiki_write` and
-`wiki_delete` to anyone who can reach the port.
+`wiki_delete` to anyone who can reach the port. The identical guard fires for
+`--transport sse`, which is unauthenticated today.
 
 ### S6: An expired token triggers re-authorization
 
@@ -83,6 +84,11 @@ authorization-code flow without the user editing any configuration.
   (default `/mcp`).
 - A new `internal/httpauth` package: an `http.Handler` middleware implementing
   three authorization modes — `none`, `bearer`, `oauth`.
+- The same middleware and the same bind guard applied to the **existing SSE
+  transport**, not only to the new HTTP one. `server.SSEServer` is already an
+  `http.Handler` (`ServeHTTP` at `sse.go:783`), so this is wiring, not a
+  rewrite. Leaving SSE ungated would ship a feature whose stated purpose is
+  safe remote exposure while keeping an unauthenticated remote door open.
 - OAuth 2.1 **resource server** role only: Protected Resource Metadata
   discovery endpoint (RFC 9728), `401` + `WWW-Authenticate` challenges, and
   JWT access-token validation against the issuer's JWKS.
@@ -111,8 +117,10 @@ authorization-code flow without the user editing any configuration.
 - **ChatGPT deep-research `search`/`fetch` tools.** Required only for the deep
   research and company-knowledge surfaces, which are not targeted here;
   Developer Mode accepts cogvault's existing tool names.
-- **Removing the SSE transport.** It stays, unchanged and still accepted by both
-  vendors, so existing setups do not break.
+- **Removing the SSE transport.** It stays, still accepted by both vendors, so
+  existing setups do not break. It does gain the authorization layer and the
+  bind guard (see In), which is a behavior change under non-default config but
+  not a removal.
 - **Tool-result size capping.** See Open Decisions D3.
 - **Automated tunnel provisioning.** Documentation only; cogvault does not
   manage cloudflared or Tailscale.
@@ -145,8 +153,9 @@ Three layers, each independently testable:
 ```
 cmd/cogvault/serve.go
   ├─ selects transport: stdio (default) | sse | http
-  ├─ enforces the bind-address guard (S5)
-  └─ for http: httpauth.Middleware(cfg.Auth) wraps StreamableHTTPServer
+  ├─ enforces the bind-address guard (S5) for both network transports
+  └─ for sse and http alike:
+       httpauth.Middleware(cfg.Auth) wraps the transport's http.Handler
 
 internal/httpauth/           (new package, no MCP dependency)
   ├─ Middleware(Config) func(http.Handler) http.Handler
@@ -179,6 +188,25 @@ Request flow in `oauth` mode:
    `error="insufficient_scope"`.
 5. On success the request passes to the Streamable HTTP handler unchanged.
 
+Four properties of this flow are requirements, not incidental:
+
+- **Authorization is per-request, never per-session.** mcp-go's stateful mode
+  issues an `Mcp-Session-Id`, but the middleware sits in front of every request
+  including those carrying an established session id. A session opened with a
+  valid token stops working the moment that token expires; possession of a
+  session id is never itself a credential.
+- **`aud` may be a string or an array.** The configured audience must be
+  present in the array form too, and an `aud` that omits it is rejected. Without
+  this, any token the same issuer minted for a different resource server would
+  be accepted here.
+- **Request bodies are bounded.** mcp-go applies no limit — `MaxBytesReader`
+  appears nowhere in `server/streamable_http.go` — so the middleware wraps
+  `r.Body` in `http.MaxBytesReader` with a configurable cap (default 4 MiB)
+  before the handler runs.
+- **Credentials never reach the logs.** No log line may contain an
+  `Authorization` header value, a bearer token, or a raw JWT. Rejections log
+  the reason class and the remote address only.
+
 ## Interface
 
 ### CLI
@@ -206,10 +234,12 @@ New top-level `auth:` block in the config file:
 ```yaml
 auth:
   mode: string            # "none" | "bearer" | "oauth". Default: "none".
+  max_body_mb: int        # request body cap for network transports. Default: 4.
   oauth:
     issuer: string        # OIDC issuer URL. Required when mode is "oauth".
     audience: string      # Expected `aud` claim. Required when mode is "oauth".
     required_scopes: []   # Optional. Empty means any valid token is accepted.
+    jwks_ttl_seconds: int # JWKS cache lifetime. Default: 900.
 ```
 
 The bearer token is **never** a config field. It is read from
@@ -221,6 +251,9 @@ Validation, following the existing `field: bad value; expected form` convention
 in `internal/config`:
 
 - `auth.mode` outside the accepted set → error.
+- `auth.max_body_mb` or `auth.oauth.jwks_ttl_seconds` zero or negative → error,
+  matching the existing `max_file_size_mb` rejection style in
+  `internal/config`.
 - `mode: oauth` with an empty `issuer` or `audience` → error.
 - `issuer` that is not an absolute `https://` URL → error.
 - `mode: none` with a non-loopback `--addr` → startup error (S5).
@@ -254,10 +287,11 @@ handlers keep their own path and permission checks unchanged.
 ## Data model
 
 No SQLite schema change and no index migration. The JWKS cache is in-memory
-only: a `map[kid]crypto.PublicKey` with a fetch timestamp, a configurable TTL
-(default 15 minutes), and a minimum 60-second interval between forced refetches
-so an attacker cannot drive unbounded outbound requests with unknown `kid`
-values.
+only: a `map[kid]crypto.PublicKey` with a fetch timestamp, a TTL from
+`auth.oauth.jwks_ttl_seconds` (default 900), and a minimum 60-second interval
+between forced refetches so an attacker cannot drive unbounded outbound
+requests with unknown `kid` values. Concurrent requests that miss the cache
+collapse onto a single in-flight fetch rather than each issuing one.
 
 ## Integration
 
@@ -302,16 +336,26 @@ for the new package. Unit tests reach no network — the JWKS endpoint is a loca
     `error="insufficient_scope"`
   - missing `Authorization` header returns `401` carrying a
     `WWW-Authenticate` header whose `resource_metadata` is the configured URL
+  - a token whose `aud` is an array **not** containing the configured audience
+    returns `401`; the array form containing it passes
   - bearer mode accepts the exact token and rejects near-misses; the comparison
     is constant-time
   - `none` mode passes every request through
   - JWKS refetch on unknown `kid` happens at most once per minimum interval
+  - a body exceeding the configured cap is rejected rather than buffered
+  - no rejection path writes the token or the `Authorization` header to the log
+    sink (asserted against a captured `slog` handler)
 - Protected Resource Metadata handler returns the documented JSON at both the
   bare and path-suffixed well-known paths, and stays reachable without a token.
 - `cmd/cogvault` tests: `--transport http` starts and serves; an unknown
   transport value errors; the `mode: none` plus non-loopback address
-  combination refuses to start; `mode: oauth` without `--public-url` refuses to
-  start; `mode: bearer` with an unset `COGVAULT_BEARER_TOKEN` refuses to start.
+  combination refuses to start **for both `http` and `sse`**; `mode: oauth`
+  without `--public-url` refuses to start; `mode: bearer` with an unset
+  `COGVAULT_BEARER_TOKEN` refuses to start.
+- An SSE-specific test asserting the middleware is actually mounted on that
+  transport — a request without a credential to the SSE endpoint under
+  `mode: bearer` returns `401`. This is the regression test for the hole this
+  design closes.
 - `internal/mcp` test asserting every registered tool carries annotations and
   that exactly `wiki_write` and `wiki_delete` are non-read-only — this fails if
   a future tool is added without a deliberate annotation choice.
@@ -323,7 +367,9 @@ for the new package. Unit tests reach no network — the JWKS endpoint is a loca
 
 | Risk | Mitigation |
 |---|---|
-| Exposing `wiki_write`/`wiki_delete` to the internet; a token leak means wiki loss | The S5 startup guard blocks the worst misconfiguration. `wiki_delete` already auto-commits to git when the wiki is a repository, so deletions are recoverable there. Documented explicitly in the deployment section. |
+| Exposing `wiki_write`/`wiki_delete` to the internet; a token leak means wiki loss | The S5 startup guard blocks the worst misconfiguration on both network transports. `wiki_delete` already auto-commits to git via `gitAutoCommit` (`internal/mcp/tools.go:129`) when the wiki is a repository, so deletions are recoverable there. Documented explicitly in the deployment section. |
+| Bearer tokens are guessable under sustained brute force, and the server has no rate limiting | The token is expected to be high-entropy and machine-generated; the deployment docs say so and give a generation command. Rate limiting is not implemented — recorded as Open Decision D5 rather than silently omitted. |
+| Claude Code stores the bearer token as plaintext config in `~/.claude.json`, unlike OAuth client secrets which it puts in the keychain | Out of cogvault's control. Documented in the deployment section so the user chooses bearer mode knowingly; OAuth mode avoids it. |
 | Hand-rolled JWT validation is a classic source of vulnerabilities | Use `github.com/golang-jwt/jwt/v5` with an explicit allowed-algorithms list (`RS256`, `ES256`) rather than trusting the token header; never accept `none`. Negative tests above cover each rejection path. |
 | Identity providers that issue opaque rather than JWT access tokens simply will not work | Declared out of scope and documented; startup cannot detect it, so the failure surfaces as a `401` at first call. Open Decision D2 tracks introspection support. |
 | Tunnel URL changes (ephemeral cloudflared URLs) break the `resource` value in the metadata document | `--public-url` is explicit rather than inferred, and the docs recommend a stable named tunnel over ephemeral URLs. |
@@ -340,20 +386,29 @@ for the new package. Unit tests reach no network — the JWKS endpoint is a loca
    header.
    - **Measured by**: `go test ./internal/httpauth/ -v` — all cases in the
      Testing section pass, including the `401` versus `403` distinction.
-3. A server in `auth.mode: none` cannot be started on a non-loopback address.
-   - **Measured by**: `go test ./cmd/cogvault/ -run TestServeBindGuard -v`
-4. All seven MCP tools declare annotations, and exactly `wiki_write` and
+3. A server in `auth.mode: none` cannot be started on a non-loopback address,
+   on either network transport.
+   - **Measured by**: `go test ./cmd/cogvault/ -run TestServeBindGuard -v`,
+     which covers `--transport http` and `--transport sse`.
+4. The SSE transport is gated by the same authorization layer as HTTP.
+   - **Measured by**: `go test ./cmd/cogvault/ -run TestSSERequiresAuth -v` — an
+     uncredentialed request under `mode: bearer` returns `401`.
+5. All seven MCP tools declare annotations, and exactly `wiki_write` and
    `wiki_delete` are non-read-only.
    - **Measured by**: `go test ./internal/mcp/ -run TestToolAnnotations -v`
-5. The Protected Resource Metadata document is reachable without credentials and
+6. The Protected Resource Metadata document is reachable without credentials and
    names the configured issuer.
    - **Measured by**: with a test server running,
      `curl -fsS "$PUBLIC_URL/.well-known/oauth-protected-resource" | jq -e '.authorization_servers[0]'`
      exits `0` and prints the configured issuer.
-6. The existing stdio and SSE transports behave exactly as before.
-   - **Measured by**: `go test ./...` passes with no changes to pre-existing
-     stdio or SSE test expectations.
-7. Canonical documentation matches the shipped behavior, including the
+7. Existing deployments keep working: stdio is untouched, and SSE under the
+   default `auth.mode: none` on a loopback address behaves exactly as before.
+   (SSE behavior does change when authorization is enabled — that is criterion
+   4, and it is the intended change, not a regression.)
+   - **Measured by**: `go test ./...` passes with no edits to pre-existing stdio
+     or SSE test expectations; any new SSE expectation is added under a new
+     test name rather than by modifying an existing one.
+8. Canonical documentation matches the shipped behavior, including the
    pre-existing `SPEC.md` drift items named in Integration.
    - **Measured by**: reviewer rubric — `SPEC.md` §8.1 names all three
      transports and the authorization model; §8 has a `wiki_delete` subsection;
@@ -362,7 +417,7 @@ for the new package. Unit tests reach no network — the JWKS endpoint is a loca
      the `auth:` block; §9 carries the new flags; `DESIGN.md` has a component
      section for `internal/httpauth`; and the remaining stale §1.3 entries are
      recorded as a follow-up rather than left unnoticed.
-8. A reader can stand the server up remotely from the documentation alone.
+9. A reader can stand the server up remotely from the documentation alone.
    - **Measured by**: reviewer rubric — the deployment section states the tunnel
      step, the `--public-url` requirement, the identity-provider prerequisites
      (JWT access tokens, issuer, audience), and the token-leak risk, with no
@@ -384,3 +439,7 @@ for the new package. Unit tests reach no network — the JWKS endpoint is a loca
 - **D4 — Whether the SSE transport should start warning about deprecation.**
   Both vendors still accept it, so removal is not on the table, but a startup
   notice may be worth adding. _Resolved by: planning._
+- **D5 — Rate limiting on authorization failures.** Not implemented in this
+  release. Whether it is needed depends on whether the deployment sits at a
+  stable public URL or behind a Tailscale-style private tunnel, which follows
+  from the deployment choice. _Resolved by: user, after first deployment._
