@@ -451,6 +451,80 @@ func TestAllExcludedArchivePathNotDuplicatedFromExcludeRead(t *testing.T) {
 	}
 }
 
+func TestAuthConfigValidation(t *testing.T) {
+	base := "wiki_dir: /data/wiki\ndb_path: /state/db.db\n"
+
+	t.Run("happy oauth mode with https issuer and public URL", func(t *testing.T) {
+		p := writeConfigFile(t, base+"auth:\n  mode: oauth\n  oauth:\n    issuer: https://auth.example.com\n    audience: https://mcp.example.com/mcp\n")
+		cfg, err := Load(p)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.Auth.Mode != "oauth" {
+			t.Errorf("Auth.Mode = %q, want %q", cfg.Auth.Mode, "oauth")
+		}
+		if cfg.Auth.OAuth.Issuer != "https://auth.example.com" {
+			t.Errorf("Auth.OAuth.Issuer = %q, want %q", cfg.Auth.OAuth.Issuer, "https://auth.example.com")
+		}
+		if cfg.Auth.OAuth.Audience != "https://mcp.example.com/mcp" {
+			t.Errorf("Auth.OAuth.Audience = %q, want %q", cfg.Auth.OAuth.Audience, "https://mcp.example.com/mcp")
+		}
+	})
+
+	t.Run("omitted auth block yields defaults", func(t *testing.T) {
+		p := writeConfigFile(t, base)
+		cfg, err := Load(p)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.Auth.Mode != "none" {
+			t.Errorf("Auth.Mode = %q, want %q", cfg.Auth.Mode, "none")
+		}
+		if cfg.Auth.MaxBodyMB != 4 {
+			t.Errorf("Auth.MaxBodyMB = %d, want 4", cfg.Auth.MaxBodyMB)
+		}
+		if cfg.Auth.MaxStreamSeconds != 3600 {
+			t.Errorf("Auth.MaxStreamSeconds = %d, want 3600", cfg.Auth.MaxStreamSeconds)
+		}
+		if cfg.Auth.OAuth.JWKSTTLSeconds != 900 {
+			t.Errorf("Auth.OAuth.JWKSTTLSeconds = %d, want 900", cfg.Auth.OAuth.JWKSTTLSeconds)
+		}
+	})
+
+	errorTests := []struct {
+		name         string
+		yaml         string
+		wantField    string
+		wantKeywords []string
+	}{
+		{"mode invalid", base + "auth:\n  mode: sometimes\n", "auth.mode", []string{"not supported"}},
+		{"oauth mode empty issuer", base + "auth:\n  mode: oauth\n", "auth.oauth.issuer", []string{"empty"}},
+		{"oauth issuer http not https", base + "auth:\n  mode: oauth\n  oauth:\n    issuer: http://auth.example.com\n", "auth.oauth.issuer", []string{"https"}},
+		{"oauth issuer fails to parse", base + "auth:\n  mode: oauth\n  oauth:\n    issuer: \"https://%zz\"\n", "auth.oauth.issuer", []string{"https"}},
+		{"max_body_mb negative", base + "auth:\n  max_body_mb: -1\n", "auth.max_body_mb", []string{"positive"}},
+		{"max_stream_seconds negative", base + "auth:\n  max_stream_seconds: -1\n", "auth.max_stream_seconds", []string{"positive"}},
+		{"jwks_ttl_seconds negative", base + "auth:\n  oauth:\n    jwks_ttl_seconds: -1\n", "auth.oauth.jwks_ttl_seconds", []string{"positive"}},
+	}
+	for _, tt := range errorTests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := writeConfigFile(t, tt.yaml)
+			_, err := Load(p)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, tt.wantField) {
+				t.Errorf("error %q should contain field %q", msg, tt.wantField)
+			}
+			for _, kw := range tt.wantKeywords {
+				if !strings.Contains(msg, kw) {
+					t.Errorf("error %q should contain keyword %q", msg, kw)
+				}
+			}
+		})
+	}
+}
+
 func TestContainsDotDot(t *testing.T) {
 	tests := []struct {
 		path string

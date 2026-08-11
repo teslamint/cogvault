@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,6 +24,20 @@ type LLMConfig struct {
 	EmbeddingBaseURL string `yaml:"embedding_base_url"`
 }
 
+type OAuthConfig struct {
+	Issuer         string   `yaml:"issuer"`
+	Audience       string   `yaml:"audience"`
+	RequiredScopes []string `yaml:"required_scopes"`
+	JWKSTTLSeconds int      `yaml:"jwks_ttl_seconds"`
+}
+
+type AuthConfig struct {
+	Mode             string      `yaml:"mode"`
+	MaxBodyMB        int         `yaml:"max_body_mb"`
+	MaxStreamSeconds int         `yaml:"max_stream_seconds"`
+	OAuth            OAuthConfig `yaml:"oauth"`
+}
+
 type Config struct {
 	WikiDir             string      `yaml:"wiki_dir"`
 	DBPath              string      `yaml:"db_path"`
@@ -33,6 +48,7 @@ type Config struct {
 	ConsistencyInterval int         `yaml:"consistency_interval"`
 	MaxFileSizeMB       int         `yaml:"max_file_size_mb"`
 	LLM                 LLMConfig   `yaml:"llm"`
+	Auth                AuthConfig  `yaml:"auth"`
 }
 
 const archiveExcludePath = "sources/_archived"
@@ -125,6 +141,18 @@ func (c *Config) applyDefaults() {
 	if c.LLM.Backend == "" {
 		c.LLM.Backend = "claudecode"
 	}
+	if c.Auth.Mode == "" {
+		c.Auth.Mode = "none"
+	}
+	if c.Auth.MaxBodyMB == 0 {
+		c.Auth.MaxBodyMB = 4
+	}
+	if c.Auth.MaxStreamSeconds == 0 {
+		c.Auth.MaxStreamSeconds = 3600
+	}
+	if c.Auth.OAuth.JWKSTTLSeconds == 0 {
+		c.Auth.OAuth.JWKSTTLSeconds = 900
+	}
 }
 
 // AllExcluded returns the effective scan/index exclusion list without mutating
@@ -208,6 +236,34 @@ func (c *Config) validate() error {
 	}
 	if c.LLM.EmbeddingBaseURL != "" && c.LLM.EmbeddingModel == "" {
 		return fmt.Errorf("llm.embedding_base_url: requires embedding_model to be set")
+	}
+	if c.Auth.Mode != "none" && c.Auth.Mode != "bearer" && c.Auth.Mode != "oauth" {
+		return fmt.Errorf("auth.mode: %q not supported; use \"none\", \"bearer\", or \"oauth\"", c.Auth.Mode)
+	}
+	if c.Auth.Mode == "oauth" {
+		if c.Auth.OAuth.Issuer == "" {
+			return fmt.Errorf("auth.oauth.issuer: must not be empty when auth.mode is \"oauth\"")
+		}
+		if err := validateIssuer(c.Auth.OAuth.Issuer); err != nil {
+			return err
+		}
+	}
+	if c.Auth.MaxBodyMB < 0 {
+		return fmt.Errorf("auth.max_body_mb: must be positive; expected a value in megabytes")
+	}
+	if c.Auth.MaxStreamSeconds < 0 {
+		return fmt.Errorf("auth.max_stream_seconds: must be positive; expected a value in seconds")
+	}
+	if c.Auth.OAuth.JWKSTTLSeconds < 0 {
+		return fmt.Errorf("auth.oauth.jwks_ttl_seconds: must be positive; expected a value in seconds")
+	}
+	return nil
+}
+
+func validateIssuer(issuer string) error {
+	u, err := url.Parse(issuer)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return fmt.Errorf("auth.oauth.issuer: %q is not an absolute https:// URL; expected a scheme-qualified issuer URL", issuer)
 	}
 	return nil
 }
