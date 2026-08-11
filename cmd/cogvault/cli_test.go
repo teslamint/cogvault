@@ -951,3 +951,24 @@ func readFile(t *testing.T, path string) string {
 	}
 	return string(data)
 }
+
+// TestSessionIdleTTLExceedsStreamLifetime pins the relationship the streamable
+// HTTP session sweeper depends on. mcp-go only starts the sweeper when the
+// idle TTL is positive, and it touches a session when a request arrives — a
+// long-lived listen stream is touched at establishment and not again. So the
+// TTL must outlast a stream that runs for its full MaxStreamSeconds, or the
+// sweeper would reap the session out from under an active client.
+func TestSessionIdleTTLExceedsStreamLifetime(t *testing.T) {
+	for _, maxStreamSeconds := range []int{1, 60, 3600} {
+		ttl := sessionIdleTTLFor(maxStreamSeconds)
+		streamLifetime := time.Duration(maxStreamSeconds) * time.Second
+		if ttl <= streamLifetime {
+			t.Errorf("sessionIdleTTLFor(%d) = %v, want greater than the %v stream lifetime",
+				maxStreamSeconds, ttl, streamLifetime)
+		}
+		if ttl <= 0 {
+			t.Errorf("sessionIdleTTLFor(%d) = %v, want positive so mcp-go starts the sweeper at all",
+				maxStreamSeconds, ttl)
+		}
+	}
+}
