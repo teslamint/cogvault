@@ -162,6 +162,12 @@ later (0001). Rejected:
 - `auth.max_body_mb`, `auth.max_stream_seconds`, `auth.oauth.jwks_ttl_seconds`
   negative (zero or omitted defaults to 4/3600/900 — see the deviation
   addendum above).
+- `auth.max_stream_seconds` above 86400. Durations derived from it — the
+  streamable HTTP session sweeper's idle TTL is twice this value — overflow
+  int64 nanoseconds into a negative duration at absurd inputs, which mcp-go
+  reads as "sweeper disabled" and which would silently restore the session
+  leak the sweeper prevents. The ceiling refuses the input rather than failing
+  open.
 - Unknown YAML keys (`KnownFields(true)`) and multi-document YAML.
 
 `Config.AllExcluded()` returns the effective scan/index exclusion list. It always

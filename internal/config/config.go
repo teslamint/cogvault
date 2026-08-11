@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -52,6 +53,27 @@ type Config struct {
 }
 
 const archiveExcludePath = "sources/_archived"
+
+// maxStreamSecondsCeiling bounds auth.max_stream_seconds from above. Callers
+// derive nanosecond durations from it — the streamable HTTP session sweeper's
+// idle TTL is 2x this value — and an unbounded input overflows int64
+// nanoseconds into a negative duration, which mcp-go reads as "sweeper
+// disabled". That would silently restore the session leak the sweeper exists
+// to prevent, so the ceiling is a guard against failing open, not a policy
+// judgment about how long a stream may live. One day is far beyond any
+// legitimate stream.
+const maxStreamSecondsCeiling = 86400
+
+// ValidAuthModes returns the auth.mode values this package accepts.
+//
+// internal/httpauth deliberately keeps its own independent switch rather than
+// importing this package: it is the access boundary and stays standalone.
+// This accessor exists so a test at a layer that already sees both packages
+// can iterate the real list and catch the dangerous drift direction — a mode
+// config accepts that httpauth would panic on at startup.
+func ValidAuthModes() []string {
+	return []string{"none", "bearer", "oauth"}
+}
 
 func Load(configPath string) (*Config, error) {
 	f, err := os.Open(configPath)
@@ -237,7 +259,7 @@ func (c *Config) validate() error {
 	if c.LLM.EmbeddingBaseURL != "" && c.LLM.EmbeddingModel == "" {
 		return fmt.Errorf("llm.embedding_base_url: requires embedding_model to be set")
 	}
-	if c.Auth.Mode != "none" && c.Auth.Mode != "bearer" && c.Auth.Mode != "oauth" {
+	if !slices.Contains(ValidAuthModes(), c.Auth.Mode) {
 		return fmt.Errorf("auth.mode: %q not supported; use \"none\", \"bearer\", or \"oauth\"", c.Auth.Mode)
 	}
 	if c.Auth.Mode == "oauth" {
@@ -251,8 +273,8 @@ func (c *Config) validate() error {
 	if c.Auth.MaxBodyMB < 0 {
 		return fmt.Errorf("auth.max_body_mb: must be positive; expected a value in megabytes")
 	}
-	if c.Auth.MaxStreamSeconds < 0 {
-		return fmt.Errorf("auth.max_stream_seconds: must be positive; expected a value in seconds")
+	if c.Auth.MaxStreamSeconds < 0 || c.Auth.MaxStreamSeconds > maxStreamSecondsCeiling {
+		return fmt.Errorf("auth.max_stream_seconds: must be positive and at most %d; expected a value in seconds", maxStreamSecondsCeiling)
 	}
 	if c.Auth.OAuth.JWKSTTLSeconds < 0 {
 		return fmt.Errorf("auth.oauth.jwks_ttl_seconds: must be positive; expected a value in seconds")
