@@ -16,8 +16,17 @@ All writes are serialized, even when they target different paths.
 ## Why
 
 - It guarantees same-path write serialization with minimal implementation complexity.
-- The current MCP stdio model is effectively single-connection and low-concurrency.
 - It avoids introducing lock bookkeeping or lifecycle bugs before there is evidence that write concurrency is a bottleneck.
+
+Originally this decision also rested on the MCP stdio model being effectively
+single-connection and low-concurrency. That premise no longer holds: the `sse`
+and `http` transports added in 2026-08 serve concurrent requests, so concurrent
+`wiki_write` and `wiki_delete` calls are reachable in normal operation rather
+than theoretical. The decision itself is unchanged and still correct — a single
+global mutex serializes every path, which is strictly more conservative than
+the same-path serialization the contract requires, so there is no race. What
+changed is that the mutex now serializes traffic that can genuinely arrive in
+parallel, which is a throughput question rather than a correctness one.
 
 ## Alternatives Considered
 
@@ -30,6 +39,11 @@ All writes are serialized, even when they target different paths.
 
 - Ingest throughput becomes a measurable bottleneck.
 - CLI or engine workflows introduce meaningful concurrent write traffic.
+  **Partially fired (2026-08)**: the remote `sse`/`http` transports moved
+  concurrent writes from theoretical to reachable. The next step is
+  measurement under real remote usage, not a rewrite — path-keyed locking
+  remains the premature complexity this decision rejected until there is
+  evidence the single mutex is an actual bottleneck.
 - Multiple reviewers identify the single mutex as a real scalability limit rather than a theoretical one.
 
 ## Related Files
