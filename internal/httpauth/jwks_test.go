@@ -60,6 +60,26 @@ func ecJWK(kid string, pub *ecdsa.PublicKey) testJWK {
 	}
 }
 
+// genRSAKey generates a fresh 2048-bit RSA key, failing the test on error.
+func genRSAKey(t *testing.T) *rsa.PrivateKey {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa.GenerateKey: %v", err)
+	}
+	return key
+}
+
+// genECKey generates a fresh P-256 ECDSA key, failing the test on error.
+func genECKey(t *testing.T) *ecdsa.PrivateKey {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("ecdsa.GenerateKey: %v", err)
+	}
+	return key
+}
+
 // stubServer serves a discovery document and a JWKS document from one
 // httptest.Server, counting requests to each so tests can assert exact fetch
 // counts.
@@ -88,14 +108,8 @@ func newStubServer(t *testing.T, keys []testJWK) *stubServer {
 }
 
 func TestJWKSHappyPathRSAAndEC(t *testing.T) {
-	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("rsa.GenerateKey: %v", err)
-	}
-	ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("ecdsa.GenerateKey: %v", err)
-	}
+	rsaKey := genRSAKey(t)
+	ecKey := genECKey(t)
 
 	stub := newStubServer(t, []testJWK{
 		rsaJWK("rsa-1", &rsaKey.PublicKey),
@@ -132,10 +146,7 @@ func TestJWKSHappyPathRSAAndEC(t *testing.T) {
 }
 
 func TestJWKSCachedWithinTTLNoRefetch(t *testing.T) {
-	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("rsa.GenerateKey: %v", err)
-	}
+	rsaKey := genRSAKey(t)
 	stub := newStubServer(t, []testJWK{rsaJWK("k1", &rsaKey.PublicKey)})
 	cache := NewJWKSCache(stub.srv.URL, time.Hour, stub.srv.Client())
 
@@ -158,10 +169,7 @@ func TestJWKSCachedWithinTTLNoRefetch(t *testing.T) {
 // floor: a second unknown kid requested immediately afterward (well inside
 // the 60s floor window) must not trigger another fetch.
 func TestJWKSUnknownKidRefetchesOnceThenFloorSuppresses(t *testing.T) {
-	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("rsa.GenerateKey: %v", err)
-	}
+	rsaKey := genRSAKey(t)
 	stub := newStubServer(t, []testJWK{rsaJWK("k1", &rsaKey.PublicKey)})
 	cache := NewJWKSCache(stub.srv.URL, time.Hour, stub.srv.Client())
 
@@ -195,10 +203,7 @@ func TestJWKSUnknownKidRefetchesOnceThenFloorSuppresses(t *testing.T) {
 // fifty goroutines racing on an unknown kid must collapse onto exactly one
 // JWKS fetch. Run with -race.
 func TestJWKSConcurrentUnknownKidSingleFetch(t *testing.T) {
-	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("rsa.GenerateKey: %v", err)
-	}
+	rsaKey := genRSAKey(t)
 	stub := newStubServer(t, []testJWK{rsaJWK("k1", &rsaKey.PublicKey)})
 	cache := NewJWKSCache(stub.srv.URL, time.Hour, stub.srv.Client())
 
@@ -267,10 +272,7 @@ func TestJWKSMalformedBase64ReturnsErrorNotPanic(t *testing.T) {
 // ambiguity that an unsupported kty in the set is skipped, not fatal to the
 // whole fetch.
 func TestJWKSSkipsUnsupportedKeyTypeWithoutFailingFetch(t *testing.T) {
-	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("rsa.GenerateKey: %v", err)
-	}
+	rsaKey := genRSAKey(t)
 	stub := newStubServer(t, []testJWK{
 		{Kty: "oct", Kid: "sym-1"},
 		rsaJWK("rsa-1", &rsaKey.PublicKey),
@@ -395,14 +397,8 @@ func newStubServerWithJWKSBody(t *testing.T, writeBody func(w http.ResponseWrite
 // inverted use check would still have passed. It also covers the M1 (RSA e
 // overflow) and M2 (EC point not on curve) decode fixes.
 func TestJWKSSkipsAndRejectsMalformedKeys(t *testing.T) {
-	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("rsa.GenerateKey: %v", err)
-	}
-	ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("ecdsa.GenerateKey: %v", err)
-	}
+	rsaKey := genRSAKey(t)
+	ecKey := genECKey(t)
 
 	encOnly := rsaJWK("enc-1", &rsaKey.PublicKey)
 	encOnly.Use = "enc"
@@ -485,10 +481,7 @@ func TestJWKSFailedFetchFloorSuppressesRetry(t *testing.T) {
 // live contexts) must still get the key, not the leader's cancellation
 // error.
 func TestJWKSLeaderCancellationDoesNotFailOtherWaiters(t *testing.T) {
-	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("rsa.GenerateKey: %v", err)
-	}
+	rsaKey := genRSAKey(t)
 
 	handlerEntered := make(chan struct{})
 	release := make(chan struct{})

@@ -2,7 +2,6 @@ package httpauth
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/rsa"
 	"errors"
 	"net/http"
@@ -26,10 +25,7 @@ const (
 // happens to decode it.
 func newTestOAuthFixture(t *testing.T) (issuer string, key *rsa.PrivateKey, keys *JWKSCache) {
 	t.Helper()
-	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("rsa.GenerateKey: %v", err)
-	}
+	rsaKey := genRSAKey(t)
 	stub := newStubServer(t, []testJWK{rsaJWK(testKid, &rsaKey.PublicKey)})
 	cache := NewJWKSCache(stub.srv.URL, time.Hour, stub.srv.Client())
 	return stub.srv.URL, rsaKey, cache
@@ -103,10 +99,7 @@ func TestOAuthValidatorRejections(t *testing.T) {
 	issuer, key, keys := newTestOAuthFixture(t)
 	v := NewOAuthValidator(issuer, testAudience, nil, keys)
 
-	otherKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("rsa.GenerateKey: %v", err)
-	}
+	otherKey := genRSAKey(t)
 
 	tests := []struct {
 		name      string

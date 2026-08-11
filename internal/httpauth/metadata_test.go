@@ -241,23 +241,7 @@ func TestWellKnownExactMatch(t *testing.T) {
 	})
 
 	t.Run("Mount panics for the same unusable configs Middleware rejects", func(t *testing.T) {
-		baseCfg := Config{
-			PublicURL:        "https://mcp.example.com",
-			MaxBodyBytes:     1024,
-			MaxStreamSeconds: 30,
-		}
-
-		tests := []struct {
-			name string
-			cfg  Config
-		}{
-			{name: "empty Mode", cfg: baseCfg},
-			{name: "unknown Mode value", cfg: func() Config { c := baseCfg; c.Mode = "Bearer"; return c }()},
-			{name: "bearer mode with empty BearerToken", cfg: func() Config { c := baseCfg; c.Mode = "bearer"; return c }()},
-			{name: "oauth mode with nil Validator", cfg: func() Config { c := baseCfg; c.Mode = "oauth"; return c }()},
-		}
-
-		for _, tt := range tests {
+		for _, tt := range unusableConfigCases() {
 			t.Run(tt.name, func(t *testing.T) {
 				defer func() {
 					if r := recover(); r == nil {

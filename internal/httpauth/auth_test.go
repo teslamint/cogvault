@@ -453,17 +453,24 @@ func TestStreamDeadline(t *testing.T) {
 	})
 }
 
-func TestMiddlewarePanicsOnUnusableConfig(t *testing.T) {
+// unusableConfigCase names one Config that is invalid enough that both
+// Middleware and Mount must panic on it rather than silently misconfigure.
+type unusableConfigCase struct {
+	name string
+	cfg  Config
+}
+
+// unusableConfigCases is shared by TestMiddlewarePanicsOnUnusableConfig here
+// and by the equivalent Mount coverage in metadata_test.go, since both
+// exercise the same set of unusable Configs against their respective
+// constructors.
+func unusableConfigCases() []unusableConfigCase {
 	baseCfg := Config{
 		PublicURL:        "https://mcp.example.com",
 		MaxBodyBytes:     1024,
 		MaxStreamSeconds: 30,
 	}
-
-	tests := []struct {
-		name string
-		cfg  Config
-	}{
+	return []unusableConfigCase{
 		{
 			name: "empty Mode",
 			cfg:  baseCfg,
@@ -481,8 +488,10 @@ func TestMiddlewarePanicsOnUnusableConfig(t *testing.T) {
 			cfg:  func() Config { c := baseCfg; c.Mode = "oauth"; return c }(),
 		},
 	}
+}
 
-	for _, tt := range tests {
+func TestMiddlewarePanicsOnUnusableConfig(t *testing.T) {
+	for _, tt := range unusableConfigCases() {
 		t.Run(tt.name, func(t *testing.T) {
 			defer func() {
 				if r := recover(); r == nil {
