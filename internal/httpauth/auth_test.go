@@ -623,3 +623,46 @@ func TestMiddlewarePanicsOnUnusableConfig(t *testing.T) {
 		})
 	}
 }
+
+// TestReadDeadlineUnblocksTricklingBody proves the socket read deadline set by
+// Middleware unblocks a handler stuck in r.Body.Read on a trickling chunked
+// POST at roughly MaxStreamSeconds. It is the discriminating test for that
+// deadline: with the http.NewResponseController block deleted, the handler
+// stays blocked and this test fails, because a context deadline alone cannot
+// interrupt a blocked Read.
+func TestReadDeadlineUnblocksTricklingBody(t *testing.T) {
+	unblocked := make(chan time.Duration, 1)
+	cfg := Config{Mode: "none", MaxBodyBytes: 1 << 20, MaxStreamSeconds: 1}
+	h := Middleware(cfg)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		_, _ = io.Copy(io.Discard, r.Body)
+		unblocked <- time.Since(start)
+	}))
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	pr, pw := io.Pipe()
+	req, err := http.NewRequest(http.MethodPost, ts.URL, pr)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	go func() {
+		_, _ = pw.Write([]byte("x"))
+		time.Sleep(8 * time.Second)
+		pw.Close()
+	}()
+	go func() {
+		if resp, err := ts.Client().Do(req); err == nil {
+			resp.Body.Close()
+		}
+	}()
+
+	select {
+	case d := <-unblocked:
+		if d < 500*time.Millisecond || d > 3*time.Second {
+			t.Fatalf("handler unblocked after %v, want ~1s", d)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("handler still blocked in r.Body.Read past the 1s deadline")
+	}
+}
