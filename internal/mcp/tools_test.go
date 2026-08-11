@@ -749,3 +749,62 @@ func TestDefaultContentFitsMaxSchemaLen(t *testing.T) {
 	}
 }
 
+// TestToolAnnotations enumerates the actually-registered tool set (via
+// NewServer + ListTools) rather than asserting against a hardcoded name
+// list, so a future tool added without a deliberate readOnlyHint/
+// destructiveHint choice fails this test instead of silently passing.
+func TestToolAnnotations(t *testing.T) {
+	want := map[string]struct {
+		readOnly    bool
+		destructive bool
+	}{
+		"wiki_read":   {true, false},
+		"wiki_list":   {true, false},
+		"wiki_search": {true, false},
+		"wiki_scan":   {true, false},
+		"wiki_parse":  {true, false},
+		"wiki_write":  {false, true},
+		"wiki_delete": {false, true},
+	}
+
+	store := &mockStorage{
+		readFn: func(path string) ([]byte, error) {
+			return nil, fmt.Errorf("read: %w", cverr.ErrNotFound)
+		},
+	}
+	s := NewServer("/vault", testCfg(), store, &mockIndex{}, &mockAdapter{})
+
+	tools := s.ListTools()
+	if len(tools) == 0 {
+		t.Fatal("no tools registered")
+	}
+
+	for name, st := range tools {
+		ann := st.Tool.Annotations
+		if ann.ReadOnlyHint == nil {
+			t.Errorf("%s: missing readOnlyHint annotation", name)
+			continue
+		}
+		if ann.DestructiveHint == nil {
+			t.Errorf("%s: missing destructiveHint annotation", name)
+			continue
+		}
+
+		w, ok := want[name]
+		if !ok {
+			t.Errorf("%s: registered but not covered by this test's expected-value table; a new tool needs a deliberate readOnlyHint/destructiveHint choice recorded here", name)
+			continue
+		}
+		if *ann.ReadOnlyHint != w.readOnly {
+			t.Errorf("%s: readOnlyHint = %v, want %v", name, *ann.ReadOnlyHint, w.readOnly)
+		}
+		if *ann.DestructiveHint != w.destructive {
+			t.Errorf("%s: destructiveHint = %v, want %v", name, *ann.DestructiveHint, w.destructive)
+		}
+	}
+
+	if len(tools) != len(want) {
+		t.Errorf("registered tool count = %d, want %d (expected-value table is stale relative to registered tools)", len(tools), len(want))
+	}
+}
+
