@@ -191,6 +191,14 @@ Request flow in `oauth` mode:
    `iss` against the configured issuer, `aud` against the configured audience,
    and `exp`/`nbf` against the clock with a 60-second leeway. A `kid` absent
    from the cache triggers one rate-limited JWKS refetch before rejection.
+   **An `exp` claim is mandatory**: a token without one is rejected, not
+   treated as non-expiring. `golang-jwt/v5` validates `exp` only when the claim
+   is present unless the parser is constructed with `jwt.WithExpirationRequired()`,
+   so a provider or misconfiguration that mints an `exp`-less access token
+   would otherwise produce an eternal credential and silently defeat both the
+   S6 re-authorization flow and the stream bound above. The exact option name
+   is confirmed against the library at implementation time; the requirement is
+   the behavior, not the spelling.
 4. Failures return `401` with an `error="invalid_token"` challenge. A valid
    token whose scopes miss `required_scopes` returns `403` with
    `error="insufficient_scope"`.
@@ -198,11 +206,23 @@ Request flow in `oauth` mode:
 
 Four properties of this flow are requirements, not incidental:
 
-- **Authorization is per-request, never per-session.** mcp-go's stateful mode
-  issues an `Mcp-Session-Id`, but the middleware sits in front of every request
-  including those carrying an established session id. A session opened with a
-  valid token stops working the moment that token expires; possession of a
-  session id is never itself a credential.
+- **Authorization is per-request, never per-session** — for request/response
+  traffic. mcp-go's stateful mode issues an `Mcp-Session-Id`, but the
+  middleware sits in front of every POST including those carrying an
+  established session id. Possession of a session id is never itself a
+  credential.
+- **Long-lived streams are bounded by token expiry.** The above is *not*
+  automatically true of the persistent `text/event-stream` connection opened by
+  a GET: the middleware authorizes it once at establishment, and mcp-go then
+  holds it open indefinitely with heartbeats, deliberately not revalidating —
+  `handleGet` states outright that "the MCP specification doesn't require
+  validating session ID for GET requests" (`server/streamable_http.go:586-588`).
+  Without a bound, a token that has since expired keeps receiving on any stream
+  opened before expiry. So in `oauth` mode the middleware derives a deadline
+  from the token's `exp` and cancels the request context at that instant,
+  closing the stream; the client reconnects and re-authorizes. In `bearer` mode,
+  where there is no expiry, streams are bounded by `auth.max_stream_seconds`
+  (default 3600) instead.
 - **`aud` may be a string or an array.** The configured audience must be
   present in the array form too, and an `aud` that omits it is rejected. Without
   this, any token the same issuer minted for a different resource server would
@@ -249,6 +269,8 @@ New top-level `auth:` block in the config file:
 auth:
   mode: string            # "none" | "bearer" | "oauth". Default: "none".
   max_body_mb: int        # request body cap for network transports. Default: 4.
+  max_stream_seconds: int # hard lifetime cap on a GET event stream. Default: 3600.
+                          # In oauth mode the token's exp wins when it is sooner.
   oauth:
     issuer: string        # OIDC issuer URL. Required when mode is "oauth".
     audience: string      # Expected `aud` claim. Required when mode is "oauth".
@@ -265,9 +287,9 @@ Validation, following the existing `field: bad value; expected form` convention
 in `internal/config`:
 
 - `auth.mode` outside the accepted set → error.
-- `auth.max_body_mb` or `auth.oauth.jwks_ttl_seconds` zero or negative → error,
-  matching the existing `max_file_size_mb` rejection style in
-  `internal/config`.
+- `auth.max_body_mb`, `auth.max_stream_seconds`, or
+  `auth.oauth.jwks_ttl_seconds` zero or negative → error, matching the existing
+  `max_file_size_mb` rejection style in `internal/config`.
 - `mode: oauth` with an empty `issuer` → error.
 - `issuer` that is not an absolute `https://` URL → error.
 - `jwks_uri` from OIDC discovery that is not `https://` → error. The issuer is
@@ -384,6 +406,11 @@ for the new package. Unit tests reach no network — the JWKS endpoint is a loca
   stub JWKS server via `httptest`:
   - valid token passes; expired, not-yet-valid, wrong `aud`, wrong `iss`,
     bad signature, unknown `kid`, and malformed JWT each return `401`
+  - a token with a valid signature, issuer, and audience but **no `exp` claim**
+    returns `401` rather than being accepted as non-expiring
+  - a GET stream authorized by a token expiring in N seconds is closed at N
+    seconds, not held open; in `bearer` mode it closes at
+    `auth.max_stream_seconds`
   - valid token missing a required scope returns `403` with
     `error="insufficient_scope"`
   - missing `Authorization` header returns `401` carrying a
@@ -432,6 +459,7 @@ for the new package. Unit tests reach no network — the JWKS endpoint is a loca
 | **A leaked credential can destroy the wiki irrecoverably.** | Partially mitigated, and the residue is accepted rather than hidden. The S5 startup guard blocks the worst misconfiguration on both network transports, and the credential itself is the access boundary. But there is **no recovery path in cogvault**: `wiki_write` overwrites unconditionally and does not commit, and the cheapest total-destruction path for an attacker is overwriting every page rather than deleting it. The existing `gitAutoCommit` (`internal/mcp/tools.go:129`) fires **only** from `handleWikiDelete`, and nothing anywhere in `internal/` or `cmd/` commits on write or on ingest — so a delete-commit typically records the removal of content that was never tracked, recovering nothing. Backups are therefore an operator precondition, stated as such in the deployment section, not a property of this feature. See Open Decision D6. |
 | Bearer tokens are guessable under sustained brute force, and the server has no rate limiting | The token is expected to be high-entropy and machine-generated; the deployment docs say so and give a generation command. Rate limiting is not implemented — recorded as Open Decision D5 rather than silently omitted. |
 | Claude Code stores the bearer token as plaintext config in `~/.claude.json`, unlike OAuth client secrets which it puts in the keychain | Out of cogvault's control. Documented in the deployment section so the user chooses bearer mode knowingly; OAuth mode avoids it. |
+| A long-lived event stream outliving its credential | The middleware authorizes a GET stream once at establishment and mcp-go never revalidates it, so the stream is bounded by the token's `exp` (or `auth.max_stream_seconds` in bearer mode) and closed at that instant. Residual: a stream can persist up to the leeway window past nominal expiry. Accepted. |
 | Hand-rolled JWT validation is a classic source of vulnerabilities | Use `github.com/golang-jwt/jwt/v5` with an explicit allowed-algorithms list (`RS256`, `ES256`) rather than trusting the token header; never accept `none`. Negative tests above cover each rejection path. |
 | Identity providers that issue opaque rather than JWT access tokens simply will not work | Declared out of scope and documented; startup cannot detect it, so the failure surfaces as a `401` at first call. Open Decision D2 tracks introspection support. |
 | Tunnel URL changes (ephemeral cloudflared URLs) break the `resource` value in the metadata document | `--public-url` is explicit rather than inferred, and the docs recommend a stable named tunnel over ephemeral URLs. |
@@ -492,6 +520,9 @@ for the new package. Unit tests reach no network — the JWKS endpoint is a loca
       section that implies git makes the wiki recoverable fails this criterion.
 11. Near-miss well-known paths are not an authorization bypass.
     - **Measured by**: `go test ./internal/httpauth/ -run TestWellKnownExactMatch -v`
+12. No credential grants unbounded access: a token without `exp` is rejected,
+    and an authorized event stream does not outlive its token.
+    - **Measured by**: `go test ./internal/httpauth/ -run 'TestExpRequired|TestStreamDeadline' -v`
 
 ## Open Decisions
 
