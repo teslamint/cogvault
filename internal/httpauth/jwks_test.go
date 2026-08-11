@@ -529,6 +529,37 @@ func TestJWKSLeaderCancellationDoesNotFailOtherWaiters(t *testing.T) {
 	}
 }
 
+// TestJWKSRejectsIssuerMismatch (Covers C5) proves the discovery document's
+// issuer field is compared against the configured issuer, per OIDC
+// Discovery 1.0 §4.3, and a mismatch is rejected before the cache ever looks
+// at jwks_uri.
+func TestJWKSRejectsIssuerMismatch(t *testing.T) {
+	var discoveryHits, jwksHits int64
+	var srv *httptest.Server
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt64(&discoveryHits, 1)
+		fmt.Fprintf(w, `{"issuer":"https://not-the-configured-issuer.example.com","jwks_uri":"%s/jwks.json"}`, srv.URL)
+	})
+	mux.HandleFunc("/jwks.json", func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt64(&jwksHits, 1)
+		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []testJWK{}})
+	})
+	srv = httptest.NewTLSServer(mux)
+	defer srv.Close()
+
+	cache := NewJWKSCache(srv.URL, time.Hour, srv.Client())
+	if _, err := cache.KeyFor(context.Background(), "any-kid"); err == nil {
+		t.Fatal("KeyFor: want error for mismatched discovery issuer, got nil")
+	}
+	if got := atomic.LoadInt64(&discoveryHits); got != 1 {
+		t.Errorf("discovery hits = %d, want 1", got)
+	}
+	if got := atomic.LoadInt64(&jwksHits); got != 0 {
+		t.Errorf("jwks hits = %d, want 0 (must reject before fetching jwks_uri)", got)
+	}
+}
+
 func TestDiscoveryURLForRejectsMalformedIssuer(t *testing.T) {
 	cases := []string{
 		"http://auth.example.com",

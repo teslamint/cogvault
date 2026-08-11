@@ -5,12 +5,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mark3labs/mcp-go/server"
 )
 
 // errValidatorRejected is a sentinel error a stubValidator returns to
@@ -472,6 +475,103 @@ func TestStreamDeadline(t *testing.T) {
 			t.Fatalf("handler released too late: elapsed = %v, want ~1s", elapsed)
 		}
 	})
+}
+
+// TestStreamDeadlineRealTransport (Covers T1) proves the stream deadline
+// bounds a real long-lived transport, not only the synthetic
+// <-r.Context().Done() handler TestStreamDeadline uses: it mounts a real
+// server.NewSSEServer through Mount with a short MaxStreamSeconds, opens the
+// SSE stream, and asserts the connection closes near that bound rather than
+// staying open indefinitely. A pre-merge review probe observed closure at
+// 1.002s for a 1-second bound; this promotes that probe to a permanent
+// regression test. The bound is kept small so the test itself stays fast.
+func TestStreamDeadlineRealTransport(t *testing.T) {
+	mcpSrv := server.NewMCPServer("test", "0.0.0")
+	sseSrv := server.NewSSEServer(mcpSrv)
+
+	cfg := Config{Mode: "none", MaxBodyBytes: 1024, MaxStreamSeconds: 1}
+	handler := Mount(cfg, sseSrv)
+
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	start := time.Now()
+	resp, err := http.Get(ts.URL + "/sse")
+	if err != nil {
+		t.Fatalf("GET /sse: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	// No events are ever sent on this stream; a working deadline is the
+	// only thing that ends it. io.Copy blocks until the server closes the
+	// connection (io.EOF) or the test's own timeout below fires.
+	done := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(io.Discard, resp.Body)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		elapsed := time.Since(start)
+		// The connection is cut mid-response (the deadline firing while a
+		// chunked body is still open), not closed cleanly, so the client
+		// sees io.ErrUnexpectedEOF rather than a plain io.EOF; either is
+		// exactly what proves the deadline closed the connection.
+		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Fatalf("reading stream: %v (elapsed %v)", err, elapsed)
+		}
+		if elapsed < 900*time.Millisecond {
+			t.Fatalf("connection closed too early: elapsed = %v, want ~1s", elapsed)
+		}
+		if elapsed > 5*time.Second {
+			t.Fatalf("connection closed too late: elapsed = %v, want ~1s", elapsed)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("stream deadline did not close a real SSE connection within 10s")
+	}
+}
+
+// TestPastExpiryRejectedAsInvalidCredential (Covers C3/F5) proves a
+// validator-reported expiry that is already in the past — as happens when a
+// token is accepted only because it falls within the JWT parser's 60s
+// clock-skew leeway (NewOAuthValidator) — is rejected as an invalid
+// credential (401) rather than handed to the wrapped handler with an
+// already-cancelled context. Before this fix, the handler ran dead and the
+// client saw an opaque stream failure instead of a 401 telling it to
+// refresh. Uses stubValidator, not a minted JWT, to isolate the deadline
+// check in Middleware from OAuthValidator's own leeway handling (covered
+// separately by TestOAuthValidatorRejections).
+func TestPastExpiryRejectedAsInvalidCredential(t *testing.T) {
+	const publicURL = "https://mcp.example.com"
+	cfg := Config{
+		Mode:             "oauth",
+		PublicURL:        publicURL,
+		MaxBodyBytes:     1024,
+		MaxStreamSeconds: 30,
+		Validator:        stubValidator{expiresAt: time.Now().Add(-time.Second)},
+	}
+	var ran bool
+	h := Middleware(cfg)(sentinelHandler(&ran))
+
+	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	req.Header.Set("Authorization", "Bearer whatever-the-stub-accepts")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if ran {
+		t.Fatal("next handler ran with an already-elapsed deadline")
+	}
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+	wantChallenge := `Bearer error="invalid_token", resource_metadata="` + publicURL + `/.well-known/oauth-protected-resource"`
+	if got := rec.Header().Get("WWW-Authenticate"); got != wantChallenge {
+		t.Fatalf("WWW-Authenticate = %q, want %q", got, wantChallenge)
+	}
 }
 
 // unusableConfigCase names one Config that is invalid enough that both
