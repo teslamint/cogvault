@@ -12,7 +12,10 @@ See [ROADMAP.md](ROADMAP.md) for what comes next.
 Three stages — Phase 1 builds the middle one:
 
 1. **Capture** — nothing to run. The capture surface is directories you already
-   fill (e.g. `~/Downloads/_Articles`). Later phases add phone-fed inbox folders.
+   fill (e.g. `~/Downloads/_Articles`). A folder your phone syncs into works the
+   same way: send a file to an iCloud Drive or Dropbox folder from the share
+   sheet, list that folder in `sources[]`, and the scheduled run digests
+   whatever lands there. cogvault has no phone app and needs none.
 2. **Digest** — `cogvault ingest` scans the configured sources, detects
    unprocessed files by content hash, digests each PDF through the Claude Code CLI
    into a wiki source page (summary, key points, provenance frontmatter), indexes
