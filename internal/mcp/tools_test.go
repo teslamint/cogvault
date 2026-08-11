@@ -28,12 +28,12 @@ type mockStorage struct {
 	statFn   func(path string) (int64, time.Time, error)
 }
 
-func (m *mockStorage) Read(path string) ([]byte, error)          { return m.readFn(path) }
-func (m *mockStorage) Write(path string, data []byte) error      { return m.writeFn(path, data) }
-func (m *mockStorage) Delete(path string) error                  { return nil }
-func (m *mockStorage) Move(src, dst string) error                { return nil }
+func (m *mockStorage) Read(path string) ([]byte, error)                { return m.readFn(path) }
+func (m *mockStorage) Write(path string, data []byte) error            { return m.writeFn(path, data) }
+func (m *mockStorage) Delete(path string) error                        { return nil }
+func (m *mockStorage) Move(src, dst string) error                      { return nil }
 func (m *mockStorage) List(prefix string) ([]storage.ListEntry, error) { return m.listFn(prefix) }
-func (m *mockStorage) Exists(path string) (bool, error)          { return m.existsFn(path) }
+func (m *mockStorage) Exists(path string) (bool, error)                { return m.existsFn(path) }
 func (m *mockStorage) Stat(path string) (int64, time.Time, error) {
 	if m.statFn == nil {
 		return 0, time.Time{}, nil
@@ -51,14 +51,24 @@ type mockIndex struct {
 	closeFn            func() error
 }
 
-func (m *mockIndex) Add(path, content string, meta map[string]string) error { return m.addFn(path, content, meta) }
-func (m *mockIndex) Search(query string, limit int) ([]index.Result, error) { return m.searchFn(query, limit) }
-func (m *mockIndex) SearchSimilar(path string, limit int) ([]index.Result, error) { return []index.Result{}, nil }
-func (m *mockIndex) Remove(path string) error                               { return m.removeFn(path) }
-func (m *mockIndex) Rebuild(store storage.Storage, adpt adapter.Adapter) error { return m.rebuildFn(store, adpt) }
-func (m *mockIndex) CheckConsistency(store storage.Storage, adpt adapter.Adapter, force bool) (int, int, int, error) { return m.checkConsistencyFn(store, adpt, force) }
+func (m *mockIndex) Add(path, content string, meta map[string]string) error {
+	return m.addFn(path, content, meta)
+}
+func (m *mockIndex) Search(query string, limit int) ([]index.Result, error) {
+	return m.searchFn(query, limit)
+}
+func (m *mockIndex) SearchSimilar(path string, limit int) ([]index.Result, error) {
+	return []index.Result{}, nil
+}
+func (m *mockIndex) Remove(path string) error { return m.removeFn(path) }
+func (m *mockIndex) Rebuild(store storage.Storage, adpt adapter.Adapter) error {
+	return m.rebuildFn(store, adpt)
+}
+func (m *mockIndex) CheckConsistency(store storage.Storage, adpt adapter.Adapter, force bool) (int, int, int, error) {
+	return m.checkConsistencyFn(store, adpt, force)
+}
 func (m *mockIndex) GetMeta(path string) (*index.FileMeta, error) { return m.getMetaFn(path) }
-func (m *mockIndex) Close() error                                { return m.closeFn() }
+func (m *mockIndex) Close() error                                 { return m.closeFn() }
 
 type mockAdapter struct {
 	nameFn  func() string
@@ -67,8 +77,12 @@ type mockAdapter struct {
 }
 
 func (m *mockAdapter) Name() string { return m.nameFn() }
-func (m *mockAdapter) Scan(root string, exclude []string, fn func(path string) error) error { return m.scanFn(root, exclude, fn) }
-func (m *mockAdapter) Parse(root, relPath string, includeContent bool) (*adapter.Source, error) { return m.parseFn(root, relPath, includeContent) }
+func (m *mockAdapter) Scan(root string, exclude []string, fn func(path string) error) error {
+	return m.scanFn(root, exclude, fn)
+}
+func (m *mockAdapter) Parse(root, relPath string, includeContent bool) (*adapter.Source, error) {
+	return m.parseFn(root, relPath, includeContent)
+}
 
 func testCfg() *config.Config {
 	return &config.Config{
@@ -807,4 +821,3 @@ func TestToolAnnotations(t *testing.T) {
 		t.Errorf("registered tool count = %d, want %d (expected-value table is stale relative to registered tools)", len(tools), len(want))
 	}
 }
-
