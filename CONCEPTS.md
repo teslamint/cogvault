@@ -29,3 +29,15 @@ The 2-minute mtime quiet period a source file must satisfy before ingest will ha
 ## Deviation addendum
 
 A committed record for observable behavior discovered after spec or plan approval. It preserves the approved artifact and authorizes a separately reviewed, user-approved remediation plan. *Avoid: "silent plan correction".*
+
+## Resource server
+
+cogvault's role under OAuth 2.1: it **validates** access tokens and serves Protected Resource Metadata, but never issues, refreshes, or revokes them. Token issuance belongs to a user-supplied identity provider. *Avoid: calling cogvault an "auth server" or "OAuth server".*
+
+## Protected Resource Metadata
+
+The unauthenticated `/.well-known/oauth-protected-resource` document (RFC 9728) that tells a client which authorization server guards this resource. Clients reach it either by following the `resource_metadata` pointer in a `401` challenge or by probing the well-known path. Its advertised `resource` value and the expected token `aud` must be identical.
+
+## Stream lifetime bound
+
+The deadline that closes a long-lived MCP event stream at its token's `exp` (or at a fixed cap when the credential has no expiry). Necessary because a streaming connection is authorized once at establishment and never revalidated, so without the bound an expired token keeps receiving.
