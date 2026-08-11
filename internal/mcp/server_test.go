@@ -64,7 +64,7 @@ func callTool(t *testing.T, s *server.MCPServer, toolName string, args map[strin
 		"method":  "initialize",
 		"params": map[string]any{
 			"protocolVersion": "2024-11-05",
-			"capabilities":   map[string]any{},
+			"capabilities":    map[string]any{},
 			"clientInfo": map[string]any{
 				"name":    "test",
 				"version": "0.0.1",
