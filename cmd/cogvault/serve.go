@@ -148,6 +148,12 @@ func buildServeHandler(cfg *config.Config, mcpSrv *server.MCPServer, f serveFlag
 	if cfg.Auth.Mode == "none" && !loopback {
 		return nil, fmt.Errorf("addr: %q is not a loopback address; expected a loopback address (or set auth.mode to \"bearer\" or \"oauth\") when auth.mode is \"none\"", f.addr)
 	}
+	if cfg.Auth.Mode == "none" && f.publicURL != "" {
+		return nil, fmt.Errorf("public-url: %q must not be set when auth.mode is \"none\"; expected no public URL (a public URL has no function in \"none\" mode and signals unauthenticated tunnel exposure; set auth.mode to \"bearer\" or \"oauth\" instead)", f.publicURL)
+	}
+	if cfg.Auth.Mode == "oauth" && f.transport == "sse" {
+		return nil, fmt.Errorf("transport: %q is not supported when auth.mode is \"oauth\"; expected \"http\" (the sse transport serves fixed /sse and /message paths, so its protected resource metadata can never advertise the exact URL a conformant OAuth client requested, per RFC 9728 §3.3)", f.transport)
+	}
 
 	var publicURL string
 	if f.publicURL != "" {

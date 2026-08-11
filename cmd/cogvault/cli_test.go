@@ -552,18 +552,52 @@ func TestServeBindGuardAllowsLoopback(t *testing.T) {
 }
 
 func TestServeOAuthRequiresPublicURL(t *testing.T) {
+	// "sse" is deliberately not exercised here: TestServeOAuthRejectsSSE
+	// covers it, and oauth+sse is now refused before the public-url check
+	// ever runs (C2), so it would no longer report a public-url error.
 	configPath, _, _ := testVaultWithAuth(t, "auth:\n  mode: oauth\n  oauth:\n    issuer: https://issuer.example.com\n")
 
-	for _, transport := range []string{"http", "sse"} {
-		t.Run(transport, func(t *testing.T) {
-			_, _, err := executeCommand("serve", "--config", configPath, "--transport", transport, "--addr", "127.0.0.1:0")
-			if err == nil {
-				t.Fatalf("expected error for oauth mode without --public-url")
-			}
-			if !strings.Contains(err.Error(), "public-url") {
-				t.Errorf("expected error to name public-url, got: %v", err)
-			}
-		})
+	_, _, err := executeCommand("serve", "--config", configPath, "--transport", "http", "--addr", "127.0.0.1:0")
+	if err == nil {
+		t.Fatalf("expected error for oauth mode without --public-url")
+	}
+	if !strings.Contains(err.Error(), "public-url") {
+		t.Errorf("expected error to name public-url, got: %v", err)
+	}
+}
+
+// TestServeOAuthRejectsSSE (Covers C2) asserts "auth.mode: oauth" combined
+// with "--transport sse" refuses to start. SSE always serves fixed /sse and
+// /message paths, so the RFC 9728 protected resource metadata it would
+// advertise can never equal the URL a conformant OAuth client requested
+// (RFC 9728 §3.3): the combination is structurally unusable, not merely
+// undocumented, so it fails the same way the other startup guards do.
+func TestServeOAuthRejectsSSE(t *testing.T) {
+	configPath, _, _ := testVaultWithAuth(t, "auth:\n  mode: oauth\n  oauth:\n    issuer: https://issuer.example.com\n")
+
+	_, _, err := executeCommand("serve", "--config", configPath, "--transport", "sse", "--addr", "127.0.0.1:0", "--public-url", "https://mcp.example.com")
+	if err == nil {
+		t.Fatal("expected error for oauth mode with --transport sse")
+	}
+	if !strings.Contains(err.Error(), "transport") {
+		t.Errorf("expected error to name transport, got: %v", err)
+	}
+}
+
+// TestServeNoneRejectsPublicURL (Covers C1) asserts "auth.mode: none"
+// combined with a non-empty "--public-url" refuses to start. A public URL
+// has no legitimate function in "none" mode; its presence signals
+// tunnel-exposure intent the code cannot see directly but can see the
+// contradictory config for.
+func TestServeNoneRejectsPublicURL(t *testing.T) {
+	configPath, _, _ := testVault(t) // auth.mode defaults to "none"
+
+	_, _, err := executeCommand("serve", "--config", configPath, "--transport", "http", "--addr", "localhost:0", "--public-url", "https://mcp.example.com")
+	if err == nil {
+		t.Fatal("expected error for auth.mode none with --public-url set")
+	}
+	if !strings.Contains(err.Error(), "public-url") {
+		t.Errorf("expected error to name public-url, got: %v", err)
 	}
 }
 
@@ -633,8 +667,12 @@ func TestServePublicURLValidation(t *testing.T) {
 	t.Run("path without trailing slash accepted", func(t *testing.T) {
 		// buildServeHandler directly, not executeCommand: a successful
 		// "serve" invocation blocks forever in http.Server.ListenAndServe,
-		// which would hang this test.
-		cfg, store, idx, adpt, err := bootstrap(configPath)
+		// which would hang this test. "bearer" mode, not "none": a
+		// public-url has no legitimate function in "none" mode (C1) and
+		// this subtest is about public-url path handling, not auth mode.
+		t.Setenv("COGVAULT_BEARER_TOKEN", strings.Repeat("a", 32))
+		bearerConfigPath, _, _ := testVaultWithAuth(t, "auth:\n  mode: bearer\n")
+		cfg, store, idx, adpt, err := bootstrap(bearerConfigPath)
 		if err != nil {
 			t.Fatalf("bootstrap: %v", err)
 		}
@@ -855,7 +893,10 @@ func TestSSERequiresAuth(t *testing.T) {
 // when set, rather than the local bind address, which a remote client
 // behind a tunnel cannot reach.
 func TestServeSSEBaseURLUsesPublicURL(t *testing.T) {
-	configPath, _, _ := testVault(t) // auth.mode "none"
+	// "bearer" mode, not "none": a public-url has no legitimate function in
+	// "none" mode and is now refused at startup (C1).
+	t.Setenv("COGVAULT_BEARER_TOKEN", strings.Repeat("a", 32))
+	configPath, _, _ := testVaultWithAuth(t, "auth:\n  mode: bearer\n")
 
 	cfg, store, idx, adpt, err := bootstrap(configPath)
 	if err != nil {
@@ -881,6 +922,7 @@ func TestServeSSEBaseURLUsesPublicURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRequest: %v", err)
 	}
+	req.Header.Set("Authorization", "Bearer "+strings.Repeat("a", 32))
 	resp, err := ts.Client().Do(req)
 	if err != nil {
 		t.Fatalf("GET /sse: %v", err)
