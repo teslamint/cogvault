@@ -40,6 +40,7 @@ const minForcedRefetchInterval = 60 * time.Second
 // discoveryDocument is the subset of an OIDC discovery document this cache
 // needs.
 type discoveryDocument struct {
+	Issuer  string `json:"issuer"`
 	JWKSURI string `json:"jwks_uri"`
 }
 
@@ -167,6 +168,21 @@ func (c *JWKSCache) KeyFor(ctx context.Context, kid string) (crypto.PublicKey, e
 	c.fetching = ch
 	c.mu.Unlock()
 
+	// Cleared and closed on every path out of this round, including a
+	// panic inside fetchKeys, by deferring immediately after the channel
+	// is created rather than running these as plain statements after
+	// fetchKeys returns. Without this, a panic would leave c.fetching
+	// permanently non-nil, and every later KeyFor call would wait forever
+	// on a channel that never closes — the only wedge that needs a process
+	// restart. No panic path exists in fetchKeys today; this is structural
+	// insurance.
+	defer func() {
+		c.mu.Lock()
+		c.fetching = nil
+		close(ch)
+		c.mu.Unlock()
+	}()
+
 	// The fetch runs on a context detached from ctx's cancellation: multiple
 	// waiters can be collapsed onto this one in-flight fetch, and the first
 	// caller canceling its own request must not fail every other waiter's
@@ -183,8 +199,6 @@ func (c *JWKSCache) KeyFor(ctx context.Context, kid string) (crypto.PublicKey, e
 	if forced {
 		c.lastForced = time.Now()
 	}
-	c.fetching = nil
-	close(ch)
 	var key crypto.PublicKey
 	var ok bool
 	if err == nil {
@@ -213,6 +227,16 @@ func (c *JWKSCache) fetchKeys(ctx context.Context) (map[string]crypto.PublicKey,
 	var doc discoveryDocument
 	if err := c.fetchJSON(ctx, discoveryURL, &doc); err != nil {
 		return nil, fmt.Errorf("httpauth: fetching discovery document: %w", err)
+	}
+	// OIDC Discovery 1.0 §4.3 requires the returned issuer to be identical
+	// to the URL used as the prefix of the discovery request. Trailing
+	// slashes are trimmed on both sides before comparing: discoveryURLFor
+	// already normalizes away a configured issuer's trailing slash when
+	// building discoveryURL, and a provider's issuer response never carries
+	// one either, so comparing the raw configured string would reject a
+	// legitimately matching issuer that only differs by a trailing slash.
+	if strings.TrimSuffix(doc.Issuer, "/") != strings.TrimSuffix(c.issuer, "/") {
+		return nil, fmt.Errorf("httpauth: discovery document issuer %q does not match configured issuer %q", doc.Issuer, c.issuer)
 	}
 
 	jwksURL, err := url.Parse(doc.JWKSURI)

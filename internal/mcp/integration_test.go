@@ -849,7 +849,7 @@ func newStubJWKSServer(t *testing.T, keys []testJWK) *httptest.Server {
 	mux := http.NewServeMux()
 	var srv *httptest.Server
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprintf(w, `{"jwks_uri":"%s/jwks.json"}`, srv.URL)
+		fmt.Fprintf(w, `{"issuer":"%s","jwks_uri":"%s/jwks.json"}`, srv.URL, srv.URL)
 	})
 	mux.HandleFunc("/jwks.json", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"keys": keys})

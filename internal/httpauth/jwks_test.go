@@ -96,7 +96,7 @@ func newStubServer(t *testing.T, keys []testJWK) *stubServer {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
 		atomic.AddInt64(&s.discoveryHits, 1)
-		fmt.Fprintf(w, `{"jwks_uri":"%s/jwks.json"}`, s.srv.URL)
+		fmt.Fprintf(w, `{"issuer":"%s","jwks_uri":"%s/jwks.json"}`, s.srv.URL, s.srv.URL)
 	})
 	mux.HandleFunc("/jwks.json", func(w http.ResponseWriter, _ *http.Request) {
 		atomic.AddInt64(&s.jwksHits, 1)
@@ -228,16 +228,17 @@ func TestJWKSConcurrentUnknownKidSingleFetch(t *testing.T) {
 
 func TestJWKSRejectsNonHTTPSJWKSURI(t *testing.T) {
 	var discoveryHits, jwksHits int64
+	var srv *httptest.Server
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
 		atomic.AddInt64(&discoveryHits, 1)
-		fmt.Fprint(w, `{"jwks_uri":"http://evil.example.com/jwks.json"}`)
+		fmt.Fprintf(w, `{"issuer":"%s","jwks_uri":"http://evil.example.com/jwks.json"}`, srv.URL)
 	})
 	mux.HandleFunc("/jwks.json", func(w http.ResponseWriter, _ *http.Request) {
 		atomic.AddInt64(&jwksHits, 1)
 		w.WriteHeader(http.StatusOK)
 	})
-	srv := httptest.NewTLSServer(mux)
+	srv = httptest.NewTLSServer(mux)
 	defer srv.Close()
 
 	cache := NewJWKSCache(srv.URL, time.Hour, srv.Client())
@@ -338,7 +339,7 @@ func TestJWKSRejectsHTTPSToHTTPRedirect(t *testing.T) {
 	var tlsSrv *httptest.Server
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprintf(w, `{"jwks_uri":"%s/jwks.json"}`, tlsSrv.URL)
+		fmt.Fprintf(w, `{"issuer":"%s","jwks_uri":"%s/jwks.json"}`, tlsSrv.URL, tlsSrv.URL)
 	})
 	mux.HandleFunc("/jwks.json", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, plaintextSrv.URL+"/jwks.json", http.StatusFound)
@@ -380,7 +381,7 @@ func newStubServerWithJWKSBody(t *testing.T, writeBody func(w http.ResponseWrite
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
 		atomic.AddInt64(&s.discoveryHits, 1)
-		fmt.Fprintf(w, `{"jwks_uri":"%s/jwks.json"}`, s.srv.URL)
+		fmt.Fprintf(w, `{"issuer":"%s","jwks_uri":"%s/jwks.json"}`, s.srv.URL, s.srv.URL)
 	})
 	mux.HandleFunc("/jwks.json", func(w http.ResponseWriter, _ *http.Request) {
 		atomic.AddInt64(&s.jwksHits, 1)
@@ -488,7 +489,7 @@ func TestJWKSLeaderCancellationDoesNotFailOtherWaiters(t *testing.T) {
 	var srv *httptest.Server
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprintf(w, `{"jwks_uri":"%s/jwks.json"}`, srv.URL)
+		fmt.Fprintf(w, `{"issuer":"%s","jwks_uri":"%s/jwks.json"}`, srv.URL, srv.URL)
 	})
 	mux.HandleFunc("/jwks.json", func(w http.ResponseWriter, _ *http.Request) {
 		close(handlerEntered)
