@@ -16,8 +16,11 @@ Read these non-obvious invariants before editing:
    Owner: `DESIGN.md`, `docs/solutions/database-issues/sqlite-pool-pragma-and-busy-snapshot.md`
 5. Ingest has a cross-process single-writer lock so scheduled and manual runs never overlap.
    Owner: `docs/decisions/0021-v2-refounding.md` D2/D4, `DESIGN.md`
-6. Deletion stays unsafe without auto-commit, so there is no `wiki_delete`.
-   Owner: `SPEC.md`, `docs/specs/2026-07-22-refound-capture-pipeline-design.md`
+6. `wiki_delete` exists and auto-commits its deletion to git — that does not
+   make the wiki recoverable: `wiki_write` overwrites without committing, and
+   nothing commits on ingest, so the delete-commit typically has no prior
+   version to restore.
+   Owner: `SPEC.md` §8.8, `docs/deployment/remote-mcp.md` (Security posture)
 7. `SPEC.md`, `DESIGN.md`, and accepted decisions override plans; `docs/plans/` are non-canonical working notes and may become stale.
    Owner: `docs/decisions/0012-agent-documentation-governance.md`
 
@@ -32,6 +35,8 @@ Read these non-obvious invariants before editing:
 - `docs/deviations/`: committed post-approval behavior addenda that authorize separately approved remediation plans.
 - `docs/plans/`: non-canonical working notes; useful for execution context, but stale-prone and never higher priority than canon.
 - `docs/specs/2026-07-22-refound-capture-pipeline-design.md`: approved v2 refounding design that complements, not overrides, `SPEC.md`/`DESIGN.md`.
+- `docs/specs/2026-08-11-remote-mcp-server-design.md`: approved remote MCP server design (transport, `internal/httpauth` authorization boundary) that complements, not overrides, `SPEC.md`/`DESIGN.md`.
+- `docs/deployment/remote-mcp.md`: operator-facing deployment guide for the `sse`/`http` transports — tunnel setup, `--public-url`, identity-provider prerequisites, startup guards, and the security posture; referenced by Working Context invariant 6.
 - `docs/context/project-background.md`: neutral background, archaeology, rejected alternatives, and historical v1 context.
 - `docs/decisions/0022-repository-working-conventions.md`: neutral owner for repository-wide completion and verification conventions; `docs/decisions/0023-stale-agent-convention-reconciliation.md` resolves two stale agent-only rules.
 

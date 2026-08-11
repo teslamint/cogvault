@@ -73,6 +73,8 @@ func wikiDeleteTool() mcp.Tool {
 	return mcp.NewTool("wiki_delete",
 		mcp.WithDescription("Delete a file from the wiki root. Auto-commits the deletion to git if the wiki is a git repository."),
 		mcp.WithString("path", mcp.Required(), mcp.Description("Wiki root-relative file path to delete")),
+		mcp.WithReadOnlyHintAnnotation(false),
+		mcp.WithDestructiveHintAnnotation(true),
 	)
 }
 
@@ -80,6 +82,8 @@ func wikiReadTool() mcp.Tool {
 	return mcp.NewTool("wiki_read",
 		mcp.WithDescription("Read a file from the wiki root. Returns the file content as text."),
 		mcp.WithString("path", mcp.Required(), mcp.Description("Wiki root-relative file path")),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
 	)
 }
 
@@ -88,6 +92,8 @@ func wikiWriteTool() mcp.Tool {
 		mcp.WithDescription("Write content to a file in the wiki root. Creates intermediate directories as needed. Overwrites existing files."),
 		mcp.WithString("path", mcp.Required(), mcp.Description("Wiki root-relative file path")),
 		mcp.WithString("content", mcp.Required(), mcp.Description("File content to write")),
+		mcp.WithReadOnlyHintAnnotation(false),
+		mcp.WithDestructiveHintAnnotation(true),
 	)
 }
 
@@ -95,6 +101,8 @@ func wikiListTool() mcp.Tool {
 	return mcp.NewTool("wiki_list",
 		mcp.WithDescription("List direct children of a directory. Returns path, name, is_dir, title, and type for each entry."),
 		mcp.WithString("prefix", mcp.Description("Directory prefix to list (default: wiki root)")),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
 	)
 }
 
@@ -103,6 +111,8 @@ func wikiSearchTool() mcp.Tool {
 		mcp.WithDescription("Full-text search across indexed files. Returns matching files with snippets."),
 		mcp.WithString("query", mcp.Required(), mcp.Description("Search query")),
 		mcp.WithNumber("limit", mcp.Description("Max results (default 10, max 100)")),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
 	)
 }
 
@@ -110,6 +120,8 @@ func wikiScanTool() mcp.Tool {
 	return mcp.NewTool("wiki_scan",
 		mcp.WithDescription("Recursively list all markdown file paths. Designed for wiki root discovery."),
 		mcp.WithString("dir", mcp.Description("Directory to scan (default: entire wiki root)")),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
 	)
 }
 
@@ -118,5 +130,7 @@ func wikiParseTool() mcp.Tool {
 		mcp.WithDescription("Parse a markdown file and extract metadata: title, frontmatter, links, tags, aliases, etc."),
 		mcp.WithString("path", mcp.Required(), mcp.Description("Wiki root-relative .md file path")),
 		mcp.WithBoolean("include_content", mcp.Description("Include full file content in response (default: false)")),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
 	)
 }

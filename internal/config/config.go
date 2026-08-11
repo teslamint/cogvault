@@ -3,8 +3,10 @@ package config
 import (
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -23,6 +25,20 @@ type LLMConfig struct {
 	EmbeddingBaseURL string `yaml:"embedding_base_url"`
 }
 
+type OAuthConfig struct {
+	Issuer         string   `yaml:"issuer"`
+	Audience       string   `yaml:"audience"`
+	RequiredScopes []string `yaml:"required_scopes"`
+	JWKSTTLSeconds int      `yaml:"jwks_ttl_seconds"`
+}
+
+type AuthConfig struct {
+	Mode             string      `yaml:"mode"`
+	MaxBodyMB        int         `yaml:"max_body_mb"`
+	MaxStreamSeconds int         `yaml:"max_stream_seconds"`
+	OAuth            OAuthConfig `yaml:"oauth"`
+}
+
 type Config struct {
 	WikiDir             string      `yaml:"wiki_dir"`
 	DBPath              string      `yaml:"db_path"`
@@ -33,9 +49,31 @@ type Config struct {
 	ConsistencyInterval int         `yaml:"consistency_interval"`
 	MaxFileSizeMB       int         `yaml:"max_file_size_mb"`
 	LLM                 LLMConfig   `yaml:"llm"`
+	Auth                AuthConfig  `yaml:"auth"`
 }
 
 const archiveExcludePath = "sources/_archived"
+
+// maxStreamSecondsCeiling bounds auth.max_stream_seconds from above. Callers
+// derive nanosecond durations from it — the streamable HTTP session sweeper's
+// idle TTL is 2x this value — and an unbounded input overflows int64
+// nanoseconds into a negative duration, which mcp-go reads as "sweeper
+// disabled". That would silently restore the session leak the sweeper exists
+// to prevent, so the ceiling is a guard against failing open, not a policy
+// judgment about how long a stream may live. One day is far beyond any
+// legitimate stream.
+const maxStreamSecondsCeiling = 86400
+
+// ValidAuthModes returns the auth.mode values this package accepts.
+//
+// internal/httpauth deliberately keeps its own independent switch rather than
+// importing this package: it is the access boundary and stays standalone.
+// This accessor exists so a test at a layer that already sees both packages
+// can iterate the real list and catch the dangerous drift direction — a mode
+// config accepts that httpauth would panic on at startup.
+func ValidAuthModes() []string {
+	return []string{"none", "bearer", "oauth"}
+}
 
 func Load(configPath string) (*Config, error) {
 	f, err := os.Open(configPath)
@@ -125,6 +163,18 @@ func (c *Config) applyDefaults() {
 	if c.LLM.Backend == "" {
 		c.LLM.Backend = "claudecode"
 	}
+	if c.Auth.Mode == "" {
+		c.Auth.Mode = "none"
+	}
+	if c.Auth.MaxBodyMB == 0 {
+		c.Auth.MaxBodyMB = 4
+	}
+	if c.Auth.MaxStreamSeconds == 0 {
+		c.Auth.MaxStreamSeconds = 3600
+	}
+	if c.Auth.OAuth.JWKSTTLSeconds == 0 {
+		c.Auth.OAuth.JWKSTTLSeconds = 900
+	}
 }
 
 // AllExcluded returns the effective scan/index exclusion list without mutating
@@ -208,6 +258,34 @@ func (c *Config) validate() error {
 	}
 	if c.LLM.EmbeddingBaseURL != "" && c.LLM.EmbeddingModel == "" {
 		return fmt.Errorf("llm.embedding_base_url: requires embedding_model to be set")
+	}
+	if !slices.Contains(ValidAuthModes(), c.Auth.Mode) {
+		return fmt.Errorf("auth.mode: %q not supported; use \"none\", \"bearer\", or \"oauth\"", c.Auth.Mode)
+	}
+	if c.Auth.Mode == "oauth" {
+		if c.Auth.OAuth.Issuer == "" {
+			return fmt.Errorf("auth.oauth.issuer: must not be empty when auth.mode is \"oauth\"")
+		}
+		if err := validateIssuer(c.Auth.OAuth.Issuer); err != nil {
+			return err
+		}
+	}
+	if c.Auth.MaxBodyMB < 0 {
+		return fmt.Errorf("auth.max_body_mb: must be positive; expected a value in megabytes")
+	}
+	if c.Auth.MaxStreamSeconds < 0 || c.Auth.MaxStreamSeconds > maxStreamSecondsCeiling {
+		return fmt.Errorf("auth.max_stream_seconds: must be positive and at most %d; expected a value in seconds", maxStreamSecondsCeiling)
+	}
+	if c.Auth.OAuth.JWKSTTLSeconds < 0 {
+		return fmt.Errorf("auth.oauth.jwks_ttl_seconds: must be positive; expected a value in seconds")
+	}
+	return nil
+}
+
+func validateIssuer(issuer string) error {
+	u, err := url.Parse(issuer)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return fmt.Errorf("auth.oauth.issuer: %q is not an absolute https:// URL; expected a scheme-qualified issuer URL", issuer)
 	}
 	return nil
 }

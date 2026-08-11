@@ -1,7 +1,7 @@
 # Roadmap — cogvault
 
 Status: non-canonical forward-looking summary
-Last updated: 2026-08-07
+Last updated: 2026-08-11
 
 This file is a navigational index into canonical owners — it carries no
 independent scope claims. Every item references the document or decision that
@@ -83,6 +83,7 @@ Inspired by [llm-wiki-for-scientists][llm-wiki].
 | ~~Lint (contradictions, orphans, broken links, frontmatter compliance; introduces `ResolveLink`)~~ | **Done** (2026-08-08). `cogvault lint` checks broken links, orphans, frontmatter compliance with `resolveWikilink`. | [project-background](docs/context/project-background.md) §Carry-Overs |
 | ~~`wiki_write` warnings (frontmatter validation feedback)~~ | **Done** (PR #20, 2026-08-08). `validateFrontmatter` returns warnings array. | [project-background](docs/context/project-background.md) §Carry-Overs |
 | ~~SSE transport (remote access via tunnel or cloud deploy)~~ | **Done** (2026-08-08). `cogvault serve --transport sse --addr host:port` via mcp-go SSEServer. | [project-background](docs/context/project-background.md) §Carry-Overs |
+| ~~OAuth 2.1 / bearer authorization for remote access from the Claude apps and ChatGPT~~ | **Done** (2026-08-11). New `http` (Streamable HTTP) transport; `auth.mode: none\|bearer\|oauth` gates every `sse`/`http` request via `internal/httpauth`. See [docs/deployment/remote-mcp.md](docs/deployment/remote-mcp.md). | [docs/specs/2026-08-11-remote-mcp-server-design.md](docs/specs/2026-08-11-remote-mcp-server-design.md) |
 | ~~Code-block wikilink exclusion (state machine for fenced/inline code)~~ | **Done** (PR #19, 2026-08-08). `codeSpans` filter in `extractWikilinks`. | [project-background](docs/context/project-background.md) §Carry-Overs |
 | ~~Page-type expansion (entity/concept/synthesis schemas when usage justifies it)~~ | **Done** (2026-08-08). entity/concept/synthesis 타입 스키마 `_schema.md`에 추가. | [project-background](docs/context/project-background.md) §Carry-Overs |
 
