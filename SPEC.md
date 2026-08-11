@@ -33,10 +33,8 @@ directories the ingest pipeline reads directly (0021).
   report.
 - MCP server: three transports (`stdio`, `sse`, `http`/Streamable HTTP); seven
   tools (read, write, delete, list, search, scan, parse).
-- CLI: `init`, `search`, `serve`, `ingest` — specified in §9. Eight further
-  commands ship without a contract section: `digest`, `embed`, `fetch`,
-  `graph`, `index`, `lint`, `similar`, `synthesize` (F12 in
-  `docs/research/v2-follow-ups.md`).
+- CLI (§9): `init`, `search`, `serve`, `ingest`, plus `fetch`, `digest`,
+  `synthesize`, `embed`, `similar`, `graph`, `index`, `lint`.
 - `internal/llm` adapter interface with a `claudecode` backend (`claude --print`).
 - Single-mode config/storage: absolute `wiki_dir` root, `sources[]`, absolute
   `db_path` outside the synced folder.
@@ -99,8 +97,12 @@ addressable via an MCP path.
 
 ### 2.3 Index
 
-`wiki_list` (file_meta cache) + `wiki_search` (FTS5). No `_index.md`. The index
-contains wiki pages only.
+`wiki_list` (file_meta cache) + `wiki_search` (FTS5). The index contains wiki
+pages only.
+
+Retrieval never depends on an `_index.md` file. `cogvault index` (§9.11) writes
+one as a generated, human-readable view of the wiki, and the index treats it as
+an ordinary page; nothing reads it back.
 
 ### 2.4 Schema delivery
 
@@ -122,8 +124,11 @@ sources:                # external directories the ingest pipeline reads. May be
   - path: string        # absolute (after leading ~/ expansion)
     types: [string]     # allowed extensions, lowercase, no leading dot (e.g. [pdf, md])
 llm:
-  backend: string       # default "claudecode". Only "claudecode" accepted in Phase 1.
+  backend: string       # default "claudecode". Allowed: "claudecode", "ollama".
   model: string         # optional. Passed as --model to the LLM backend. Default: empty (backend default).
+  base_url: string      # optional, "ollama" backend only. Default: http://localhost:11434.
+  embedding_model: string    # optional. Required by `cogvault embed` (§9.8); enables embedding-ranked `similar` (§9.9).
+  embedding_base_url: string # optional. Default: http://localhost:11434. Rejected unless embedding_model is set.
 max_file_size_mb: int   # ingest file size cap in MB. Default: 32. Negative rejected.
 exclude: string[]       # scan + index exclusion, relative to wiki_dir. Default: [".obsidian", ".trash", "sources/_archived"]
 exclude_read: string[]  # read + scan + index exclusion, relative to wiki_dir. Default: []
@@ -514,6 +519,10 @@ ingest, so it does **not** make the wiki recoverable (see
 Every command takes `--config <path>` (default `~/.config/cogvault/config.yaml`).
 launchd invokes `cogvault ingest --config <path>` explicitly (no useful cwd).
 
+Every command except `fetch` opens the index and runs a forced consistency
+check first (§2.3); a check that errors warns on stderr and does not stop the
+command. `fetch` reads the config only — it never opens the index or the wiki.
+
 ### 9.1 init (two-step)
 
 ```
@@ -593,6 +602,153 @@ cogvault ingest [--config <path>] [--dry-run] [--limit N] [--scheduled]
 - **Exit codes**: nonzero only on a run-level failure (e.g. lock contention:
   `ingest already running (lock held)`, or a ctx-cancelled run). Per-file
   failures inside a completed run do **not** fail the run (exit 0).
+
+### 9.5 fetch
+
+```
+cogvault fetch [--config <path>] [--source-dir <dir>] [--name <file>] <url>
+```
+
+- `--source-dir` (default: the first entry of `sources[]`): where the file is
+  written. With no `sources[]` configured and no flag: `no source directories
+  configured; use --source-dir`. The directory is created if absent.
+- `--name` (default: derived from the URL path, or the host when the path is
+  empty, prefixed `web-` and truncated to 80 characters): `.md` is appended
+  unless already present.
+- `GET` with a 30-second timeout. A non-`200` response is an error
+  (`fetch <url>: HTTP <code>`); so is an unparsable URL.
+- **The response body is read through a 10 MiB limit and silently truncated
+  past it** — a larger page produces a short file, not an error.
+- Writes YAML frontmatter (`source_url`, `fetched_at` as a UTC date) followed
+  by the raw response body. No HTML-to-text extraction happens here; the LLM
+  digest step handles the markup.
+- This is the one command that writes outside `wiki_dir`. It deposits a capture
+  file into a source directory as an explicit user action; the pipeline's
+  relationship to `sources[]` is unchanged — ingest still only reads them, and
+  they remain unaddressable over MCP.
+
+### 9.6 digest
+
+```
+cogvault digest [--config <path>] [--days N]
+```
+
+- `--days N` (default 7): include pages under `sources/` whose **index**
+  `indexed_at` is newer than `now - N days`. Recency comes from the index, not
+  from the page's `ingested_at` frontmatter, so re-indexing a page makes it
+  recent again.
+- Writes `digests/weekly-<UTC date>.md` (`type: synthesis`) listing each
+  included page as a wikilink, then indexes it. **Overwrites** an existing file
+  with the same date, so a second run on the same day replaces the first.
+- With no page in range: prints `no recent sources to summarize`, writes
+  nothing, exits 0.
+- Does not commit to git (§1.3).
+
+### 9.7 synthesize
+
+```
+cogvault synthesize [--config <path>]
+```
+
+- Scans the wiki and groups pages by outgoing wikilink target and by tag.
+- A link target referenced by **2 or more** pages produces
+  `concepts/<slug>.md`; a tag on 2 or more pages produces
+  `concepts/tag-<slug>.md`. Both are `type: concept` and list their members as
+  wikilinks. Slugs lowercase the name; spaces become `-` for links, `/` becomes
+  `-` for tags.
+- **Never overwrites**: a concept page that already exists is skipped, whatever
+  its content. This is the opposite of `digest` and `index`, which always
+  rewrite their output, and it is what makes hand-editing a generated concept
+  page safe.
+- A page that fails to parse is skipped silently. A write failure warns on
+  stderr and continues.
+- Prints `synthesize: created N concept pages`. Exits 0 even when N is 0.
+
+### 9.8 embed
+
+```
+cogvault embed [--config <path>] [--batch-size N]
+```
+
+- Requires `llm.embedding_model`; without it: `embedding_model not configured;
+  set llm.embedding_model in config`.
+- Embeds only pages whose stored embedding is missing or stale for the
+  configured model (content-hash keyed). With none stale: `embed: all
+  embeddings up to date`, exit 0.
+- `--batch-size N` (default 32; any value ≤ 0 becomes 32): texts per request to
+  the embedding backend.
+- The embedded text is the page title followed by the first 2000 runes of its
+  content — not the whole page.
+- Reports `embed: E embedded, S skipped, F failed, T total`. **`skipped` and
+  `failed` are different outcomes**: a page that cannot be read is skipped, a
+  batch or store error is a failure.
+- **Exit codes**: nonzero when `failed > 0`; skipped pages alone do not fail
+  the run.
+
+### 9.9 similar
+
+```
+cogvault similar [--config <path>] [--limit N] <path>
+```
+
+- `--limit N` (default 5): maximum results.
+- Ranks by embedding cosine similarity when `llm.embedding_model` is set and
+  embeddings exist; otherwise falls back to FTS title matching. The output
+  format is identical either way, so the score's meaning depends on which path
+  ran.
+- Prints `<score>  <title>  (<path>)` per result, or `No similar pages found.`
+- Read-only; exits 0 whether or not anything matched.
+
+### 9.10 graph
+
+```
+cogvault graph [--config <path>]
+```
+
+- Prints the wiki link graph to stdout as indented JSON:
+  `{"nodes":[{"path","title","type"}],"edges":[{"source","target"}]}`.
+- Edge targets are resolved with the same wikilink resolution `lint` uses
+  (§9.12), including its case-insensitive basename fallback. An unresolvable
+  link produces no edge and no error here — `lint` is where it is reported.
+- A page that fails to parse still contributes a node, but no edges, silently.
+- Read-only; exits 0.
+
+### 9.11 index
+
+```
+cogvault index [--config <path>]
+```
+
+- Writes `_index.md` (`type: index`) listing every wiki page as a wikilink,
+  sorted by path, then indexes it. `_schema.md` and `_index.md` itself are
+  excluded.
+- **Overwrites** any existing `_index.md`. The file is a generated view, not a
+  page to edit.
+- Does not commit to git (§1.3).
+
+### 9.12 lint
+
+```
+cogvault lint [--config <path>]
+```
+
+Reports, one line per issue as `<kind> <path> <message>`:
+
+- `parse` — the page could not be parsed.
+- `frontmatter` — missing `title`, missing `type`, or, for `type: source`
+  pages, a missing `source_path` or `ingested_at` (§11).
+- `broken-link` — a `[[wikilink]]` that resolves to no page. Resolution tries
+  `<link>.md`, `sources/<link>.md`, and `<link>` verbatim, then falls back to a
+  case-insensitive match on any page's basename.
+- `orphan` — no incoming links. `_schema.md`, `_index.md`, and every
+  `type: source` page are exempt, since source pages are expected to be reached
+  through search rather than links.
+
+- Prints `lint: no issues found` when clean, otherwise the issue lines and
+  `N issue(s) found`.
+- **Exit code is 0 whether or not issues were found.** `lint` reports; it does
+  not gate. A CI use that needs a failing exit code must parse the output
+  (F13 in `docs/research/v2-follow-ups.md`).
 
 ---
 
