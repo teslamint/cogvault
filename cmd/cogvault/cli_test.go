@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -971,4 +972,79 @@ func TestSessionIdleTTLExceedsStreamLifetime(t *testing.T) {
 				maxStreamSeconds, ttl)
 		}
 	}
+}
+
+// captureLogger records mcp-go's log lines so a test can assert on transport
+// behavior that is otherwise invisible from the outside.
+type captureLogger struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (l *captureLogger) Infof(format string, v ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lines = append(l.lines, fmt.Sprintf(format, v...))
+}
+
+func (l *captureLogger) Errorf(format string, v ...any) { l.Infof(format, v...) }
+
+func (l *captureLogger) contains(substr string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, line := range l.lines {
+		if strings.Contains(line, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestSessionSweeperEvictsIdleSession discriminates the sweeper wiring, not
+// just the TTL arithmetic. mcp-go starts the sweeper only when the transport
+// is built with a positive idle TTL; drop WithSessionIdleTTL from the options
+// and no sweep ever happens, which is the leak this guards against — a client
+// that disconnects without DELETE otherwise keeps its session state for the
+// process lifetime.
+func TestSessionSweeperEvictsIdleSession(t *testing.T) {
+	configPath, _, _ := testVault(t) // auth.mode "none", loopback addr
+	cfg, store, idx, adpt, err := bootstrap(configPath)
+	if err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	defer idx.Close()
+	cfg.Auth.MaxStreamSeconds = 1 // TTL becomes 2s, sweep interval 1s
+
+	logger := &captureLogger{}
+	mcpSrv := cogmcp.NewServer(cfg.WikiDir, cfg, store, idx, adpt)
+	h, err := buildServeHandler(cfg, mcpSrv, serveFlags{
+		transport:    "http",
+		addr:         "127.0.0.1:0",
+		endpointPath: "/mcp",
+		mcpLogger:    logger,
+	})
+	if err != nil {
+		t.Fatalf("buildServeHandler: %v", err)
+	}
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	initialize := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}`
+	resp, err := ts.Client().Post(ts.URL+"/mcp", "application/json", strings.NewReader(initialize))
+	if err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("initialize status = %d, want 200", resp.StatusCode)
+	}
+
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		if logger.contains("Sweeping expired session") {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("idle session was never swept; the transport was built without a positive session idle TTL")
 }
