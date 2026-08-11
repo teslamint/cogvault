@@ -1,18 +1,31 @@
 package mcp_test
 
 import (
+	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/golang-jwt/jwt/v5"
+	gomcpclient "github.com/mark3labs/mcp-go/client"
+	"github.com/mark3labs/mcp-go/client/transport"
+	gomcp "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/teslamint/cogvault/internal/adapter/obsidian"
 	"github.com/teslamint/cogvault/internal/config"
+	"github.com/teslamint/cogvault/internal/httpauth"
 	"github.com/teslamint/cogvault/internal/index"
 	"github.com/teslamint/cogvault/internal/mcp"
 	"github.com/teslamint/cogvault/internal/storage"
@@ -801,5 +814,160 @@ func TestIntegration_Race_ConcurrentListAndWrite(t *testing.T) {
 	}
 	if lwCount != n {
 		t.Errorf("expected %d race-lw files, got %d", n, lwCount)
+	}
+}
+
+// --- 3f. Remote HTTP Transport Wiring ---
+
+// testJWK mirrors the wire shape of a JSON Web Key well enough to build a
+// stub JWKS response, encoded independently of httpauth's own decoding so
+// the test produces keys the way a real IdP would, not the way the cache
+// happens to decode them.
+type testJWK struct {
+	Kty string `json:"kty"`
+	Use string `json:"use,omitempty"`
+	Kid string `json:"kid"`
+	N   string `json:"n,omitempty"`
+	E   string `json:"e,omitempty"`
+}
+
+func rsaJWK(kid string, pub *rsa.PublicKey) testJWK {
+	return testJWK{
+		Kty: "RSA",
+		Use: "sig",
+		Kid: kid,
+		N:   base64.RawURLEncoding.EncodeToString(pub.N.Bytes()),
+		E:   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(pub.E)).Bytes()),
+	}
+}
+
+// newStubJWKSServer serves an OIDC discovery document and JWKS document for
+// keys, over TLS: httpauth.NewJWKSCache requires https on both the issuer
+// and the jwks_uri it discovers.
+func newStubJWKSServer(t *testing.T, keys []testJWK) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	var srv *httptest.Server
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `{"jwks_uri":"%s/jwks.json"}`, srv.URL)
+	})
+	mux.HandleFunc("/jwks.json", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"keys": keys})
+	})
+	srv = httptest.NewTLSServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestStreamableHTTP builds the MCP server with NewServer, wraps it with
+// httpauth.Mount in "oauth" mode against a stub JWKS, and drives a full
+// initialize then tools/call round trip with a signed token over Streamable
+// HTTP. It reproduces the composition cmd/cogvault/serve.go wires for
+// `cogvault serve --transport http` — the exact-path wrapper around
+// StreamableHTTPServer plus httpauth.Mount — without importing cmd/cogvault
+// (a package main cannot be imported at all); internal/httpauth does not
+// import internal/mcp, so this test living here, importing both, is the
+// safe direction.
+func TestStreamableHTTP(t *testing.T) {
+	_, s := setupIntegration(t)
+
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa.GenerateKey: %v", err)
+	}
+	const kid = "test-key-1"
+	stub := newStubJWKSServer(t, []testJWK{rsaJWK(kid, &rsaKey.PublicKey)})
+
+	const publicURL = "https://mcp.example.com"
+	const endpointPath = "/mcp"
+	const audience = publicURL + endpointPath
+
+	keys := httpauth.NewJWKSCache(stub.URL, time.Hour, stub.Client())
+	validator := httpauth.NewOAuthValidator(stub.URL, audience, nil, keys)
+
+	authCfg := httpauth.Config{
+		Mode:             "oauth",
+		PublicURL:        publicURL,
+		EndpointPath:     endpointPath,
+		MaxBodyBytes:     4 << 20,
+		MaxStreamSeconds: 3600,
+		Validator:        validator,
+		Issuer:           stub.URL,
+	}
+
+	// mcp-go's StreamableHTTPServer.ServeHTTP dispatches on method only and
+	// ignores the request path when used as an http.Handler
+	// (server.WithEndpointPath only takes effect through Start, mcp-go
+	// v0.47.0 streamable_http.go), so the exact-path match
+	// cmd/cogvault/serve.go applies is reproduced here too.
+	streamable := server.NewStreamableHTTPServer(s)
+	exactPath := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != endpointPath {
+			http.NotFound(w, r)
+			return
+		}
+		streamable.ServeHTTP(w, r)
+	})
+
+	ts := httptest.NewServer(httpauth.Mount(authCfg, exactPath))
+	defer ts.Close()
+
+	claims := jwt.MapClaims{
+		"iss": stub.URL,
+		"aud": audience,
+		"exp": time.Now().Add(time.Hour).Unix(),
+	}
+	tok := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	tok.Header["kid"] = kid
+	signed, err := tok.SignedString(rsaKey)
+	if err != nil {
+		t.Fatalf("SignedString: %v", err)
+	}
+
+	c, err := gomcpclient.NewStreamableHttpClient(ts.URL+endpointPath, transport.WithHTTPHeaders(map[string]string{
+		"Authorization": "Bearer " + signed,
+	}))
+	if err != nil {
+		t.Fatalf("NewStreamableHttpClient: %v", err)
+	}
+	defer c.Close()
+
+	ctx := context.Background()
+	if err := c.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	initReq := gomcp.InitializeRequest{
+		Params: gomcp.InitializeParams{
+			ProtocolVersion: gomcp.LATEST_PROTOCOL_VERSION,
+			ClientInfo: gomcp.Implementation{
+				Name:    "test-client",
+				Version: "1.0.0",
+			},
+		},
+	}
+	if _, err := c.Initialize(ctx, initReq); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+
+	callReq := gomcp.CallToolRequest{}
+	callReq.Params.Name = "wiki_scan"
+	result, err := c.CallTool(ctx, callReq)
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("wiki_scan error: %v", result)
+	}
+
+	// An uncredentialed request 401s: the middleware gates this endpoint
+	// rather than being bypassed by the exact-path wrapper.
+	resp, err := http.Post(ts.URL+endpointPath, "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST unauthenticated: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
 	}
 }
