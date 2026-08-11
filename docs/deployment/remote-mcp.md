@@ -208,7 +208,7 @@ verifiable against this repository's code). Choose `bearer` mode knowing this;
 
 | Condition | Why |
 |---|---|
-| `auth.mode: none` and `--addr` is not a loopback address (`localhost`, `127.0.0.1`, `::1` — matched as literal strings, not resolved through DNS) | `none` mode applies no credential check, so it may only bind where only the local machine can reach it. |
+| `auth.mode: none` and `--addr` is not a loopback address (`localhost`, `127.0.0.1`, `::1` — matched as literal strings, not resolved through DNS) | `none` mode applies no credential check, so it may only *bind* where only the local machine can reach it — a guarantee about the bind address, not about what else forwards traffic to it. See the warning below the table. |
 | `auth.mode: none` and `--public-url` is set | A public URL has no legitimate function in `none` mode; its presence signals unauthenticated tunnel-exposure intent the code cannot see the tunnel for, but can see the contradictory config for. |
 | `auth.mode: oauth` and `--public-url` is unset | The audience/resource cannot be computed. |
 | `auth.mode: oauth` and `--transport sse` | `sse`'s fixed `/sse`/`/message` paths can never match the advertised `resource`; no conformant OAuth client can complete the flow (§3, RFC 9728 §3.3). |
@@ -221,14 +221,30 @@ verifiable against this repository's code). Choose `bearer` mode knowing this;
 An error here means the server never bound a socket — there is nothing
 running to shut down.
 
-**Troubleshooting note**: a `401 Unauthorized` on every request can mean the
-credential is wrong, but it can *also* mean `--endpoint-path` is wrong. The
-authorization middleware gates every path except the two Protected Resource
-Metadata paths **before** cogvault's own path-matching wrapper ever runs, so a
-request to the wrong `http` path is rejected as `401`, not the `404` you
-might expect from "no such route." If every request 401s even with a
-credential you're sure is correct, double-check `--endpoint-path` against
-what the client is actually configured to call.
+**A loopback bind is not a security boundary once something is forwarding
+traffic to it.** The `auth.mode: none` guard above only proves the process
+bound a loopback address; it cannot see, and does not guard against, a
+tunnel (§2) pointed at that same loopback address from another terminal. The
+`none`+`--public-url` guard above catches the common mistake of pairing
+`none` mode with `--public-url`, but a tunnel needs no cogvault flag at all.
+`--public-url` controls what the metadata document advertises, what the
+`WWW-Authenticate` challenges point at, and which non-loopback `Origin` is
+accepted; none of those decide whether the listener answers a request that
+arrives over a tunnel. If you tunnel a `none`-mode server (§2, §3), you have built
+an unauthenticated `wiki_write`/`wiki_delete` endpoint open to anyone who
+finds the tunnel URL, guard or no guard. `auth.mode: none` — the default — is
+for `stdio`-equivalent local/loopback use only; use `bearer` or `oauth`
+(§4/§5) for anything reachable through a tunnel.
+
+**Troubleshooting note**, and it differs by mode. In `oauth` mode a `401
+Unauthorized` on every request can mean the credential is wrong, but it can
+*also* mean `--endpoint-path` is wrong: the expected audience is
+`<public-url><endpoint-path>`, so serving a different path than the one the
+token was issued for rejects an otherwise valid token. In `bearer` mode the
+credential check is a constant-time comparison with no path dependency, so a
+correct token sent to the wrong path passes the middleware and reaches
+cogvault's path-matching wrapper — that is a `404`, not a `401`. Persistent
+`401`s in `bearer` mode mean the token, not the path.
 
 ## 7. Security posture
 
