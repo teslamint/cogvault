@@ -25,7 +25,9 @@ type TokenValidator interface {
 // Config configures Middleware. MaxBodyBytes is already in bytes; a later
 // unit converts the config file's auth.max_body_mb into it. Validator is nil
 // in "none" and "bearer" modes and must not be dereferenced outside "oauth"
-// mode.
+// mode. Issuer and RequiredScopes are consumed only by Mount's protected
+// resource metadata document in "oauth" mode; they are ignored in "none" and
+// "bearer" mode, where there is no authorization server to advertise.
 type Config struct {
 	Mode             string
 	BearerToken      string
@@ -34,6 +36,8 @@ type Config struct {
 	MaxBodyBytes     int64
 	MaxStreamSeconds int
 	Validator        TokenValidator
+	Issuer           string
+	RequiredScopes   []string
 }
 
 const bearerPrefix = "Bearer "
@@ -137,6 +141,44 @@ func Middleware(cfg Config) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// Mount composes the "oauth" mode Protected Resource Metadata routes with
+// Middleware and returns a single handler for the whole authorization
+// boundary: mcp handles everything else.
+//
+// In "oauth" mode, Mount serves the metadata document, unauthenticated by
+// design (RFC 9728 — it carries only public discovery data), at exactly two
+// paths: the bare well-known path and that path suffixed with
+// cfg.EndpointPath. Both are matched with plain string equality against
+// r.URL.Path, never a prefix match: a prefix match would serve the metadata
+// document, unauthenticated, to every path merely beginning with the
+// well-known prefix — and would silently widen to cover any future handler
+// mounted under a path sharing that prefix. Every other path, including any
+// path that only starts with the well-known prefix, is routed through
+// Middleware to mcp. In "none" and "bearer" mode there is no authorization
+// server to advertise, so the well-known paths are not special-cased at all
+// and fall through to Middleware like any other path.
+//
+// Mount calls Middleware(cfg) unconditionally, so it panics on the same
+// unusable configs Middleware does — mounting a misconfigured server fails
+// at construction, not at request time.
+func Mount(cfg Config, mcp http.Handler) http.Handler {
+	wrapped := Middleware(cfg)(mcp)
+	if cfg.Mode != "oauth" {
+		return wrapped
+	}
+
+	metadata := MetadataHandler(cfg)
+	suffixedPRMPath := wellKnownPRMPath + cfg.EndpointPath
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == wellKnownPRMPath || r.URL.Path == suffixedPRMPath {
+			metadata.ServeHTTP(w, r)
+			return
+		}
+		wrapped.ServeHTTP(w, r)
+	})
 }
 
 // bearerToken extracts the token from an "Authorization: Bearer <token>"
