@@ -1048,3 +1048,66 @@ func TestSessionSweeperEvictsIdleSession(t *testing.T) {
 	}
 	t.Fatal("idle session was never swept; the transport was built without a positive session idle TTL")
 }
+
+// writeLintPage writes a well-formed wiki page: frontmatter with title and
+// type, so the only issues a test sees are the ones it deliberately created.
+func writeLintPage(t *testing.T, wikiDir, name, title, body string) {
+	t.Helper()
+	content := fmt.Sprintf("---\ntitle: %s\ntype: note\n---\n\n# %s\n\n%s\n", title, title, body)
+	if err := os.WriteFile(filepath.Join(wikiDir, name), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestLintStrictChangesOnlyTheExitCode pins both halves of F13's contract. The
+// default must stay exit-0 with issues found, because `cogvault lint` shipped
+// that way and any caller written against it would break otherwise; --strict
+// must fail; and the two runs must print the same thing, because a flag that
+// quietly reshaped the report would make the exit code the lesser surprise.
+func TestLintStrictChangesOnlyTheExitCode(t *testing.T) {
+	configPath, wikiDir, _ := testVault(t)
+	if _, _, err := executeCommand("init", "--config", configPath); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	writeLintPage(t, wikiDir, "a.md", "A", "links to [[nowhere]]")
+
+	plainOut, _, plainErr := executeCommand("lint", "--config", configPath)
+	if plainErr != nil {
+		t.Fatalf("lint without --strict must exit 0 even with issues; got %v", plainErr)
+	}
+	if !strings.Contains(plainOut, "issue(s) found") {
+		t.Fatalf("expected the fixture to produce issues, got: %q", plainOut)
+	}
+
+	strictOut, _, strictErr := executeCommand("lint", "--config", configPath, "--strict")
+	if strictErr == nil {
+		t.Fatal("lint --strict must exit nonzero when issues are found")
+	}
+	if strictOut != plainOut {
+		t.Errorf("--strict changed stdout; it must change only the exit code\nwithout: %q\nwith:    %q", plainOut, strictOut)
+	}
+}
+
+// TestLintStrictSucceedsOnCleanWiki discriminates the flag from an
+// unconditional failure. Without this, a --strict that always returned an error
+// would satisfy the test above. _schema.md is removed because it ships without
+// frontmatter and would itself be reported.
+func TestLintStrictSucceedsOnCleanWiki(t *testing.T) {
+	configPath, wikiDir, _ := testVault(t)
+	if _, _, err := executeCommand("init", "--config", configPath); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if err := os.Remove(filepath.Join(wikiDir, "_schema.md")); err != nil {
+		t.Fatal(err)
+	}
+	writeLintPage(t, wikiDir, "a.md", "A", "see [[b]]")
+	writeLintPage(t, wikiDir, "b.md", "B", "see [[a]]")
+
+	stdout, _, err := executeCommand("lint", "--config", configPath, "--strict")
+	if err != nil {
+		t.Fatalf("lint --strict must exit 0 on a clean wiki: %v (output: %q)", err, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Fatalf("expected a clean report, got: %q", stdout)
+	}
+}
