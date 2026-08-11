@@ -67,11 +67,32 @@ Endpoint shapes differ by transport:
   `--endpoint-path` deliberately does not apply to it. The message endpoint a
   client receives is `https://<public-url>/message?sessionId=<id>` when
   `--public-url` is set, and `http://<addr>/message?sessionId=<id>`
-  otherwise — so remote SSE requires `--public-url` too, or a remote client is
-  handed a loopback address it cannot reach.
+  otherwise. **This applies in every auth mode, including `bearer`** — not
+  only `oauth`, where `--public-url` is already a hard startup requirement
+  (§6). A `bearer`-mode SSE deployment that sets `COGVAULT_BEARER_TOKEN` but
+  omits `--public-url` starts without error, and the client's initial
+  `GET /sse` connection appears to establish; it only fails on the first
+  message `POST`, once the client tries to reach the loopback address it was
+  handed. If a remote SSE client connects but every message silently fails,
+  check `--public-url` first.
 - **Protected Resource Metadata** (`oauth` mode) is served, unauthenticated,
   at `/.well-known/oauth-protected-resource` and at that path suffixed with
   `--endpoint-path`; Claude probes the suffixed form first.
+
+**In `oauth` mode, prefer a `--public-url` with no path component** (e.g.
+`https://cogvault.example.com`, not `https://cogvault.example.com/sub`).
+RFC 9728 permits a client to *derive* the metadata URL itself, by inserting
+`/.well-known/oauth-protected-resource` between the host and the full
+resource path, instead of following the `resource_metadata` pointer in the
+`401` challenge. For a subpath `--public-url`, that derivation lands on
+`https://<host>/.well-known/oauth-protected-resource/sub/mcp` — a path
+cogvault does not serve; it only serves the well-known path bare and suffixed
+with `--endpoint-path` alone (not the public URL's own subpath), per the
+bullet above. This is a **caveat, not a breakage**: clients that follow the
+`401` challenge's `resource_metadata` pointer — which is what the MCP
+specification and the Claude apps do — are unaffected either way. Use a
+path-less `--public-url` in `oauth` mode unless you have a specific reason
+for a subpath deployment.
 
 ## 4. Identity provider prerequisites (`oauth` mode)
 
