@@ -59,17 +59,26 @@ func runLint(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		if src.Title == "" {
-			issues = append(issues, lintIssue{page, "frontmatter", "missing title"})
-		}
-		if _, ok := src.Frontmatter["type"]; !ok {
-			issues = append(issues, lintIssue{page, "frontmatter", "missing type field"})
-		}
-		typ, _ := src.Frontmatter["type"].(string)
-		if typ == "source" {
-			for _, field := range []string{"source_path", "ingested_at"} {
-				if _, ok := src.Frontmatter[field]; !ok {
-					issues = append(issues, lintIssue{page, "frontmatter", "source page missing " + field})
+		// _schema.md defines the page contract; it is not a page written under
+		// it. It is write-protected, excluded from `cogvault index`, and already
+		// exempt from the orphan check below, so holding it to the frontmatter
+		// rules it specifies is a category error — and a fresh `cogvault init`
+		// would otherwise never be lint-clean. Its own correctness is covered by
+		// TestDefaultContentFitsMaxSchemaLen and the init test, not here. Links
+		// in it are still checked: a genuinely broken one is still a defect.
+		if page != "_schema.md" {
+			if src.Title == "" {
+				issues = append(issues, lintIssue{page, "frontmatter", "missing title"})
+			}
+			if _, ok := src.Frontmatter["type"]; !ok {
+				issues = append(issues, lintIssue{page, "frontmatter", "missing type field"})
+			}
+			typ, _ := src.Frontmatter["type"].(string)
+			if typ == "source" {
+				for _, field := range []string{"source_path", "ingested_at"} {
+					if _, ok := src.Frontmatter[field]; !ok {
+						issues = append(issues, lintIssue{page, "frontmatter", "source page missing " + field})
+					}
 				}
 			}
 		}

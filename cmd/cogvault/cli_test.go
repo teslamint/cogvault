@@ -1090,15 +1090,12 @@ func TestLintStrictChangesOnlyTheExitCode(t *testing.T) {
 
 // TestLintStrictSucceedsOnCleanWiki discriminates the flag from an
 // unconditional failure. Without this, a --strict that always returned an error
-// would satisfy the test above. _schema.md is removed because it ships without
-// frontmatter and would itself be reported.
+// would satisfy the test above. It keeps _schema.md in place: that file used to
+// have to be deleted here, which is what F14 was about.
 func TestLintStrictSucceedsOnCleanWiki(t *testing.T) {
 	configPath, wikiDir, _ := testVault(t)
 	if _, _, err := executeCommand("init", "--config", configPath); err != nil {
 		t.Fatalf("init: %v", err)
-	}
-	if err := os.Remove(filepath.Join(wikiDir, "_schema.md")); err != nil {
-		t.Fatal(err)
 	}
 	writeLintPage(t, wikiDir, "a.md", "A", "see [[b]]")
 	writeLintPage(t, wikiDir, "b.md", "B", "see [[a]]")
@@ -1106,6 +1103,30 @@ func TestLintStrictSucceedsOnCleanWiki(t *testing.T) {
 	stdout, _, err := executeCommand("lint", "--config", configPath, "--strict")
 	if err != nil {
 		t.Fatalf("lint --strict must exit 0 on a clean wiki: %v (output: %q)", err, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Fatalf("expected a clean report, got: %q", stdout)
+	}
+}
+
+// TestFreshWikiIsLintClean pins F14 by name rather than leaving it to another
+// test's setup: `cogvault init` followed by `cogvault lint --strict` must
+// succeed on a wiki holding nothing but the shipped _schema.md. Before F14 it
+// reported two issues — a missing type field, and the `[[링크]]` the schema uses
+// to illustrate wikilink syntax read as a real link — so anyone wiring --strict
+// into CI failed on an empty wiki.
+func TestFreshWikiIsLintClean(t *testing.T) {
+	configPath, wikiDir, _ := testVault(t)
+	if _, _, err := executeCommand("init", "--config", configPath); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(wikiDir, "_schema.md")); err != nil {
+		t.Fatalf("expected init to write _schema.md: %v", err)
+	}
+
+	stdout, _, err := executeCommand("lint", "--config", configPath, "--strict")
+	if err != nil {
+		t.Fatalf("a freshly initialized wiki must pass lint --strict: %v\noutput:\n%s", err, stdout)
 	}
 	if !strings.Contains(stdout, "no issues found") {
 		t.Fatalf("expected a clean report, got: %q", stdout)
