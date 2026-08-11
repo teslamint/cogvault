@@ -14,8 +14,6 @@ import (
 	"net/url"
 	"strings"
 	"time"
-
-	"github.com/teslamint/cogvault/internal/config"
 )
 
 // TokenValidator validates a bearer token in oauth mode and reports when it
@@ -54,17 +52,17 @@ const bearerPrefix = "Bearer "
 // it on every request in that mode.
 func validateConfig(cfg Config) {
 	switch cfg.Mode {
-	case config.AuthModeNone:
-	case config.AuthModeBearer:
+	case "none":
+	case "bearer":
 		if cfg.BearerToken == "" {
 			panic(`httpauth: Mode "bearer" requires a non-empty BearerToken`)
 		}
-	case config.AuthModeOAuth:
+	case "oauth":
 		if cfg.Validator == nil {
 			panic(`httpauth: Mode "oauth" requires a non-nil Validator`)
 		}
 	default:
-		panic(fmt.Sprintf("httpauth: Mode: unknown value %q; expected one of %q, %q, %q", cfg.Mode, config.AuthModeNone, config.AuthModeBearer, config.AuthModeOAuth))
+		panic(fmt.Sprintf("httpauth: Mode: unknown value %q; expected one of \"none\", \"bearer\", \"oauth\"", cfg.Mode))
 	}
 }
 
@@ -100,9 +98,9 @@ func Middleware(cfg Config) func(http.Handler) http.Handler {
 			hasExpiry := false
 
 			switch cfg.Mode {
-			case config.AuthModeNone:
+			case "none":
 				// Credential check skipped; resource bounds above still apply.
-			case config.AuthModeBearer:
+			case "bearer":
 				token, ok := bearerToken(r)
 				if !ok {
 					logRejection("missing_credential", r)
@@ -114,7 +112,7 @@ func Middleware(cfg Config) func(http.Handler) http.Handler {
 					writeUnauthorized(w, cfg, true)
 					return
 				}
-			case config.AuthModeOAuth:
+			case "oauth":
 				token, ok := bearerToken(r)
 				if !ok {
 					logRejection("missing_credential", r)
@@ -212,7 +210,7 @@ func Middleware(cfg Config) func(http.Handler) http.Handler {
 // at construction, not at request time.
 func Mount(cfg Config, mcp http.Handler) http.Handler {
 	wrapped := Middleware(cfg)(mcp)
-	if cfg.Mode != config.AuthModeOAuth {
+	if cfg.Mode != "oauth" {
 		return wrapped
 	}
 
@@ -292,9 +290,9 @@ func originAllowed(origin, publicURL string) bool {
 // writeInsufficientScope uses.
 func writeUnauthorized(w http.ResponseWriter, cfg Config, invalidCredential bool) {
 	switch {
-	case cfg.Mode == config.AuthModeOAuth && invalidCredential:
+	case cfg.Mode == "oauth" && invalidCredential:
 		w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer error="invalid_token", resource_metadata="%s%s"`, cfg.PublicURL, wellKnownPRMPath))
-	case cfg.Mode == config.AuthModeOAuth:
+	case cfg.Mode == "oauth":
 		w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer resource_metadata="%s%s"`, cfg.PublicURL, wellKnownPRMPath))
 	case invalidCredential:
 		w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)

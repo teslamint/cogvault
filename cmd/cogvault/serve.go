@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/mark3labs/mcp-go/server"
+	"github.com/mark3labs/mcp-go/util"
 	"github.com/spf13/cobra"
 	"github.com/teslamint/cogvault/internal/config"
 	"github.com/teslamint/cogvault/internal/httpauth"
@@ -126,6 +127,36 @@ type serveFlags struct {
 	addr         string
 	endpointPath string
 	publicURL    string
+
+	// mcpLogger, when non-nil, is handed to the streamable HTTP transport.
+	// The session sweeper is otherwise silent and keeps its state in
+	// unexported maps, so its log line is the only externally observable
+	// proof that it runs; the sweeper test sets this.
+	mcpLogger util.Logger
+}
+
+// sessionIdleTTLFor derives the streamable HTTP session sweeper's idle TTL
+// from the configured stream bound.
+//
+// Without a positive TTL mcp-go never starts the sweeper (v0.47.0,
+// streamable_http.go: the sweeper is gated on sessionIdleTTL > 0, and zero is
+// the default), so a client that disconnects without sending DELETE leaves its
+// per-session transport state registered for the process lifetime. Remote
+// clients reached through a tunnel disconnect that way as a matter of course.
+//
+// The TTL must exceed the longest a live session can go untouched, or the
+// sweeper would evict a connected client. A session is touched when a request
+// arrives and when an event is written to a listen stream; cogvault emits no
+// server-initiated notifications, so a listen stream is touched exactly once,
+// at establishment, and then runs until the middleware's stream deadline. Twice
+// that bound clears the longest such stream with margin.
+//
+// Eviction is not visible to a client that comes back: mcp-go validates a
+// session ID by format rather than existence and creates an ephemeral session
+// when it finds no registered one, and cogvault registers no session-scoped
+// tools or resources for the sweep to discard.
+func sessionIdleTTLFor(maxStreamSeconds int) time.Duration {
+	return 2 * time.Duration(maxStreamSeconds) * time.Second
 }
 
 // buildServeHandler composes the full HTTP handler for the "sse" or "http"
@@ -145,13 +176,13 @@ func buildServeHandler(cfg *config.Config, mcpSrv *server.MCPServer, f serveFlag
 	if err != nil {
 		return nil, err
 	}
-	if cfg.Auth.Mode == config.AuthModeNone && !loopback {
+	if cfg.Auth.Mode == "none" && !loopback {
 		return nil, fmt.Errorf("addr: %q is not a loopback address; expected a loopback address (or set auth.mode to \"bearer\" or \"oauth\") when auth.mode is \"none\"", f.addr)
 	}
-	if cfg.Auth.Mode == config.AuthModeNone && f.publicURL != "" {
+	if cfg.Auth.Mode == "none" && f.publicURL != "" {
 		return nil, fmt.Errorf("public-url: %q must not be set when auth.mode is \"none\"; expected no public URL (a public URL has no function in \"none\" mode and signals unauthenticated tunnel exposure; set auth.mode to \"bearer\" or \"oauth\" instead)", f.publicURL)
 	}
-	if cfg.Auth.Mode == config.AuthModeOAuth && f.transport == "sse" {
+	if cfg.Auth.Mode == "oauth" && f.transport == "sse" {
 		return nil, fmt.Errorf("transport: %q is not supported when auth.mode is \"oauth\"; expected \"http\" (the sse transport serves fixed /sse and /message paths, so its protected resource metadata can never advertise the exact URL a conformant OAuth client requested, per RFC 9728 §3.3)", f.transport)
 	}
 
@@ -163,12 +194,12 @@ func buildServeHandler(cfg *config.Config, mcpSrv *server.MCPServer, f serveFlag
 		}
 		publicURL = u.String()
 	}
-	if cfg.Auth.Mode == config.AuthModeOAuth && publicURL == "" {
+	if cfg.Auth.Mode == "oauth" && publicURL == "" {
 		return nil, fmt.Errorf("public-url: must be set when auth.mode is \"oauth\"; expected an absolute https:// URL")
 	}
 
 	var bearerToken string
-	if cfg.Auth.Mode == config.AuthModeBearer {
+	if cfg.Auth.Mode == "bearer" {
 		bearerToken = os.Getenv(bearerTokenEnvVar)
 		if len(bearerToken) < minBearerTokenBytes {
 			return nil, fmt.Errorf("%s: must be set to at least %d bytes when auth.mode is \"bearer\"", bearerTokenEnvVar, minBearerTokenBytes)
@@ -189,7 +220,7 @@ func buildServeHandler(cfg *config.Config, mcpSrv *server.MCPServer, f serveFlag
 		MaxStreamSeconds: cfg.Auth.MaxStreamSeconds,
 	}
 
-	if cfg.Auth.Mode == config.AuthModeOAuth {
+	if cfg.Auth.Mode == "oauth" {
 		resource := publicURL + endpointPath
 		audience, err := resolveAudience(cfg.Auth.OAuth.Audience, resource)
 		if err != nil {
@@ -218,7 +249,13 @@ func buildServeHandler(cfg *config.Config, mcpSrv *server.MCPServer, f serveFlag
 		// matching so the endpoint only answers at endpointPath — the
 		// same string advertised as the PRM "resource" — and 404s
 		// elsewhere instead of silently answering on every path.
-		transportHandler = exactPathHandler(endpointPath, server.NewStreamableHTTPServer(mcpSrv))
+		opts := []server.StreamableHTTPOption{
+			server.WithSessionIdleTTL(sessionIdleTTLFor(cfg.Auth.MaxStreamSeconds)),
+		}
+		if f.mcpLogger != nil {
+			opts = append(opts, server.WithLogger(f.mcpLogger))
+		}
+		transportHandler = exactPathHandler(endpointPath, server.NewStreamableHTTPServer(mcpSrv, opts...))
 	case "sse":
 		// SSEServer.ServeHTTP already matches its SSE and message paths
 		// exactly, so it needs no wrapper. --endpoint-path is deliberately

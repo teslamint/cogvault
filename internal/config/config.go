@@ -38,20 +38,6 @@ type AuthConfig struct {
 	OAuth            OAuthConfig `yaml:"oauth"`
 }
 
-// Valid values for AuthConfig.Mode / httpauth.Config.Mode. This is the
-// single source of truth for the set: internal/httpauth's own
-// validateConfig switch (its request-time defense-in-depth backstop, kept
-// deliberately separate from this config-time check) imports these rather
-// than re-spelling the three literals, so adding or renaming a mode can no
-// longer update one side and silently leave the other to drift — which
-// previously meant either a confusing config rejection or a raw panic
-// inside httpauth.Mount at startup, depending on which side changed.
-const (
-	AuthModeNone   = "none"
-	AuthModeBearer = "bearer"
-	AuthModeOAuth  = "oauth"
-)
-
 type Config struct {
 	WikiDir             string      `yaml:"wiki_dir"`
 	DBPath              string      `yaml:"db_path"`
@@ -251,10 +237,10 @@ func (c *Config) validate() error {
 	if c.LLM.EmbeddingBaseURL != "" && c.LLM.EmbeddingModel == "" {
 		return fmt.Errorf("llm.embedding_base_url: requires embedding_model to be set")
 	}
-	if c.Auth.Mode != AuthModeNone && c.Auth.Mode != AuthModeBearer && c.Auth.Mode != AuthModeOAuth {
-		return fmt.Errorf("auth.mode: %q not supported; use %q, %q, or %q", c.Auth.Mode, AuthModeNone, AuthModeBearer, AuthModeOAuth)
+	if c.Auth.Mode != "none" && c.Auth.Mode != "bearer" && c.Auth.Mode != "oauth" {
+		return fmt.Errorf("auth.mode: %q not supported; use \"none\", \"bearer\", or \"oauth\"", c.Auth.Mode)
 	}
-	if c.Auth.Mode == AuthModeOAuth {
+	if c.Auth.Mode == "oauth" {
 		if c.Auth.OAuth.Issuer == "" {
 			return fmt.Errorf("auth.oauth.issuer: must not be empty when auth.mode is \"oauth\"")
 		}
