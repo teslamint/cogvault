@@ -72,7 +72,7 @@ Inspired by [llm-wiki-for-scientists][llm-wiki].
 
 | Item | Context | Owner |
 |------|---------|-------|
-| ~~Synthesis layer — ingest 후처리로 관련 기존 페이지 검색 → concept/synthesis 페이지 자동 생성/갱신~~ | **Done** (2026-08-08). `cogvault synthesize` creates concept pages from cross-referenced links and shared tags (≥2 pages). | No contract section yet — F12 in [v2-follow-ups](docs/research/v2-follow-ups.md) |
+| ~~Synthesis layer — ingest 후처리로 관련 기존 페이지 검색 → concept/synthesis 페이지 자동 생성/갱신~~ | **Done** (2026-08-08). `cogvault synthesize` creates concept pages from cross-referenced links and shared tags (≥2 pages). | [SPEC](SPEC.md) §9.7 |
 | ~~Question → wiki feedback loop~~ | **Done** (2026-08-08). `_schema.md`에 Q&A→Wiki 피드백 루프 워크플로 추가. 코드 변경 없음. | [SPEC](SPEC.md) §8 |
 
 ### Consume / tooling expansion
