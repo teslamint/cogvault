@@ -1,6 +1,6 @@
 ---
 title: Actionable Claude CLI Diagnostics
-status: draft
+status: approved
 date: 2026-08-17
 schema: spec/v1
 ---
