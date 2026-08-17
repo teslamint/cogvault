@@ -59,6 +59,16 @@ refusal_exitN_stderr)
 	printf '%s\n' 'API Error: refused' >&2
 	exit 1
 	;;
+custom_exit0)
+	printf '%s' "$CLAUDE_FAKE_STDOUT"
+	printf '%s' "$CLAUDE_FAKE_STDERR" >&2
+	exit 0
+	;;
+custom_exit1)
+	printf '%s' "$CLAUDE_FAKE_STDOUT"
+	printf '%s' "$CLAUDE_FAKE_STDERR" >&2
+	exit 1
+	;;
 empty)
 	printf '%s' '[{"type":"result","subtype":"success","is_error":false,"result":""}]'
 	;;

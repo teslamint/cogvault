@@ -215,11 +215,30 @@ Per-file failures are classified; the run always continues past them (§10.3).
 
 | Class | Examples | Attempt cost |
 |------|------|------|
-| transient | quota/rate limit, timeout, CLI transport, `error_during_execution` | **none** — retries on later runs |
+| transient | quota/rate limit, timeout, CLI transport, generic API/CLI failure, `error_during_execution` | **none** — retries on later runs |
 | permanent | malformed LLM output, schema-invalid page | consumes one attempt (bounded at 3) |
 | infra | storage write / index add / ledger write failure | **none** — local infra, not the file |
+| refused | anchored provider policy/AUP refusal | **none** — terminal under the same model and content hash |
 
-`llm.ErrTransient` is the wrapped sentinel for the transient class.
+`llm.ErrTransient` and `llm.ErrRefused` are the wrapped LLM sentinels. Refusal
+classification and diagnostic persistence are deliberately separate. Only the
+final `type: "result"` event participates. It is refusal-classifiable when
+`terminal_reason == "api_error"` regardless of `is_error`, or when
+`is_error == true` and `subtype == "error_during_execution"`. Its structured
+`result` is eligible for persistence only when `is_error == true`, one of those
+two failure channels is present, and the trimmed result is non-empty, contains
+no CR/LF, and does not begin with `---`, `#`, or `` ``` ``.
+
+Every authoritative candidate is canonicalized before classification or
+display: recognized ANSI SGR/OSC sequences are removed, Unicode whitespace is
+collapsed to one ASCII space, and remaining Unicode Control or Format (`Cf`)
+runes become `U+FFFD`. The case-insensitive refusal predicate is anchored to the
+start of the canonicalized candidate: `policy refusal:`, or `API Error:`
+followed by `refused`, bare `safeguards flagged`, or the exact observed provider
+envelope `Fable 5's safeguards flagged` (ASCII or curly apostrophe). Unknown
+provider-name safeguard envelopes, quoted, negated,
+embedded, suffix-only, `connection refused`, generic `api_error`, and generic
+`API Error:` messages remain transient.
 
 ---
 
@@ -770,10 +789,15 @@ scan source dir (top level only, Lstat: skip dirs/symlinks)
   → settle-window gate (skip files modified within 2m — mid-download guard)
   → sha256 content hash → ledger lookup (skip if already processed)
   → llm.Digest(source path, schema) via claude --print
+      → parse stdout event array; inspect only the final result event
+      → classify policy refusal across eligible final result, stderr, and permitted plain stdout
+      → otherwise select a safe diagnostic: eligible result → stderr → plain stdout → process error
   → validate page frontmatter from bytes (non-empty map + title)
   → collision-aware page path under sources/
   → storage.Write → index.Add → ledger: success
-(any failure → ledger: failed + classified error; the run continues)
+(digest/validation/storage/index failure → attempt ledger status `failed` or `refused` + classified error)
+(ledger persistence failure → report/log failure; the failed write cannot guarantee its own row persisted)
+(the run continues)
 ```
 
 ### 10.2 Page identity
@@ -801,10 +825,23 @@ removal.
 
 ### 10.3 Failure isolation
 
-Per-file failures are classified (§4.2) and never abort the run. Permanent
-failures increment `attempts`, bounded at 3; at the bound the file is skipped in
-later runs (reported as exhausted). Transient and infra failures leave `attempts`
-unchanged so the file retries indefinitely.
+Per-file failures are classified (§4.2) and never abort the run. Classification
+precedes diagnostic-message selection, so an anchored refusal in any
+authoritative stream wins over a generic diagnostic in another stream. Stdout
+whose first non-whitespace rune is `{` or `[` is JSON-looking; if it is
+malformed, wrong-shaped, or lacks a final result, it is never reused as plain
+text. On a non-refused failure the persisted message uses the safe eligible
+final result first, then non-empty stderr, then non-JSON-looking plain stdout,
+then the process error. The selected candidate is canonicalized as in §4.2 and
+bounded to exactly 2,000 runes: values over the bound retain the first 1,999
+runes plus `…`.
+
+Permanent failures increment `attempts`, bounded at 3; at the bound the file is
+skipped in later runs (reported as exhausted). Transient, refused, and infra
+failures leave `attempts` unchanged. Transient and infra failures retry on later
+runs. A refused row is skipped while its model and content hash are unchanged.
+A final generic `api_error`, including on exit zero, is transient unless the
+anchored refusal predicate matches.
 
 ### 10.4 Report
 
@@ -831,6 +868,15 @@ confirms that its wiki page still exists. `ErrNotFound` falls through to
 re-digest the present source. Other stat errors report `failed` with
 `stat wiki page: <error>` and leave the ledger row unchanged.
 
+For actionable transient failures, the report error and, when ledger
+persistence succeeds, `last_error` contain the same canonicalized, bounded
+diagnostic. A structured final result is rejected when it is empty, contains
+CR/LF, or begins with YAML frontmatter, a Markdown heading, or a code fence;
+stderr or the process error then supplies the safe fallback. These shape gates
+do not prove provenance: an accepted, bounded single-line provider diagnostic
+may still contain source-derived wording. That local residual is accepted by
+the diagnostic-safety deviation.
+
 ### 10.5 Concurrency
 
 A single-instance exclusive `flock` on `<dir(db_path)>/ingest.lock`, acquired for
@@ -850,9 +896,10 @@ or exhausts retries. This write×write FTS case is a documented limitation; see
 ingest_ledger(
   source_path TEXT, content_hash TEXT, source_dir TEXT,
   digested_at TEXT, wiki_page TEXT,
-  status TEXT,            -- success | failed | superseded
+  status TEXT,            -- success | failed | refused | superseded
   attempts INTEGER, last_error TEXT,
   run_origin TEXT,        -- scheduled | interactive
+  llm_model TEXT,
   PRIMARY KEY (source_path, content_hash)
 )
 ```
@@ -860,11 +907,16 @@ ingest_ledger(
 Owned by `internal/ingest` through its own DB connection to `db_path` (WAL +
 busy_timeout make the second connection safe). Type-excluded/oversized files are
 reported per run, not persisted. Source originals are never moved or deleted.
+Existing ledger rows are not migrated when refusal classification changes. A
+historical generic API failure already recorded as `refused` remains terminal
+until `llm.model` or source content changes, which activates the existing
+model/content-hash re-attempt gate.
 
 ### 10.7 Behavior constants and promoted knobs
 
-LLM timeout 5m, max permanent-failure attempts 3, settle window 2m — these
-remain code constants, promoted to config keys only on demonstrated need.
+LLM timeout 5m, maximum diagnostic length 2,000 runes (including `…`), max
+permanent-failure attempts 3, settle window 2m — these remain code constants,
+promoted to config keys only on demonstrated need.
 
 Max file size was promoted to `max_file_size_mb` (default 32MB) after a real
 corpus file (42MB PDF) was permanently skipped (F9).

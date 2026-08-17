@@ -2,11 +2,12 @@
 schema: plan/v1
 title: Remote MCP server — Streamable HTTP transport and OAuth 2.1 resource server
 type: feat
-status: approved
+status: done
 date: 2026-08-11
 execution: code
 origin: docs/specs/2026-08-11-remote-mcp-server-design.md
 body_seal: f426704f55e73e175b9e9b23fc2c52ec29f64feebd6d465bd2bb66f2e39876de
+completed_by: ae5c39e9ee78f0e237c4be9f02e2d8ff8a2c7e8a
 ---
 
 # Remote MCP server — Streamable HTTP transport and OAuth 2.1 resource server
