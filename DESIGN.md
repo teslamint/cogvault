@@ -39,8 +39,11 @@ Unidirectional, no cycles. Two new packages in v2: `internal/llm` and
 ### 2.1 errors
 
 Sentinel error package (SPEC §4.1). Mapping lives in `mcp/tools.go` `mapError`.
-The ingest error classes (§4.2) are separate: `llm.ErrTransient` plus an internal
-`failureClass` enum (permanent/transient/infra) in `internal/ingest`.
+The ingest error classes (§4.2) are separate: `llm.ErrTransient` and
+`llm.ErrRefused` plus an internal `failureClass` enum
+(permanent/transient/refused/infra) in `internal/ingest`. `ErrRefused` is
+terminal only under the same configured model and content hash and consumes no
+permanent attempt.
 
 ### 2.2 config
 
@@ -136,22 +139,45 @@ type Adapter interface {
     Digest(ctx context.Context, req DigestRequest) (*DigestResult, error)
     Name() string
 }
-var ErrTransient error   // wraps quota/rate-limit/timeout/transport failures
-func NewClaudeCode(binPath string) *ClaudeCode
+var ErrTransient error   // wraps quota/rate-limit/timeout/transport/API failures
+var ErrRefused error     // anchored provider policy refusal; model-gated
+func NewClaudeCode(binPath, model string) *ClaudeCode
 ```
 
 **Responsibility**: define the digestion contract and one backend. `claudecode`
 runs `claude --print --output-format json --allowedTools "Read"` with the prompt
 (schema text + instructions + absolute source path) on **stdin** (avoids ARG_MAX),
-a per-call 5-minute timeout, strips an optional leading/trailing ``` fence, parses
-the final JSON array element, and treats any non-`success` subtype or
-`is_error:true` as failure regardless of exit code (O1 findings). `buildPrompt`
+a per-call 5-minute timeout, strips an optional leading/trailing ``` fence, and
+parses stdout as an event array. Only the final `type: "result"` event can
+classify structured output or provide a diagnostic. `buildPrompt`
 uses `SourceExt` to emit a type-aware read instruction (PDF/markdown/generic) and
 carries the `category` classification instruction (article | legal | reference)
 directly in code — not dependent on the wiki's `_schema.md` version. Error
-classification: quota/rate-limit/timeout/transport/`error_during_execution` →
-`ErrTransient` (permanent otherwise). A future local backend implements the same
-interface without touching `ingest`.
+classification and message selection are separate passes. A final
+`terminal_reason: "api_error"` is refusal-classifiable even when `is_error` is
+false; otherwise structured refusal classification requires `is_error` plus
+`error_during_execution`. Classification checks that eligible result, stderr,
+and non-JSON-looking plain stdout before selecting a message, so policy evidence
+in one stream wins over a generic failure in another.
+
+`isRefusalText` canonicalizes each candidate, then accepts only a candidate
+beginning `policy refusal:`, or the anchored case-insensitive provider grammar
+`^api error:\s*(?:refused\b|(?:[\p{L}\p{N} ._-]+(?:'s|’s)\s+)?safeguards flagged\b)`.
+Generic `api_error`/`API Error:` messages, quoted or negated phrases, embedded or
+suffix-only phrases, and `connection refused` are transient, including on an
+exit-zero final API error.
+
+Structured diagnostic persistence is stricter: the final event must have
+`is_error == true`, must carry `api_error` or `error_during_execution`, and its
+trimmed result must be non-empty, contain no CR/LF, and not begin with
+frontmatter, a Markdown heading, or a code fence. After refusal classification, message
+precedence is safe structured result, stderr, non-JSON-looking plain stdout,
+then process error. Malformed, wrong-shaped, or final-result-less stdout that
+begins with `{` or `[` is never reused as plain text. Recognized ANSI SGR/OSC is
+removed, Unicode whitespace collapses to one ASCII space, and remaining Unicode
+Control/Format (`Cf`) runes become `U+FFFD` before both classification and
+display. Diagnostics over 2,000 runes retain 1,999 plus `…`. A future local
+backend implements the same interface without touching `ingest`.
 
 ### 2.7 ingest (new)
 
@@ -187,8 +213,11 @@ source; other stat errors increment `Failed`, append `actionFailed` with
 it validates the page's frontmatter from bytes, resolves the collision-aware page
 path, writes through `storage`, indexes via `idx.Add`, and finalizes the ledger
 row. It honors ctx cancellation between files (partial report + wrapped ctx
-error) and releases the lock via defer. Error classes drive
-`attempts` (permanent ++, transient/infra unchanged; §4.2).
+error) and releases the lock via defer. Error classes drive `attempts`
+(permanent ++, transient/refused/infra unchanged; §4.2). Refused rows persist
+the configured model and are skipped only while both model and content hash are
+unchanged; either change permits a re-attempt. Historical refused rows are not
+reclassified or migrated.
 
 **Ledger** (`ledger.go`): owns its **own** `sql.Open("sqlite", dsn)` to `db_path`
 with DSN pragmas `busy_timeout(5000)` + `journal_mode(WAL)` on **every** pooled
@@ -198,7 +227,10 @@ DB file safe. DDL and transitions (`lookup`, `supersedePrevSuccess`, `upsert`) p
 SPEC §10.6.
 
 **Report** (`report.go`): builds the `Report` struct + a `String()` renderer;
-printing is the CLI's job.
+printing is the CLI's job. Actionable transient diagnostics flow unchanged from
+the adapter error into both the per-file report error and ledger `last_error`;
+the adapter's eligibility, shape, canonicalization, and 2,000-rune gates run
+before that persistence boundary.
 
 ### 2.8 mcp
 
@@ -364,13 +396,18 @@ JWT — `logRejection` records only a reason class and remote address.
 ### 3.1 Ingest (Phase 1)
 
 ```
-sources[].path ──scan──▶ stability gate ──▶ content hash ──new?──▶ llm.Adapter.Digest(file, schema)
-                                                                      │ (claude --print subprocess)
-                                                                      ▼
-                                                           markdown source page
-                                                                      │
-                                        storage.Write ──▶ index.Add ──▶ ledger: success
-                                        (failure at any step ──▶ ledger: failed + class, run continues)
+sources[].path ──scan──▶ stability gate ──▶ content hash ──new/model gate?──▶ llm.Adapter.Digest(file, schema)
+                                                                            │ (claude --print subprocess)
+                                                                            ▼
+                                                       parse final result + authoritative streams
+                                                          │ classify refusal before message choice
+                                                          │ apply diagnostic safety + 2,000-rune bound
+                                                          ├──failure──▶ ledger/report: class + last_error
+                                                          ▼
+                                                   validated markdown source page
+                                                          │
+                                  storage.Write ──▶ index.Add ──▶ ledger: success
+                                  (failure at any step ──▶ ledger: failed/refused + class, run continues)
 ```
 
 ### 3.2 init (two-step)
@@ -421,11 +458,11 @@ resolveConfigPath → Load → bootstrap(store/index/adapter) → CheckConsisten
 | `adapter/markdown/parser.go` | standard-markdown fallback |
 | `index/index.go` | interface + Result + FileMeta + NormalizeCategory |
 | `index/sqlite.go` | FTS5, file_meta (+size/mtime/category), user_version=3, stat-gated CheckConsistency, busy_timeout |
-| `llm/llm.go` | Adapter interface, DigestRequest/Result, ErrTransient |
-| `llm/claudecode.go` | `claude --print` backend, JSON parse, error classification |
-| `ingest/ingest.go` | Runner: scan, hash, digest, validate, write, index, ledger, lock, ctx |
-| `ingest/ledger.go` | `ingest_ledger` DDL + transitions; own DB connection |
-| `ingest/report.go` | Report struct + String() |
+| `llm/llm.go` | Adapter interface, DigestRequest/Result, ErrTransient, ErrRefused |
+| `llm/claudecode.go` | `claude --print` backend; final-event parsing; refusal classification; safe diagnostic selection, canonicalization, and bound |
+| `ingest/ingest.go` | Runner: scan, hash/model gate, digest, classify, validate, write, index, ledger, lock, ctx |
+| `ingest/ledger.go` | `ingest_ledger` DDL + transitions; model-gated refused rows; own DB connection |
+| `ingest/report.go` | Report struct + String(); per-file normalized diagnostic |
 | `mcp/server.go` | MCP server, instructions, tool registration + annotations |
 | `mcp/tools.go` | seven tools, mapError, listWithMeta (no scope), gitAutoCommit |
 | `httpauth/auth.go` | Config, Middleware, Mount, credential checks, resource bounds |
