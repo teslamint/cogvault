@@ -197,6 +197,19 @@ func TestIngestNonzeroExitDiagnostic(t *testing.T) {
 		if _, _, err := executeCommand("ingest", "--config", configPath); err != nil {
 			t.Fatalf("first ingest: %v", err)
 		}
+		firstRows := readLedger(t, dbPath)
+		if len(firstRows) != 1 {
+			t.Fatalf("expected one ledger row after first failure, got %d", len(firstRows))
+		}
+		firstError := "digest: llm.Digest " + sourcePath + ": claude cli: " + firstDiagnostic + ": transient llm failure"
+		firstRow := firstRows[0]
+		if firstRow.lastError != firstError || firstRow.status != "failed" || firstRow.attempts != 0 {
+			t.Fatalf("first row = %+v, want failed attempts=0 with last_error %q", firstRow, firstError)
+		}
+		firstHash := firstRow.contentHash
+		if firstHash == "" {
+			t.Fatal("first row content hash is empty")
+		}
 
 		const secondDiagnostic = "updated transient diagnostic"
 		t.Setenv("CLAUDE_FAKE_STDERR", secondDiagnostic)
@@ -210,8 +223,8 @@ func TestIngestNonzeroExitDiagnostic(t *testing.T) {
 		}
 		wantError := "digest: llm.Digest " + sourcePath + ": claude cli: " + secondDiagnostic + ": transient llm failure"
 		row := rows[0]
-		if row.lastError != wantError || row.status != "failed" || row.attempts != 0 || row.runOrigin != "interactive" {
-			t.Errorf("rerun row = %+v, want failed attempts=0 interactive with last_error %q", row, wantError)
+		if row.contentHash != firstHash || row.lastError != wantError || row.status != "failed" || row.attempts != 0 || row.runOrigin != "interactive" {
+			t.Errorf("rerun row = %+v, want content_hash %q, failed attempts=0 interactive with last_error %q", row, firstHash, wantError)
 		}
 		if !strings.Contains(stdout, sourcePath+"  "+wantError) {
 			t.Errorf("rerun report missing complete updated error %q: %q", wantError, stdout)
