@@ -37,10 +37,15 @@ the actual adapter, report, and ledger paths.
 
 ## New observable behavior
 
-1. A structured result is error-eligible only when `is_error` is true **and**
-   either `terminal_reason == "api_error"` or
-   `subtype == "error_during_execution"`.
-2. An eligible structured `result` is diagnostic-shaped only when, after
+1. Classification eligibility and diagnostic-persistence eligibility are
+   separate. The final result is refusal-classifiable when
+   `terminal_reason == "api_error"` even if `is_error` is false; this preserves
+   the observed exit-zero AUP refusal. If the anchored predicate does not
+   match, a generic final `api_error` is transient.
+2. A structured result is diagnostic-persistable only when `is_error` is true
+   **and** either `terminal_reason == "api_error"` or
+   `subtype == "error_during_execution"`. Its `result` is diagnostic-shaped
+   only when, after
    trimming, it is non-empty, contains no CR/LF, and does not begin with a YAML
    frontmatter delimiter, Markdown heading, or code fence. Otherwise stderr or
    the process error is used. This blocks page-like/multiline output; because
@@ -51,11 +56,13 @@ the actual adapter, report, and ledger paths.
    and display: recognized ANSI SGR/OSC sequences are removed; Unicode
    whitespace collapses to one ASCII space; remaining Unicode Control and
    Format (`Cf`) runes become `U+FFFD`.
-4. Policy refusal is anchored after canonicalization. It matches only an
-   `API Error:` envelope whose payload begins with `refused` or contains
-   `safeguards flagged`, or a line beginning with `policy refusal:`. Quoted,
-   negated, embedded, suffix-only, and generic `connection refused` text is
-   transient.
+4. Policy refusal is anchored after canonicalization. It matches a line
+   beginning `policy refusal:`, or this case-insensitive Go/RE2 grammar for the
+   known provider envelope:
+   `^api error:\s*(?:refused\b|(?:[\p{L}\p{N} ._-]+(?:'s|’s)\s+)?safeguards flagged\b)`.
+   The optional provider possessive admits the observed
+   `Fable 5's safeguards flagged` form without accepting negated, quoted,
+   embedded, suffix-only, or generic `connection refused` text.
 5. Classification still inspects every authoritative stream before diagnostic
    selection. The approved message precedence and 2,000-rune inclusive bound
    remain unchanged.
@@ -83,14 +90,17 @@ contract. It is registered as F16 rather than hidden in this remediation.
 
 ## Verification changes
 
-- Error eligibility gets one-axis tests for `is_error`, subtype, and terminal
-  reason rather than fixtures setting several at once.
+- Classification eligibility and diagnostic-persistence eligibility get
+  separate one-axis tests, including the existing `is_error:false` exit-zero
+  AUP refusal and a generic `api_error` transient.
 - A page-like/multiline eligible result carrying a secret marker must appear in
   neither report nor ledger.
-- Mixed-case accepted signatures and formatted (whitespace/ANSI) refusals must
-  classify terminal after canonicalization.
-- Quoted, negated, embedded, suffix-only, `connection refused`, and completed
-  generated-content cases must remain non-refused.
+- Mixed-case accepted signatures and formatted (whitespace/ANSI) known
+  envelopes must classify terminal after canonicalization.
+- Explicit negatives include `API Error: not safeguards flagged`,
+  `API Error: response contained "safeguards flagged"`, prefix/suffix-only
+  phrases, quoted/negated/embedded `policy refusal`, `connection refused`, and
+  completed generated content.
 - Actual report/ledger tests cover format controls (`Cf`), ANSI, control runes,
   and the 2,001-rune truncation boundary.
 - Plan acceptance must prove every new named test exists; broad `go test -run`
