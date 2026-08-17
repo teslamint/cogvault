@@ -794,7 +794,9 @@ scan source dir (top level only, Lstat: skip dirs/symlinks)
   → validate page frontmatter from bytes (non-empty map + title)
   → collision-aware page path under sources/
   → storage.Write → index.Add → ledger: success
-(any failure → ledger: failed + classified error; the run continues)
+(digest/validation/storage/index failure → attempt ledger status `failed` or `refused` + classified error)
+(ledger persistence failure → report/log failure; the failed write cannot guarantee its own row persisted)
+(the run continues)
 ```
 
 ### 10.2 Page identity
@@ -865,10 +867,14 @@ confirms that its wiki page still exists. `ErrNotFound` falls through to
 re-digest the present source. Other stat errors report `failed` with
 `stat wiki page: <error>` and leave the ledger row unchanged.
 
-For actionable transient failures, the report error and ledger `last_error`
-contain the same canonicalized, bounded diagnostic. Rejected page-shaped,
-multiline, malformed JSON-looking, prompt-like, or source-like result content is
-not persisted; stderr or the process error supplies the safe fallback.
+For actionable transient failures, the report error and, when ledger
+persistence succeeds, `last_error` contain the same canonicalized, bounded
+diagnostic. A structured final result is rejected when it is empty, contains
+CR/LF, or begins with YAML frontmatter, a Markdown heading, or a code fence;
+stderr or the process error then supplies the safe fallback. These shape gates
+do not prove provenance: an accepted, bounded single-line provider diagnostic
+may still contain source-derived wording. That local residual is accepted by
+the diagnostic-safety deviation.
 
 ### 10.5 Concurrency
 

@@ -228,9 +228,9 @@ SPEC §10.6.
 
 **Report** (`report.go`): builds the `Report` struct + a `String()` renderer;
 printing is the CLI's job. Actionable transient diagnostics flow unchanged from
-the adapter error into both the per-file report error and ledger `last_error`;
-the adapter's eligibility, shape, canonicalization, and 2,000-rune gates run
-before that persistence boundary.
+the adapter error into the per-file report error and, when the ledger write
+succeeds, ledger `last_error`; the adapter's eligibility, shape,
+canonicalization, and 2,000-rune gates run before that persistence boundary.
 
 ### 2.8 mcp
 
@@ -402,12 +402,13 @@ sources[].path ──scan──▶ stability gate ──▶ content hash ──n
                                                        parse final result + authoritative streams
                                                           │ classify refusal before message choice
                                                           │ apply diagnostic safety + 2,000-rune bound
-                                                          ├──failure──▶ ledger/report: class + last_error
+                                                          ├──failure──▶ attempt ledger: failed/refused + report
                                                           ▼
                                                    validated markdown source page
                                                           │
                                   storage.Write ──▶ index.Add ──▶ ledger: success
-                                  (failure at any step ──▶ ledger: failed/refused + class, run continues)
+                                  (storage/index failure ──▶ attempt ledger: failed + report)
+                                  (ledger persistence failure ──▶ report/log only; run continues)
 ```
 
 ### 3.2 init (two-step)
