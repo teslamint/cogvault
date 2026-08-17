@@ -7,11 +7,22 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 const defaultTimeout = 5 * time.Minute
+
+const maxDiagnosticRunes = 2000
+
+var (
+	ansiSGRPattern = regexp.MustCompile(`\x1b\[[0-9;?]*m`)
+	ansiOSCPattern = regexp.MustCompile(`\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)`)
+	refusalPattern = regexp.MustCompile(`(?i)^api error:\s*(?:refused\b|(?:[\p{L}\p{N} ._-]+(?:'s|’s)\s+)?safeguards flagged\b)`)
+)
 
 type ClaudeCode struct {
 	binPath string
@@ -61,16 +72,20 @@ func (c *ClaudeCode) digest(ctx context.Context, req DigestRequest) (*DigestResu
 	if errors.Is(ctx.Err(), context.Canceled) {
 		return nil, fmt.Errorf("context cancelled: %w", ErrTransient)
 	}
+
+	inspection := inspectCLIOutput(stdout.Bytes())
+	if (inspection.hasFinal && classificationEligible(inspection.final) && isRefusalText(inspection.final.Result)) ||
+		isRefusalText(stderr.String()) || isRefusalText(inspection.plainStdout) {
+		return nil, fmt.Errorf("claude policy refusal: %w", ErrRefused)
+	}
+
 	if runErr != nil {
-		if isRefusalText(stdout.String()) || isRefusalText(stderr.String()) {
-			return nil, fmt.Errorf("claude policy refusal: %w", ErrRefused)
-		}
-		// Both a failed process launch and a nonzero exit are transport/quota
-		// class; never inspect the exit code for digestion success (U1 spike).
-		msg := strings.TrimSpace(stderr.String())
-		if msg == "" {
-			msg = runErr.Error()
-		}
+		msg := failureDiagnostic(inspection, stderr.String(), runErr)
+		return nil, fmt.Errorf("claude cli: %s: %w", msg, ErrTransient)
+	}
+
+	if inspection.hasFinal && (inspection.final.IsError || inspection.final.Subtype == "error_during_execution" || inspection.final.TerminalReason == "api_error") {
+		msg := failureDiagnostic(inspection, stderr.String(), errors.New("claude execution error"))
 		return nil, fmt.Errorf("claude cli: %s: %w", msg, ErrTransient)
 	}
 
@@ -90,8 +105,105 @@ type resultEvent struct {
 }
 
 func isRefusalText(s string) bool {
-	s = strings.TrimSpace(s)
-	return strings.HasPrefix(s, "API Error:") || strings.Contains(s, "safeguards flagged")
+	s = normalizeCLIDiagnostic(s)
+	return strings.HasPrefix(strings.ToLower(s), "policy refusal:") || refusalPattern.MatchString(s)
+}
+
+type cliOutputInspection struct {
+	final       resultEvent
+	hasFinal    bool
+	plainStdout string
+}
+
+func inspectCLIOutput(stdout []byte) cliOutputInspection {
+	trimmed := strings.TrimSpace(string(stdout))
+	if trimmed == "" {
+		return cliOutputInspection{}
+	}
+	if trimmed[0] != '{' && trimmed[0] != '[' {
+		return cliOutputInspection{plainStdout: string(stdout)}
+	}
+
+	var events []resultEvent
+	if err := json.Unmarshal(stdout, &events); err != nil {
+		return cliOutputInspection{}
+	}
+	final, ok := lastResultEvent(events)
+	return cliOutputInspection{final: final, hasFinal: ok}
+}
+
+func classificationEligible(event resultEvent) bool {
+	return event.TerminalReason == "api_error" ||
+		(event.IsError && event.Subtype == "error_during_execution")
+}
+
+func diagnosticEligible(event resultEvent) bool {
+	return event.IsError &&
+		(event.TerminalReason == "api_error" || event.Subtype == "error_during_execution")
+}
+
+func failureDiagnostic(inspection cliOutputInspection, stderr string, runErr error) string {
+	if inspection.hasFinal && diagnosticEligible(inspection.final) && isDiagnosticShaped(inspection.final.Result) {
+		return normalizeCLIDiagnostic(inspection.final.Result)
+	}
+	if msg := normalizeCLIDiagnostic(stderr); msg != "" {
+		return msg
+	}
+	if msg := normalizeCLIDiagnostic(inspection.plainStdout); msg != "" {
+		return msg
+	}
+	return normalizeCLIDiagnostic(runErr.Error())
+}
+
+func isDiagnosticShaped(s string) bool {
+	withoutANSI := stripRecognizedANSI(s)
+	trimmed := strings.TrimSpace(withoutANSI)
+	if trimmed == "" || strings.ContainsAny(trimmed, "\r\n") {
+		return false
+	}
+	shape := strings.TrimSpace(strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf) {
+			return -1
+		}
+		return r
+	}, trimmed))
+	return !strings.HasPrefix(shape, "---") &&
+		!strings.HasPrefix(shape, "#") &&
+		!strings.HasPrefix(shape, "```")
+}
+
+func normalizeCLIDiagnostic(s string) string {
+	s = stripRecognizedANSI(s)
+	var b strings.Builder
+	b.Grow(len(s))
+	spacePending := false
+	for _, r := range s {
+		if unicode.IsSpace(r) {
+			spacePending = b.Len() > 0
+			continue
+		}
+		if spacePending {
+			b.WriteByte(' ')
+			spacePending = false
+		}
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf) {
+			b.WriteRune('\uFFFD')
+			continue
+		}
+		b.WriteRune(r)
+	}
+
+	result := b.String()
+	if utf8.RuneCountInString(result) <= maxDiagnosticRunes {
+		return result
+	}
+	runes := []rune(result)
+	return string(runes[:maxDiagnosticRunes-1]) + "…"
+}
+
+func stripRecognizedANSI(s string) string {
+	s = ansiOSCPattern.ReplaceAllString(s, "")
+	return ansiSGRPattern.ReplaceAllString(s, "")
 }
 
 func parseResult(stdout []byte) (string, error) {
@@ -104,10 +216,10 @@ func parseResult(stdout []byte) (string, error) {
 	if !ok {
 		return "", errors.New("no result event in claude output")
 	}
-	if final.TerminalReason == "api_error" || isRefusalText(final.Result) {
+	if classificationEligible(final) && isRefusalText(final.Result) {
 		return "", fmt.Errorf("claude policy refusal: %w", ErrRefused)
 	}
-	if final.IsError || final.Subtype == "error_during_execution" {
+	if final.IsError || final.Subtype == "error_during_execution" || final.TerminalReason == "api_error" {
 		return "", fmt.Errorf("claude execution error (subtype=%q): %w", final.Subtype, ErrTransient)
 	}
 	if final.Subtype != "success" {

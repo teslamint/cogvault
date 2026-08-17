@@ -3,11 +3,15 @@ package llm
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 func fakeClaude(t *testing.T) string {
@@ -149,6 +153,216 @@ func TestDigestRateLimitTransient(t *testing.T) {
 	}
 	if !errors.Is(err, ErrTransient) {
 		t.Errorf("nonzero exit should be transient, got %v", err)
+	}
+}
+
+func TestDigestStructuredTransientDiagnostic(t *testing.T) {
+	c, _, _ := newFake(t, "custom_exit1")
+	t.Setenv("CLAUDE_FAKE_STDOUT", `[{"type":"result","subtype":"error_during_execution","is_error":true,"result":"You've hit your weekly limit · resets Aug 18 at 12pm (Asia/Seoul)"}]`)
+
+	_, err := c.Digest(context.Background(), DigestRequest{SourcePath: "notes/x.pdf"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, ErrTransient) || errors.Is(err, ErrRefused) {
+		t.Fatalf("weekly limit should be transient, not refused: %v", err)
+	}
+	if !strings.Contains(err.Error(), "resets Aug 18 at 12pm (Asia/Seoul)") {
+		t.Errorf("error should contain actionable reset detail, got %q", err)
+	}
+}
+
+func TestDigestGenericAPIErrorNotRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		isError    bool
+		wantDetail bool
+	}{
+		{"persistable", true, true},
+		{"classification_only", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _, _ := newFake(t, "custom_exit0")
+			t.Setenv("CLAUDE_FAKE_STDOUT", fmt.Sprintf(`[{"type":"result","subtype":"error_during_execution","is_error":%t,"terminal_reason":"api_error","result":"API Error: upstream overloaded; SECRET-DETAIL"}]`, tc.isError))
+
+			_, err := c.Digest(context.Background(), DigestRequest{SourcePath: "notes/x.pdf"})
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !errors.Is(err, ErrTransient) || errors.Is(err, ErrRefused) {
+				t.Fatalf("generic API error should be transient, not refused: %v", err)
+			}
+			if got := strings.Contains(err.Error(), "SECRET-DETAIL"); got != tc.wantDetail {
+				t.Errorf("diagnostic detail presence = %v, want %v: %q", got, tc.wantDetail, err)
+			}
+		})
+	}
+}
+
+func TestDigestDiagnosticEventEligibility(t *testing.T) {
+	tests := []struct {
+		name       string
+		event      string
+		wantResult bool
+	}{
+		{"is_error_false", `{"type":"result","subtype":"error_during_execution","is_error":false,"result":"SECRET-INELIGIBLE"}`, false},
+		{"completed", `{"type":"result","subtype":"success","is_error":true,"terminal_reason":"completed","result":"SECRET-INELIGIBLE"}`, false},
+		{"execution_error", `{"type":"result","subtype":"error_during_execution","is_error":true,"result":"eligible execution detail"}`, true},
+		{"api_error", `{"type":"result","subtype":"success","is_error":true,"terminal_reason":"api_error","result":"eligible API detail"}`, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _, _ := newFake(t, "custom_exit1")
+			t.Setenv("CLAUDE_FAKE_STDOUT", "["+tc.event+"]")
+			t.Setenv("CLAUDE_FAKE_STDERR", "safe stderr fallback")
+			_, err := c.Digest(context.Background(), DigestRequest{SourcePath: "notes/x.pdf"})
+			if err == nil || !errors.Is(err, ErrTransient) {
+				t.Fatalf("expected transient error, got %v", err)
+			}
+			gotResult := strings.Contains(err.Error(), "eligible ")
+			if gotResult != tc.wantResult {
+				t.Errorf("result eligibility = %v, want %v: %q", gotResult, tc.wantResult, err)
+			}
+			if strings.Contains(err.Error(), "SECRET-INELIGIBLE") {
+				t.Errorf("ineligible result leaked: %q", err)
+			}
+		})
+	}
+}
+
+func TestDigestDiagnosticShape(t *testing.T) {
+	tests := []struct {
+		name   string
+		result string
+	}{
+		{"frontmatter", "---\ntitle: SECRET-PAGE"},
+		{"heading", "# SECRET-PAGE"},
+		{"fence", "```markdown SECRET-PAGE"},
+		{"multiline", "partial detail\nSECRET-MULTILINE"},
+		{"empty", "   "},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _, _ := newFake(t, "custom_exit1")
+			t.Setenv("CLAUDE_FAKE_STDOUT", `[{"type":"result","subtype":"error_during_execution","is_error":true,"result":`+strconv.Quote(tc.result)+`}]`)
+			t.Setenv("CLAUDE_FAKE_STDERR", "safe stderr fallback")
+			_, err := c.Digest(context.Background(), DigestRequest{SourcePath: "notes/x.pdf"})
+			if err == nil || !strings.Contains(err.Error(), "safe stderr fallback") {
+				t.Fatalf("unsafe result should fall back to stderr, got %v", err)
+			}
+			if strings.Contains(err.Error(), "SECRET") || strings.Contains(err.Error(), "partial detail") {
+				t.Errorf("unsafe result leaked: %q", err)
+			}
+		})
+	}
+}
+
+func TestDigestRefusalCanonicalization(t *testing.T) {
+	for _, diagnostic := range []string{
+		"policy refusal: disallowed",
+		"PoLiCy ReFuSaL:\t disallowed",
+		"\x1b[31mAPI Error:\x1b[0m\tREFUSED by policy",
+		"API Error: safeguards\u00a0flagged",
+		"API Error: Fable 5's safeguards flagged this message",
+	} {
+		t.Run(diagnostic, func(t *testing.T) {
+			c, _, _ := newFake(t, "custom_exit1")
+			t.Setenv("CLAUDE_FAKE_STDOUT", diagnostic)
+			_, err := c.Digest(context.Background(), DigestRequest{SourcePath: "notes/x.pdf"})
+			if err == nil || !errors.Is(err, ErrRefused) || errors.Is(err, ErrTransient) {
+				t.Errorf("known envelope should be refused, got %v", err)
+			}
+		})
+	}
+}
+
+func TestDigestRefusalMutationNegatives(t *testing.T) {
+	for _, diagnostic := range []string{
+		"API Error: not safeguards flagged",
+		`API Error: "safeguards flagged"`,
+		`API Error: response contained "safeguards flagged"`,
+		"warning: API Error: refused",
+		"request failed; policy refusal: disallowed",
+		`"policy refusal: disallowed"`,
+		"not policy refusal: disallowed",
+		"connection refused",
+		"API Error: authentication failed",
+		"the provider's safeguards flagged",
+	} {
+		t.Run(diagnostic, func(t *testing.T) {
+			c, _, _ := newFake(t, "custom_exit1")
+			t.Setenv("CLAUDE_FAKE_STDOUT", diagnostic)
+			_, err := c.Digest(context.Background(), DigestRequest{SourcePath: "notes/x.pdf"})
+			if err == nil || !errors.Is(err, ErrTransient) || errors.Is(err, ErrRefused) {
+				t.Errorf("mutation should remain transient, got %v", err)
+			}
+		})
+	}
+
+	t.Run("stale_result_event", func(t *testing.T) {
+		c, _, _ := newFake(t, "custom_exit1")
+		t.Setenv("CLAUDE_FAKE_STDOUT", `[{"type":"result","subtype":"error_during_execution","is_error":true,"result":"policy refusal: stale"},{"type":"result","subtype":"error_during_execution","is_error":true,"result":"current transient detail"}]`)
+		_, err := c.Digest(context.Background(), DigestRequest{SourcePath: "notes/x.pdf"})
+		if err == nil || !errors.Is(err, ErrTransient) || errors.Is(err, ErrRefused) {
+			t.Fatalf("only the final result may classify, got %v", err)
+		}
+		if !strings.Contains(err.Error(), "current transient detail") || strings.Contains(err.Error(), "stale") {
+			t.Errorf("error should use only the final result: %q", err)
+		}
+	})
+}
+
+func TestDigestNonzeroExitDiagnosticFallbacks(t *testing.T) {
+	tests := []struct {
+		name       string
+		stdout     string
+		stderr     string
+		want       string
+		notContain string
+	}{
+		{"malformed_json", `[{"type":"result"`, "safe stderr", "safe stderr", `[{`},
+		{"wrong_shape", `{"result":"RAW-JSON"}`, "safe stderr", "safe stderr", "RAW-JSON"},
+		{"no_result", `[{"type":"system","result":"RAW-JSON"}]`, "safe stderr", "safe stderr", "RAW-JSON"},
+		{"plain_prefers_stderr", "plain stdout", "preferred stderr", "preferred stderr", "plain stdout"},
+		{"plain_without_stderr", "plain stdout", "", "plain stdout", ""},
+		{"json_without_stderr", `[{"type":`, "", "exit status 1", `[{`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _, _ := newFake(t, "custom_exit1")
+			t.Setenv("CLAUDE_FAKE_STDOUT", tc.stdout)
+			t.Setenv("CLAUDE_FAKE_STDERR", tc.stderr)
+			_, err := c.Digest(context.Background(), DigestRequest{SourcePath: "notes/x.pdf"})
+			if err == nil || !errors.Is(err, ErrTransient) {
+				t.Fatalf("expected transient error, got %v", err)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q missing %q", err, tc.want)
+			}
+			if tc.notContain != "" && strings.Contains(err.Error(), tc.notContain) {
+				t.Errorf("error leaked %q: %q", tc.notContain, err)
+			}
+		})
+	}
+}
+
+func TestNormalizeCLIDiagnostic(t *testing.T) {
+	input := "\x1b]0;secret title\x07\x1b[31mred\x1b[0m\t spaced\u00a0text\u200bformat\x00end"
+	got := normalizeCLIDiagnostic(input)
+	want := "red spaced text�format�end"
+	if got != want {
+		t.Errorf("normalizeCLIDiagnostic() = %q, want %q", got, want)
+	}
+	for _, r := range got {
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf) {
+			t.Errorf("normalized diagnostic retains control/format rune %U", r)
+		}
+	}
+
+	long := strings.Repeat("x", 2001)
+	got = normalizeCLIDiagnostic(long)
+	if utf8.RuneCountInString(got) != 2000 || !strings.HasSuffix(got, "…") {
+		t.Errorf("long diagnostic not truncated to 1,999 runes plus ellipsis: len=%d suffix=%q", utf8.RuneCountInString(got), got[len(got)-3:])
 	}
 }
 
