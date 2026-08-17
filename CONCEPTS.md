@@ -30,6 +30,10 @@ The 2-minute mtime quiet period a source file must satisfy before ingest will ha
 
 A committed record for observable behavior discovered after spec or plan approval. It preserves the approved artifact and authorizes a separately reviewed, user-approved remediation plan. *Avoid: "silent plan correction".*
 
+## Review artifact
+
+A reviewer-authored result that proves a review actually ran, such as a submitted review or review thread. A check or status context can pass while no review artifact exists, so a required external review is satisfied only by the artifact or an explicit waiver. *Avoid: treating a green status as proof of review.*
+
 ## Resource server
 
 cogvault's role under OAuth 2.1: it **validates** access tokens and serves Protected Resource Metadata, but never issues, refreshes, or revokes them. Token issuance belongs to a user-supplied identity provider. *Avoid: calling cogvault an "auth server" or "OAuth server".*

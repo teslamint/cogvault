@@ -2,7 +2,8 @@
 schema: plan/v1
 title: Surface actionable Claude CLI diagnostics without poisoning retry classification
 type: fix
-status: approved
+status: done
+completed_by: df5da99232c19910a6a86b068c76545210346212
 date: 2026-08-17
 execution: code
 origin: docs/specs/2026-08-17-llm-diagnostic-message-design.md

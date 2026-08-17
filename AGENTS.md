@@ -21,6 +21,7 @@ This is a short pointer/delta file for Codex and Gemini. Read `CLAUDE.md` first 
 - Shared agent briefing: `CLAUDE.md`
 - Background and historical context: `docs/context/project-background.md`
 - Research notes: `docs/research/`
+- Reusable workflow and resolved-problem guidance: `docs/solutions/`
 - Repository-wide working conventions: `docs/decisions/0022-repository-working-conventions.md`; reconciled documentation/context rules: `docs/decisions/0023-stale-agent-convention-reconciliation.md`
 - Approved v2 design: `docs/specs/2026-07-22-refound-capture-pipeline-design.md`
 
