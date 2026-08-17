@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -72,6 +73,7 @@ type ledgerSnapshot struct {
 	contentHash string
 	status      string
 	attempts    int
+	lastError   string
 	runOrigin   string
 	digestedAt  string
 }
@@ -83,7 +85,7 @@ func readLedger(t *testing.T, dbPath string) []ledgerSnapshot {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	rows, err := db.Query(`SELECT source_path, content_hash, status, attempts, run_origin, digested_at FROM ingest_ledger ORDER BY source_path, digested_at`)
+	rows, err := db.Query(`SELECT source_path, content_hash, status, attempts, last_error, run_origin, digested_at FROM ingest_ledger ORDER BY source_path, digested_at`)
 	if err != nil {
 		t.Fatalf("query ledger: %v", err)
 	}
@@ -91,12 +93,133 @@ func readLedger(t *testing.T, dbPath string) []ledgerSnapshot {
 	var out []ledgerSnapshot
 	for rows.Next() {
 		var r ledgerSnapshot
-		if err := rows.Scan(&r.sourcePath, &r.contentHash, &r.status, &r.attempts, &r.runOrigin, &r.digestedAt); err != nil {
+		if err := rows.Scan(&r.sourcePath, &r.contentHash, &r.status, &r.attempts, &r.lastError, &r.runOrigin, &r.digestedAt); err != nil {
 			t.Fatal(err)
 		}
 		out = append(out, r)
 	}
 	return out
+}
+
+func TestIngestNonzeroExitDiagnostic(t *testing.T) {
+	const weeklyLimit = "You've hit your weekly limit · resets Aug 18 at 12pm (Asia/Seoul)"
+
+	assertFailure := func(t *testing.T, scheduled bool, fakeStdout, fakeStderr, wantDiagnostic string, forbidden ...string) {
+		t.Helper()
+		fakeClaudeOnPath(t)
+		t.Setenv("CLAUDE_FAKE_MODE", "custom_exit1")
+		t.Setenv("CLAUDE_FAKE_STDOUT", fakeStdout)
+		t.Setenv("CLAUDE_FAKE_STDERR", fakeStderr)
+		configPath, srcDir, _, dbPath := setupIngestVault(t)
+		sourcePath := writeAgedSource(t, srcDir, "diagnostic.pdf", "diagnostic fixture")
+
+		args := []string{"ingest", "--config", configPath}
+		wantOrigin := "interactive"
+		if scheduled {
+			args = append(args, "--scheduled")
+			wantOrigin = "scheduled"
+		}
+		stdout, _, err := executeCommand(args...)
+		if err != nil {
+			t.Fatalf("ingest should exit 0 despite per-file failure: %v", err)
+		}
+		if !strings.Contains(stdout, "failed=1") {
+			t.Fatalf("expected failed=1 in report, got: %q", stdout)
+		}
+
+		rows := readLedger(t, dbPath)
+		if len(rows) != 1 {
+			t.Fatalf("expected one ledger row, got %d", len(rows))
+		}
+		row := rows[0]
+		wantError := "digest: llm.Digest " + sourcePath + ": claude cli: " + wantDiagnostic + ": transient llm failure"
+		if row.lastError != wantError {
+			t.Errorf("last_error = %q, want %q", row.lastError, wantError)
+		}
+		if !strings.Contains(stdout, sourcePath+"  "+wantError) {
+			t.Errorf("report missing complete persisted error %q: %q", wantError, stdout)
+		}
+		if row.status != "failed" || row.attempts != 0 || row.runOrigin != wantOrigin {
+			t.Errorf("row state = status %q attempts %d origin %q, want failed/0/%s", row.status, row.attempts, row.runOrigin, wantOrigin)
+		}
+		for _, marker := range forbidden {
+			if strings.Contains(stdout, marker) || strings.Contains(row.lastError, marker) {
+				t.Errorf("rejected diagnostic marker %q leaked: report=%q last_error=%q", marker, stdout, row.lastError)
+			}
+		}
+	}
+
+	structured := `[{"type":"result","subtype":"error_during_execution","is_error":true,"result":` + strconv.Quote(weeklyLimit) + `}]`
+	for _, tc := range []struct {
+		name      string
+		scheduled bool
+	}{
+		{name: "structured_weekly_limit_interactive"},
+		{name: "structured_weekly_limit_scheduled", scheduled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertFailure(t, tc.scheduled, structured, "", weeklyLimit)
+		})
+	}
+
+	t.Run("stderr_fallback", func(t *testing.T) {
+		assertFailure(t, false, "", "upstream temporarily unavailable", "upstream temporarily unavailable")
+	})
+
+	t.Run("formatted_2001_rune_stderr", func(t *testing.T) {
+		canonicalPrefix := "red spaced text�format�"
+		canonical := canonicalPrefix + strings.Repeat("한", 2001-len([]rune(canonicalPrefix)))
+		raw := "\x1b]0;secret title\x07\x1b[31mred\x1b[0m\tspaced\u00a0text\u200bformat\u0080" + strings.Repeat("한", 2001-len([]rune(canonicalPrefix)))
+		want := string([]rune(canonical)[:1999]) + "…"
+		assertFailure(t, false, "", raw, want, "secret title")
+	})
+
+	t.Run("page_like_result_falls_back", func(t *testing.T) {
+		const secret = "SECRET-PAGE-MARKER"
+		pageLike := "---\ntitle: Partial\n---\n\n# Partial\n\n" + secret
+		stdout := `[{"type":"result","subtype":"error_during_execution","is_error":true,"result":` + strconv.Quote(pageLike) + `}]`
+		assertFailure(t, false, stdout, "safe stderr fallback", "safe stderr fallback", secret)
+	})
+
+	t.Run("json_looking_truncated_output_uses_process_error", func(t *testing.T) {
+		assertFailure(t, false, `[{"type":"result"`, "", "exit status 1", `[{"type":"result"`)
+	})
+
+	t.Run("same_hash_transient_rerun_replaces_error", func(t *testing.T) {
+		fakeClaudeOnPath(t)
+		t.Setenv("CLAUDE_FAKE_MODE", "custom_exit1")
+		t.Setenv("CLAUDE_FAKE_STDOUT", "")
+		configPath, srcDir, _, dbPath := setupIngestVault(t)
+		sourcePath := writeAgedSource(t, srcDir, "rerun.pdf", "same hash fixture")
+
+		const firstDiagnostic = "first transient diagnostic"
+		t.Setenv("CLAUDE_FAKE_STDERR", firstDiagnostic)
+		if _, _, err := executeCommand("ingest", "--config", configPath); err != nil {
+			t.Fatalf("first ingest: %v", err)
+		}
+
+		const secondDiagnostic = "updated transient diagnostic"
+		t.Setenv("CLAUDE_FAKE_STDERR", secondDiagnostic)
+		stdout, _, err := executeCommand("ingest", "--config", configPath)
+		if err != nil {
+			t.Fatalf("second ingest: %v", err)
+		}
+		rows := readLedger(t, dbPath)
+		if len(rows) != 1 {
+			t.Fatalf("expected one replaced ledger row, got %d", len(rows))
+		}
+		wantError := "digest: llm.Digest " + sourcePath + ": claude cli: " + secondDiagnostic + ": transient llm failure"
+		row := rows[0]
+		if row.lastError != wantError || row.status != "failed" || row.attempts != 0 || row.runOrigin != "interactive" {
+			t.Errorf("rerun row = %+v, want failed attempts=0 interactive with last_error %q", row, wantError)
+		}
+		if !strings.Contains(stdout, sourcePath+"  "+wantError) {
+			t.Errorf("rerun report missing complete updated error %q: %q", wantError, stdout)
+		}
+		if strings.Contains(stdout, firstDiagnostic) || strings.Contains(row.lastError, firstDiagnostic) {
+			t.Errorf("stale first diagnostic survived rerun: report=%q last_error=%q", stdout, row.lastError)
+		}
+	})
 }
 
 func TestE2EBacklogRun(t *testing.T) {
