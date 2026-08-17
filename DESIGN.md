@@ -162,10 +162,10 @@ in one stream wins over a generic failure in another.
 
 `isRefusalText` canonicalizes each candidate, then accepts only a candidate
 beginning `policy refusal:`, or the anchored case-insensitive provider grammar
-`^api error:\s*(?:refused\b|(?:[\p{L}\p{N} ._-]+(?:'s|’s)\s+)?safeguards flagged\b)`.
-Generic `api_error`/`API Error:` messages, quoted or negated phrases, embedded or
-suffix-only phrases, and `connection refused` are transient, including on an
-exit-zero final API error.
+`^api error:\s*(?:refused\b|safeguards flagged\b|fable 5(?:'s|’s) safeguards flagged\b)`.
+Generic `api_error`/`API Error:` messages, unknown provider-name safeguard
+envelopes, quoted or negated phrases, embedded or suffix-only phrases, and
+`connection refused` are transient, including on an exit-zero final API error.
 
 Structured diagnostic persistence is stricter: the final event must have
 `is_error == true`, must carry `api_error` or `error_during_execution`, and its

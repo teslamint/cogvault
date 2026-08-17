@@ -21,7 +21,7 @@ const maxDiagnosticRunes = 2000
 var (
 	ansiSGRPattern = regexp.MustCompile(`\x1b\[[0-9;?]*m`)
 	ansiOSCPattern = regexp.MustCompile(`\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)`)
-	refusalPattern = regexp.MustCompile(`(?i)^api error:\s*(?:refused\b|(?:[\p{L}\p{N} ._-]+(?:'s|’s)\s+)?safeguards flagged\b)`)
+	refusalPattern = regexp.MustCompile(`(?i)^api error:\s*(?:refused\b|safeguards flagged\b|fable 5(?:'s|’s) safeguards flagged\b)`)
 )
 
 type ClaudeCode struct {

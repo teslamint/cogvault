@@ -323,6 +323,7 @@ func TestDigestRefusalCanonicalization(t *testing.T) {
 		"\x1b[31mAPI Error:\x1b[0m\tREFUSED by policy",
 		"API Error: safeguards\u00a0flagged",
 		"API Error: Fable 5's safeguards flagged this message",
+		"API Error: Fable 5’s safeguards flagged this message",
 	} {
 		t.Run(diagnostic, func(t *testing.T) {
 			c, _, _ := newFake(t, "custom_exit1")
@@ -354,6 +355,24 @@ func TestDigestRefusalMutationNegatives(t *testing.T) {
 			_, err := c.Digest(context.Background(), DigestRequest{SourcePath: "notes/x.pdf"})
 			if err == nil || !errors.Is(err, ErrTransient) || errors.Is(err, ErrRefused) {
 				t.Errorf("mutation should remain transient, got %v", err)
+			}
+		})
+	}
+
+	for _, diagnostic := range []string{
+		"API Error: not Fable 5's safeguards flagged",
+		"API Error: response says Fable's safeguards flagged",
+	} {
+		t.Run(diagnostic, func(t *testing.T) {
+			c, _, _ := newFake(t, "custom_exit1")
+			t.Setenv("CLAUDE_FAKE_STDOUT", diagnostic)
+
+			_, err := c.Digest(context.Background(), DigestRequest{SourcePath: "notes/x.pdf"})
+			if err == nil || !errors.Is(err, ErrTransient) || errors.Is(err, ErrRefused) {
+				t.Fatalf("provider-envelope prose should remain transient, got %v", err)
+			}
+			if !strings.Contains(err.Error(), diagnostic) {
+				t.Errorf("transient diagnostic missing %q: %q", diagnostic, err)
 			}
 		})
 	}

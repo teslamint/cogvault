@@ -154,7 +154,7 @@ func TestIngestNonzeroExitDiagnostic(t *testing.T) {
 		name      string
 		scheduled bool
 	}{
-		{name: "structured_weekly_limit_interactive"},
+		{name: "weekly-limit"},
 		{name: "structured_weekly_limit_scheduled", scheduled: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -162,9 +162,61 @@ func TestIngestNonzeroExitDiagnostic(t *testing.T) {
 		})
 	}
 
-	t.Run("stderr_fallback", func(t *testing.T) {
+	t.Run("stderr-fallback", func(t *testing.T) {
 		assertFailure(t, false, "", "upstream temporarily unavailable", "upstream temporarily unavailable")
 	})
+
+	for _, diagnostic := range []string{
+		"API Error: not Fable 5's safeguards flagged",
+		"API Error: response says Fable's safeguards flagged",
+	} {
+		t.Run(diagnostic, func(t *testing.T) {
+			fakeClaudeOnPath(t)
+			t.Setenv("CLAUDE_FAKE_MODE", "custom_exit1")
+			t.Setenv("CLAUDE_FAKE_STDOUT", diagnostic)
+			t.Setenv("CLAUDE_FAKE_STDERR", "")
+			configPath, srcDir, wikiDir, dbPath := setupIngestVault(t)
+			sourcePath := writeAgedSource(t, srcDir, "diagnostic.pdf", "provider envelope fixture")
+
+			stdout, _, err := executeCommand("ingest", "--config", configPath)
+			if err != nil {
+				t.Fatalf("first ingest should exit 0 despite per-file failure: %v", err)
+			}
+			wantError := "digest: llm.Digest " + sourcePath + ": claude cli: " + diagnostic + ": transient llm failure"
+			rows := readLedger(t, dbPath)
+			if len(rows) != 1 {
+				t.Fatalf("expected one ledger row after transient failure, got %d", len(rows))
+			}
+			failedRow := rows[0]
+			if failedRow.lastError != wantError || failedRow.status != "failed" || failedRow.attempts != 0 {
+				t.Fatalf("first row = %+v, want failed attempts=0 with last_error %q", failedRow, wantError)
+			}
+			if !strings.Contains(stdout, sourcePath+"  "+wantError) {
+				t.Errorf("failure report missing exact diagnostic %q: %q", wantError, stdout)
+			}
+
+			firstHash := failedRow.contentHash
+			t.Setenv("CLAUDE_FAKE_MODE", "ok")
+			stdout, _, err = executeCommand("ingest", "--config", configPath)
+			if err != nil {
+				t.Fatalf("same-hash same-model retry failed: %v", err)
+			}
+			if !strings.Contains(stdout, "digested=1") {
+				t.Errorf("expected retry to digest the transient row, got: %q", stdout)
+			}
+			rows = readLedger(t, dbPath)
+			if len(rows) != 1 {
+				t.Fatalf("expected one ledger row after successful retry, got %d", len(rows))
+			}
+			successRow := rows[0]
+			if successRow.contentHash != firstHash || successRow.status != "success" || successRow.attempts != 0 {
+				t.Errorf("retry row = %+v, want same hash %q with success attempts=0", successRow, firstHash)
+			}
+			if _, err := os.Stat(filepath.Join(wikiDir, "sources", "diagnostic.md")); err != nil {
+				t.Errorf("expected page after retry: %v", err)
+			}
+		})
+	}
 
 	t.Run("formatted_2001_rune_stderr", func(t *testing.T) {
 		canonicalPrefix := "red spaced text�format�"

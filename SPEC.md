@@ -234,8 +234,9 @@ display: recognized ANSI SGR/OSC sequences are removed, Unicode whitespace is
 collapsed to one ASCII space, and remaining Unicode Control or Format (`Cf`)
 runes become `U+FFFD`. The case-insensitive refusal predicate is anchored to the
 start of the canonicalized candidate: `policy refusal:`, or `API Error:`
-followed by `refused`, bare `safeguards flagged`, or the known optional provider
-possessive envelope such as `Fable 5's safeguards flagged`. Quoted, negated,
+followed by `refused`, bare `safeguards flagged`, or the exact observed provider
+envelope `Fable 5's safeguards flagged` (ASCII or curly apostrophe). Unknown
+provider-name safeguard envelopes, quoted, negated,
 embedded, suffix-only, `connection refused`, generic `api_error`, and generic
 `API Error:` messages remain transient.
 
