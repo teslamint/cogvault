@@ -235,7 +235,7 @@ func TestDigestDiagnosticShape(t *testing.T) {
 		name   string
 		result string
 	}{
-		{"frontmatter", "---\ntitle: SECRET-PAGE"},
+		{"frontmatter", "--- SECRET-PAGE"},
 		{"heading", "# SECRET-PAGE"},
 		{"fence", "```markdown SECRET-PAGE"},
 		{"multiline", "partial detail\nSECRET-MULTILINE"},
@@ -255,6 +255,65 @@ func TestDigestDiagnosticShape(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDigestRefusalPrecedesDiagnosticSelection(t *testing.T) {
+	t.Run("structured_transient_stdout_and_refusal_stderr", func(t *testing.T) {
+		c, _, _ := newFake(t, "custom_exit1")
+		t.Setenv("CLAUDE_FAKE_STDOUT", `[{"type":"result","subtype":"error_during_execution","is_error":true,"result":"QUOTA-DETAIL resets tomorrow"}]`)
+		t.Setenv("CLAUDE_FAKE_STDERR", "API Error: refused by policy")
+
+		_, err := c.Digest(context.Background(), DigestRequest{SourcePath: "notes/x.pdf"})
+		if err == nil || !errors.Is(err, ErrRefused) || errors.Is(err, ErrTransient) {
+			t.Fatalf("refusal stderr must outrank structured transient detail, got %v", err)
+		}
+		if strings.Contains(err.Error(), "QUOTA-DETAIL") {
+			t.Errorf("refused error should not include transient diagnostic: %q", err)
+		}
+	})
+
+	t.Run("refusal_plain_stdout_and_generic_stderr", func(t *testing.T) {
+		c, _, _ := newFake(t, "custom_exit1")
+		t.Setenv("CLAUDE_FAKE_STDOUT", "policy refusal: PLAIN-REFUSAL-DETAIL")
+		t.Setenv("CLAUDE_FAKE_STDERR", "GENERIC-STDERR-DETAIL")
+
+		_, err := c.Digest(context.Background(), DigestRequest{SourcePath: "notes/x.pdf"})
+		if err == nil || !errors.Is(err, ErrRefused) || errors.Is(err, ErrTransient) {
+			t.Fatalf("refusal plain stdout must outrank generic stderr, got %v", err)
+		}
+		if strings.Contains(err.Error(), "GENERIC-STDERR-DETAIL") || strings.Contains(err.Error(), "PLAIN-REFUSAL-DETAIL") {
+			t.Errorf("refused error should not persist candidate diagnostics: %q", err)
+		}
+	})
+}
+
+func TestDigestRefusalClassificationEligibility(t *testing.T) {
+	t.Run("execution_subtype_without_is_error", func(t *testing.T) {
+		c, _, _ := newFake(t, "custom_exit1")
+		t.Setenv("CLAUDE_FAKE_STDOUT", `[{"type":"result","subtype":"error_during_execution","is_error":false,"result":"API Error: refused SECRET-INELIGIBLE"}]`)
+		t.Setenv("CLAUDE_FAKE_STDERR", "GENERIC-TRANSIENT-DETAIL")
+
+		_, err := c.Digest(context.Background(), DigestRequest{SourcePath: "notes/x.pdf"})
+		if err == nil || !errors.Is(err, ErrTransient) || errors.Is(err, ErrRefused) {
+			t.Fatalf("ineligible refusal-like result should remain transient, got %v", err)
+		}
+		if !strings.Contains(err.Error(), "GENERIC-TRANSIENT-DETAIL") || strings.Contains(err.Error(), "SECRET-INELIGIBLE") {
+			t.Errorf("error should use stderr and exclude ineligible result: %q", err)
+		}
+	})
+
+	t.Run("completed_non_error_content", func(t *testing.T) {
+		c, _, _ := newFake(t, "custom_exit0")
+		t.Setenv("CLAUDE_FAKE_STDOUT", `[{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","result":"---\ntitle: Refusal Example\n---\n\n# Refusal Example\n\nAPI Error: refused"}]`)
+
+		res, err := c.Digest(context.Background(), DigestRequest{SourcePath: "notes/x.pdf"})
+		if err != nil {
+			t.Fatalf("completed content must not be classified as refusal: %v", err)
+		}
+		if !strings.Contains(res.PageContent, "API Error: refused") {
+			t.Errorf("completed content lost exact signature: %q", res.PageContent)
+		}
+	})
 }
 
 func TestDigestRefusalCanonicalization(t *testing.T) {
@@ -359,10 +418,28 @@ func TestNormalizeCLIDiagnostic(t *testing.T) {
 		}
 	}
 
-	long := strings.Repeat("x", 2001)
-	got = normalizeCLIDiagnostic(long)
-	if utf8.RuneCountInString(got) != 2000 || !strings.HasSuffix(got, "…") {
-		t.Errorf("long diagnostic not truncated to 1,999 runes plus ellipsis: len=%d suffix=%q", utf8.RuneCountInString(got), got[len(got)-3:])
+	for _, r := range []string{"x", "한"} {
+		for _, n := range []int{1999, 2000, 2001} {
+			t.Run(fmt.Sprintf("%s_%d_runes", r, n), func(t *testing.T) {
+				input := strings.Repeat(r, n)
+				got := normalizeCLIDiagnostic(input)
+				if n <= 2000 {
+					if got != input || strings.HasSuffix(got, "…") {
+						t.Errorf("%d-rune input changed or gained truncation marker: runes=%d", n, utf8.RuneCountInString(got))
+					}
+					return
+				}
+				want := strings.Repeat(r, 1999) + "…"
+				if got != want || utf8.RuneCountInString(got) != 2000 {
+					t.Errorf("2,001-rune input should become 1,999 runes plus ellipsis: runes=%d", utf8.RuneCountInString(got))
+				}
+			})
+		}
+	}
+
+	got = normalizeCLIDiagnostic("line\u2028paragraph\u2029end\u0080c1")
+	if want := "line paragraph end�c1"; got != want {
+		t.Errorf("separator/C1 normalization = %q, want %q", got, want)
 	}
 }
 
