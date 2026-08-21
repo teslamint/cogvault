@@ -35,7 +35,7 @@ git rev-list --left-right --count origin/<base_branch>...<base_branch>
 
 Parse the two-column output as `<remote_ahead>\t<local_ahead>`.
 
-If `git fetch` fails, stop — push would also fail.
+If `git fetch` fails, stop — topology verification is unavailable. Record `fetch-failed` and the error in the durable record. Note: fetch failure does not guarantee push failure (`remote.pushurl` may differ from `remote.url`).
 
 | remote_ahead | local_ahead | Interpretation | Action |
 |---|---|---|---|
@@ -74,7 +74,7 @@ The output must contain only feature-unique commits. If any of the previously li
 
 ### Preparation-only path
 
-Step 0's preparation-only mode (no network) skips the topology gate entirely — the push will not happen, so the gate has nothing to protect. The composed manual-steps file includes a note: "Before pushing, check base-branch sync: `git rev-list --left-right --count origin/<base>...<base>`"
+Step 0's preparation-only mode (no network) skips the topology gate entirely — the push will not happen, so the gate has nothing to protect. The composed manual-steps file includes a note: "Before pushing, check base-branch sync: `git fetch origin <base> --quiet && git rev-list --left-right --count origin/<base>...<base>` — stop if fetch fails."
 
 ### Worktree consideration
 
@@ -83,7 +83,7 @@ When shipping runs from a worktree, `<base_branch>` is checked out in the main w
 ### Durable record
 
 Log the topology check result in the shipping state sink:
-- `release-loop` path: `.release-loop/progress.md` Log line: `<timestamp> ship: base-topology — origin/<base> left=N right=M; action=<rebase-onto|accepted|clean>`
+- `release-loop` path: `.release-loop/progress.md` Log line: `<timestamp> ship: base-topology — origin/<base> left=N right=M; action=<clean|rebase-onto|accepted|blocked|stopped|fetch-failed|rebase-conflict>; reason=<...>`
 - Standalone path: `shipping-final-action.md` in git-dir
 - Accept evidence must include: the local-ahead commit list, acknowledgment that Step 8 ff will require manual reconciliation, and the timestamp.
 
