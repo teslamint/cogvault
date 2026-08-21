@@ -2,7 +2,7 @@
 schema: spec/v1
 title: "F18: External review verification gate for shipping"
 type: process
-status: draft
+status: approved
 date: 2026-08-21
 ---
 
