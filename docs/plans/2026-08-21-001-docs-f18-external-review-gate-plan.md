@@ -15,7 +15,7 @@ Add an external review verification gate to shipping's Step 7 so that artifact-f
 
 ## Architecture notes
 
-The change is entirely textual: a new subsection in the shipping SKILL.md and a tracker entry update. No code, no schema, no runtime change.
+The change is entirely textual: a new subsection in the shipping SKILL.md and a tracker entry update. No application code change, no schema change. The shipping workflow behavior does change: Step 7 now includes an external review verification gate that can block merge approval.
 
 The gate subsection goes inside Step 7 (Merge Gate), after the persist-before-gate paragraph and before the merge-approval question. This follows the F17 pattern (topology gate subsection inside Step 4).
 
@@ -77,7 +77,9 @@ No stateful ceremony in the deliverable; no mutation/failure-state matrix requir
 
 ## Deferred to Follow-Up Work
 
-None. The spec's pattern list (CodeRabbit, Code Climate, SonarQube, Codacy) is extensible without a plan — adding a row to the detection table is a mechanical edit.
+**Operational validation**: An unverified artifact-free shipping run documented in `docs/research/v2-follow-ups.md` remains. This plan's completion scope is limited to documentation validation (the shipping SKILL.md text matches the approved spec). Operational validation of the gate's runtime behavior under artifact-free conditions is deferred as a follow-up. Owner: unassigned. Stop condition: shipping workflow executes the gate logic for an artifact-free review-bot success and records the expected blocked outcome.
+
+The spec's pattern list (CodeRabbit, Code Climate, SonarQube, Codacy) is extensible without a plan — adding a row to the detection table is a mechanical edit.
 
 ## Open unknowns
 
