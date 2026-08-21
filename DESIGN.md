@@ -176,8 +176,18 @@ then process error. Malformed, wrong-shaped, or final-result-less stdout that
 begins with `{` or `[` is never reused as plain text. Recognized ANSI SGR/OSC is
 removed, Unicode whitespace collapses to one ASCII space, and remaining Unicode
 Control/Format (`Cf`) runes become `U+FFFD` before both classification and
-display. Diagnostics over 2,000 runes retain 1,999 plus `…`. A future local
-backend implements the same interface without touching `ingest`.
+display. Diagnostics over 2,000 runes retain 1,999 plus `…`.
+
+**Capture bounds** (F16): stdout and stderr from the CLI subprocess are captured
+through a `cappedWriter` that silently discards bytes past the cap and sets an
+overflow flag. Defaults: stdout 4 MiB, stderr 1 MiB. If stdout overflows, Digest
+returns a permanent error (not transient — a deterministic oversized output would
+retry forever under the transient unlimited-retry rule, repeating the F6 failure
+mode). The overflow check runs after refusal classification so a refusal envelope
+on stderr still outranks the overflow. Stderr overflow requires no special
+handling because the diagnostic pipeline already bounds to 2,000 runes.
+
+A future local backend implements the same interface without touching `ingest`.
 
 ### 2.7 ingest (new)
 

@@ -18,16 +18,42 @@ const defaultTimeout = 5 * time.Minute
 
 const maxDiagnosticRunes = 2000
 
+const maxStdoutBytes = 4 << 20 // 4 MiB
+const maxStderrBytes = 1 << 20 // 1 MiB
+
 var (
 	ansiSGRPattern = regexp.MustCompile(`\x1b\[[0-9;?]*m`)
 	ansiOSCPattern = regexp.MustCompile(`\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)`)
 	refusalPattern = regexp.MustCompile(`(?i)^api error:\s*(?:refused\b|safeguards flagged\b|fable 5(?:'s|’s) safeguards flagged\b)`)
 )
 
+type cappedWriter struct {
+	buf  bytes.Buffer
+	max  int
+	over bool
+}
+
+func (w *cappedWriter) Write(p []byte) (int, error) {
+	if w.over {
+		return len(p), nil
+	}
+	if w.buf.Len()+len(p) > w.max {
+		w.over = true
+		return len(p), nil
+	}
+	return w.buf.Write(p)
+}
+
+func (w *cappedWriter) Bytes() []byte    { return w.buf.Bytes() }
+func (w *cappedWriter) String() string   { return w.buf.String() }
+func (w *cappedWriter) Overflowed() bool { return w.over }
+
 type ClaudeCode struct {
-	binPath string
-	model   string
-	timeout time.Duration // 0 => defaultTimeout; overridden in tests
+	binPath   string
+	model     string
+	timeout   time.Duration // 0 => defaultTimeout; overridden in tests
+	maxStdout int           // 0 => maxStdoutBytes; overridden in tests
+	maxStderr int           // 0 => maxStderrBytes; overridden in tests
 }
 
 func NewClaudeCode(binPath, model string) *ClaudeCode {
@@ -61,14 +87,20 @@ func (c *ClaudeCode) digest(ctx context.Context, req DigestRequest) (*DigestResu
 	// output pipes open must not keep Digest blocked past its timeout.
 	cmd.WaitDelay = 2 * time.Second
 	cmd.Stdin = strings.NewReader(buildPrompt(req))
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stdoutCap := c.maxStdout
+	if stdoutCap == 0 {
+		stdoutCap = maxStdoutBytes
+	}
+	stderrCap := c.maxStderr
+	if stderrCap == 0 {
+		stderrCap = maxStderrBytes
+	}
+	stdout := &cappedWriter{max: stdoutCap}
+	stderr := &cappedWriter{max: stderrCap}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 
 	runErr := cmd.Run()
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return nil, fmt.Errorf("timeout after %s: %w", timeout, ErrTransient)
-	}
 	if errors.Is(ctx.Err(), context.Canceled) {
 		return nil, fmt.Errorf("context cancelled: %w", ErrTransient)
 	}
@@ -77,6 +109,14 @@ func (c *ClaudeCode) digest(ctx context.Context, req DigestRequest) (*DigestResu
 	if (inspection.hasFinal && classificationEligible(inspection.final) && isRefusalText(inspection.final.Result)) ||
 		isRefusalText(stderr.String()) || isRefusalText(inspection.plainStdout) {
 		return nil, fmt.Errorf("claude policy refusal: %w", ErrRefused)
+	}
+
+	if stdout.Overflowed() {
+		return nil, fmt.Errorf("stdout exceeded %d bytes", stdoutCap)
+	}
+
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return nil, fmt.Errorf("timeout after %s: %w", timeout, ErrTransient)
 	}
 
 	if runErr != nil {

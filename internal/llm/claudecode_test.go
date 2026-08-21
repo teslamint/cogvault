@@ -642,4 +642,76 @@ func TestBuildPromptTypeAware(t *testing.T) {
 	}
 }
 
+func TestDigestStdoutOverflow(t *testing.T) {
+	okJSON := `[{"type":"result","subtype":"success","is_error":false,"result":"---\ntitle: T\n---\n\n# T\n\nBody."}]`
+	for _, tc := range []struct {
+		name    string
+		cap     int
+		wantErr bool
+	}{
+		{"under_cap", len(okJSON) + 1, false},
+		{"at_cap", len(okJSON), false},
+		{"over_cap", len(okJSON) - 1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _, _ := newFake(t, "custom_exit0")
+			t.Setenv("CLAUDE_FAKE_STDOUT", okJSON)
+			c.maxStdout = tc.cap
+
+			_, err := c.Digest(context.Background(), DigestRequest{SourcePath: "notes/x.pdf"})
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error for oversized stdout")
+				}
+				if errors.Is(err, ErrTransient) {
+					t.Errorf("stdout overflow must be permanent, got transient: %v", err)
+				}
+				if errors.Is(err, ErrRefused) {
+					t.Errorf("stdout overflow must not be refused: %v", err)
+				}
+				if !strings.Contains(err.Error(), "stdout exceeded") {
+					t.Errorf("error should mention stdout exceeded, got %q", err)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("cap=%d should succeed, got %v", tc.cap, err)
+				}
+			}
+		})
+	}
+}
+
+func TestDigestStderrOverflowStillWorks(t *testing.T) {
+	c, _, _ := newFake(t, "custom_exit1")
+	t.Setenv("CLAUDE_FAKE_STDOUT", `[{"type":"result","subtype":"error_during_execution","is_error":true,"result":"quota detail"}]`)
+	t.Setenv("CLAUDE_FAKE_STDERR", strings.Repeat("x", 200))
+	c.maxStderr = 50
+
+	_, err := c.Digest(context.Background(), DigestRequest{SourcePath: "notes/x.pdf"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, ErrTransient) {
+		t.Fatalf("should be transient, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "quota detail") {
+		t.Errorf("diagnostic should use stdout result, got %q", err)
+	}
+}
+
+func TestDigestStdoutOverflowRefusalPrecedence(t *testing.T) {
+	c, _, _ := newFake(t, "custom_exit1")
+	t.Setenv("CLAUDE_FAKE_STDOUT", strings.Repeat("x", 200))
+	t.Setenv("CLAUDE_FAKE_STDERR", "API Error: refused by policy")
+	c.maxStdout = 50
+
+	_, err := c.Digest(context.Background(), DigestRequest{SourcePath: "notes/x.pdf"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, ErrRefused) {
+		t.Fatalf("refusal must outrank stdout overflow, got %v", err)
+	}
+}
+
 var _ Adapter = (*ClaudeCode)(nil)
