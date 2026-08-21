@@ -2,9 +2,10 @@
 schema: plan/v1
 title: "F18: External review verification gate for shipping"
 type: docs
-status: draft
+status: approved
 date: 2026-08-21
 execution: non-code
+body_seal: aff6a08a2e8e3051b7681ab93a03e70853145403068b29e0fb5f725d8dd86ab2
 origin: docs/specs/2026-08-21-f18-external-review-verification-gate-design.md
 ---
 
