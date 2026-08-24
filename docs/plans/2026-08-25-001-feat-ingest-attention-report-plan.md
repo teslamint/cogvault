@@ -40,14 +40,16 @@ notification must display this as `exhausted`, not `failed`. The
 `AttentionRows` function performs this mapping: `failed + attempts >= 3` →
 `Status: "exhausted"` in `AttentionRow`.
 
-**Timestamp display**: ledger stores `digested_at` as UTC RFC3339Nano. The
-`status` command's human output displays local time (`2006-01-02 15:04`).
+**Timestamp display**: ledger stores `digested_at` as UTC RFC3339Nano, and
+`AttentionRow.LastAttempt` preserves that canonical value for JSON output. The
+`status` command converts it only while formatting human output, which displays
+local time (`2006-01-02 15:04`).
 
 **Latest-row CTE**: the attention query must use `MAX(digested_at)` per
 `source_path` to exclude files whose latest ledger row is `success` or
-`superseded`. Since `digested_at` is RFC3339Nano text with potentially
-variable-length fractional seconds, the CTE uses `MAX(rowid)` as a tiebreak
-to guarantee determinism. Test fixtures use second-precision timestamps.
+`superseded`. The CTE uses `MAX(rowid)` only to collapse equal timestamp ties
+to one row. It does not remove the approved spec's RFC3339Nano lexical-ordering
+caveat. Test fixtures use second-precision timestamps.
 
 **NewAttention population**: `recordFailure` populates `Report.NewAttention`
 when the result is terminal and was not already terminal for the current model.
@@ -91,6 +93,7 @@ No contradictions; no unavailable evidence.
 | `internal/ingest/notify_darwin.go` | `osascriptNotify` function (build tag `//go:build darwin`) |
 | `internal/ingest/notify_other.go` | No-op notifier (build tag `//go:build !darwin`) |
 | `internal/ingest/notify_test.go` | Notification format and gating tests |
+| `cmd/cogvault/ingest_notify_test.go` | Command-layer scheduled, interactive, and run-error notification gate tests |
 
 ### Modified files
 
@@ -109,20 +112,21 @@ No contradictions; no unavailable evidence.
 
 | S-ID | Unit chain | Evidence |
 |---|---|---|
-| S1 — Scheduled run, new failure, push notification | U1 → U2 → U3 → U4 → U5 | `TestNewlyExhaustedNotifies` (Covers S1) |
+| S1 — Scheduled run, new failure, push notification | U2 → U3 | `TestNewlyExhaustedNotifies` + `TestNotifyAfterRunScheduled` (Covers S1) |
 | S2 — Known failure, no repeat notification | U2 → U3 | `TestAlreadyExhaustedNoNotify` (Covers S2) |
 | S3 — Manual status check | U1 → U4 | `TestStatusHumanOutput` (Covers S3) |
 | S4 — Problem resolved | U1 | `TestAttentionExcludesResolvedPath` (Covers S4) |
 | S5 — Clean state | U4 | `TestStatusCleanOutput` (Covers S5) |
 | S6 — Machine-readable output | U4 | `TestStatusJSONOutput` (Covers S6) |
 | S7 — Source file deleted while exhausted | U1 | `TestAttentionIncludesDeletedSource` (Covers S7) |
-| S8 — Interactive run, no push | U3 | `TestInteractiveNoNotify` (Covers S8) |
+| S8 — Interactive run, no push | U3 | `TestNotifyAfterRunInteractive` (Covers S8) |
 
 ## U1: Ledger attention query
 
 Execution note: test-first
 
 Files:
+  Create: `internal/ingest/attention.go`, `internal/ingest/attention_test.go`
   Modify: `internal/ingest/ledger.go`
   Test: `internal/ingest/ledger_test.go`
 
@@ -130,8 +134,8 @@ Interfaces:
   Consumes: `ledger.db` (existing `*sql.DB`)
   Produces:
     - unexported: `func (l *ledger) attentionRows(model string) ([]ledgerRow, error)`
-    - exported: `type AttentionRow struct { Path, Status, Error, LastAttempt, Model string; Attempts int }` (JSON-tagged)
-    - exported: `func AttentionRows(dbPath, model string) ([]AttentionRow, error)` — encapsulates DB-absent guard, ledger open, query, `failed→exhausted` mapping, UTC→local timestamp conversion
+    - exported: `type AttentionRow struct { Path, Status, Error, LastAttempt, Model string; Attempts int }` (JSON-tagged; `LastAttempt` remains UTC RFC3339Nano)
+    - exported: `func AttentionRows(dbPath, model string) ([]AttentionRow, error)` — encapsulates DB-absent guard, ledger open, query, and `failed→exhausted` mapping
 
 Test scenarios:
   happy: seeded ledger with 1 exhausted + 1 refused row for current model → returns both (Covers S3)
@@ -168,8 +172,8 @@ Steps:
      - `os.Stat(dbPath)`: if absent, return `nil, nil`.
      - `openLedger(dbPath)` → `defer l.close()`.
      - Call `l.attentionRows(model)`.
-     - Convert: `failed + attempts >= 3` → Status `"exhausted"`; `refused` → Status `"refused"`. Parse `digested_at` to local time string.
-  6. Write `attention_test.go::TestAttentionRowsExported` covering DB-absent → nil, exported fields, status mapping.
+     - Convert: `failed + attempts >= 3` → Status `"exhausted"`; `refused` → Status `"refused"`. Preserve `digested_at` as UTC RFC3339Nano in `LastAttempt`.
+  6. Write `attention_test.go::TestAttentionRowsExported` covering DB-absent → nil, exported fields, status mapping, and exact UTC `LastAttempt` preservation.
   7. Run tests; confirm pass.
   8. Commit: `feat(ingest): add ledger attention query with latest-row semantics`
 
@@ -194,15 +198,17 @@ Test scenarios:
   edge: refused with prior refused row for current model → NOT in NewAttention (direct recordFailure call)
   edge: permanent failure with attempts > maxAttempts after model change (carryover 3→4) → in NewAttention
   error: transient/infra failure → NOT in NewAttention regardless of attempts
+  error: ledger upsert failure → still appends NewAttention and may repeat next run, preserving the origin spec's accepted notification gap
   integration: n/a — leaf unit
 
 Steps:
   1. Add `NewAttention []FileResult` to `Report` in `report.go`.
-  2. Write failing tests in `ingest_test.go::TestNewAttention*` covering all 6 scenarios. Tests call `recordFailure` directly with constructed `prev` and `Report`.
+  2. Write failing tests in `ingest_test.go::TestNewAttention*` covering all 7 scenarios. Tests call `recordFailure` directly with constructed `prev` and `Report`; the upsert-failure case closes the test ledger first.
   3. Run tests; confirm failure (NewAttention not populated).
   4. In `recordFailure`, after the existing ledger upsert:
      - If `class == classPermanent` and `attempts >= maxAttempts`: check `wasAlreadyExhausted` (prev non-nil, prev.llmModel matches, prev.attempts >= maxAttempts). If not already exhausted, append to `report.NewAttention`.
      - If `class == classRefused`: check `wasAlreadyRefused` (prev non-nil, prev.status == "refused", prev.llmModel matches). If not already refused, append to `report.NewAttention`.
+     - Preserve the approved spec's ledger-write-failure behavior: a failed upsert is logged and does not suppress the current run's notification candidate, so repeat notification remains possible on the next run.
   5. Run tests; confirm pass.
   6. Commit: `feat(ingest): populate NewAttention in report for newly terminal files`
 
@@ -213,12 +219,14 @@ Acceptance: `go test ./internal/ingest/ -run TestNewAttention -v` passes all cas
 Execution note: test-first
 
 Files:
-  Create: `internal/ingest/notify_darwin.go`, `internal/ingest/notify_other.go`, `internal/ingest/notify_test.go`
+  Create: `internal/ingest/notify_darwin.go`, `internal/ingest/notify_other.go`, `internal/ingest/notify_test.go`, `cmd/cogvault/ingest_notify_test.go`
   Modify: `internal/ingest/ingest.go`, `cmd/cogvault/ingest.go`
 
 Interfaces:
   Consumes: `Report.NewAttention []FileResult`
-  Produces: `func (r *Runner) Notify(report *Report)` method; `Runner.notifyFunc` injectable field
+  Produces:
+    - `func (r *Runner) Notify(report *Report)` method; `Runner.notifyFunc` injectable field
+    - command-local `reportNotifier` interface with `Notify(*ingest.Report)` and `notifyAfterRun(reportNotifier, *ingest.Report, bool, error)` helper
 
 Test scenarios:
   happy: NewAttention has 1 entry → notifyFunc called with correct title and body (Covers S1)
@@ -226,7 +234,8 @@ Test scenarios:
   edge: NewAttention is empty → notifyFunc not called (Covers S2)
   edge: error-prefix extraction — `"digest: llm.Digest ...: claude policy refusal"` → `"llm.Digest ...: claude policy refusal"` (truncated to 60 chars)
   error: notifyFunc returns error → logged as warning, no propagation
-  integration: `runIngest` calls `Notify` only when `--scheduled` and `err == nil` (Covers S8)
+  integration: a newly exhausted result flows through `Runner.Notify` to the capturing notifier (Covers S1)
+  integration: `notifyAfterRun` calls `Notify` only when `--scheduled`, `report != nil`, and `runErr == nil`; interactive and run-error paths do not call it (Covers S1, S8)
 
 Steps:
   1. Add `notifyFunc func(title, body string) error` field to `Runner` in `ingest.go`. In `New`, set default via a package-level `defaultNotify` variable.
@@ -243,12 +252,13 @@ Steps:
      func init() { defaultNotify = func(_, _ string) error { return nil } }
      ```
   4. Add `Notify(report *Report)` method on `Runner`: extract `NewAttention`, format title (`cogvault ingest`) and body (error-prefix after first colon, max 60 chars; `외 N건` for multiple), call `notifyFunc`.
-  5. Write tests in `notify_test.go` covering all 6 scenarios. Tests inject a capturing `notifyFunc`.
-  6. In `cmd/cogvault/ingest.go`, after `runner.Run` returns: if `scheduled && err == nil && report != nil`, call `runner.Notify(report)`.
-  7. Run all tests; confirm pass, no regressions.
-  8. Commit: `feat(ingest): add macOS notification for newly terminal ingest files`
+  5. Write tests in `notify_test.go` covering formatting, empty input, notifier error, and a `recordFailure` → `Runner.Notify` flow. Tests inject a capturing `notifyFunc`.
+  6. In `cmd/cogvault/ingest.go`, add a narrow `reportNotifier` interface and `notifyAfterRun` helper. Call the helper after `runner.Run`; it calls `Notify` only when `scheduled && runErr == nil && report != nil`.
+  7. Write `ingest_notify_test.go::TestNotifyAfterRun*` with a fake `reportNotifier`, covering scheduled success, interactive success, nil report, and run error.
+  8. Run all tests; confirm pass, no regressions.
+  9. Commit: `feat(ingest): add macOS notification for newly terminal ingest files`
 
-Acceptance: `go test ./internal/ingest/ -run TestNotify -v` passes; `go build ./cmd/cogvault/` succeeds on darwin and (cross-compile) linux.
+Acceptance: `go test ./internal/ingest/ -run 'TestNotify|TestNewlyExhaustedNotifies' -v` and `go test ./cmd/cogvault/ -run TestNotifyAfterRun -v` pass; `go build ./cmd/cogvault/` succeeds on darwin and (cross-compile) linux.
 
 ## U4: `cogvault status` command
 
@@ -264,18 +274,18 @@ Interfaces:
 
 Test scenarios:
   happy: seeded ledger with attention rows → human-readable table with `exhausted`/`refused` labels and local timestamps (Covers S3)
-  happy: same rows + `--json` → valid JSON with `attention` array, all fields present (Covers S6)
+  happy: same rows + `--json` → valid JSON with all fields and the exact UTC RFC3339 `last_attempt` value (Covers S6)
   edge: DB file absent → `주의 필요 항목 없음.` without creating DB
   edge: empty attention → clean output (Covers S5)
   error: invalid config path → error
   integration: registered in root command (Covers S3)
 
 Steps:
-  1. Write failing tests in `status_test.go` covering all 6 scenarios. Tests seed a temp DB via `openLedger` (same-package test or test helper), then call `runStatus`.
+  1. Write failing tests in `status_test.go` covering all 6 scenarios. Use the existing `setupIngestVault` config fixture, create the ledger with a dry-run ingest, and seed rows through `database/sql`; do not export a production write API for tests. Then call `runStatus` through `executeCommand`.
   2. Implement `status.go`:
      - `newStatusCmd()` with `--json` flag.
      - `runStatus`: load config via `resolveConfigPath` + `config.Load` (not `bootstrap` — no index/storage side effects). Call `ingest.AttentionRows(cfg.DBPath, cfg.LLM.Model)` — this handles DB-absent guard internally and returns `[]AttentionRow` with exported, JSON-tagged fields. Format output:
-     - Human format: `주의 필요: <N>건\n  <status>  <filename>  <error>  (<timestamp>)\n` or `주의 필요 항목 없음.\n`. Status is already mapped (`exhausted`/`refused`), timestamp already local.
+     - Human format: `주의 필요: <N>건\n  <status>  <filename>  <error>  (<timestamp>)\n` or `주의 필요 항목 없음.\n`. Status is already mapped (`exhausted`/`refused`); parse `LastAttempt` and format it in local time.
      - JSON format: `json.NewEncoder(cmd.OutOrStdout()).Encode(...)` with `{"attention": [...], "model": "<model>"}`.
   3. Register `newStatusCmd()` in `main.go`.
   4. Run tests; confirm pass.
