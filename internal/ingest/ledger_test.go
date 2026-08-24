@@ -213,6 +213,8 @@ func TestAttentionRows(t *testing.T) {
 		{sourcePath: "/deleted/source.md", contentHash: "deleted", digestedAt: "2026-08-25T00:00:06Z", status: "failed", attempts: 3, llmModel: model},
 		{sourcePath: "/src/other-model.md", contentHash: "other", digestedAt: "2026-08-25T00:00:07Z", status: "failed", attempts: 3, llmModel: "other-model"},
 		{sourcePath: "/src/retrying.md", contentHash: "retrying", digestedAt: "2026-08-25T00:00:08Z", status: "failed", attempts: 2, llmModel: model},
+		{sourcePath: "/src/superseded.md", contentHash: "old", digestedAt: "2026-08-25T00:00:09Z", status: "failed", attempts: 3, llmModel: model},
+		{sourcePath: "/src/superseded.md", contentHash: "new", digestedAt: "2026-08-25T00:00:10Z", status: "superseded", llmModel: model},
 	}
 	for _, row := range seed {
 		if err := l.upsert(row); err != nil {
@@ -225,6 +227,11 @@ func TestAttentionRows(t *testing.T) {
 		t.Fatalf("attentionRows: %v", err)
 	}
 	sort.Slice(got, func(i, j int) bool { return got[i].sourcePath < got[j].sourcePath })
+	for _, row := range got {
+		if row.sourcePath == "/src/superseded.md" {
+			t.Fatalf("superseded path returned: %+v", row)
+		}
+	}
 	if len(got) != 4 {
 		t.Fatalf("len(rows) = %d, want 4: %+v", len(got), got)
 	}

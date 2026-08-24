@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 )
 
@@ -22,6 +23,14 @@ func TestAttentionRowsExported(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
+	refusedTimestamp := "2026-08-25T01:02:04Z"
+	if err := l.upsert(ledgerRow{
+		sourcePath: "/src/refused.md", contentHash: "refused-hash",
+		digestedAt: refusedTimestamp, status: "refused", attempts: 1,
+		lastError: "digest: policy refusal", llmModel: "current-model",
+	}); err != nil {
+		t.Fatalf("upsert refused: %v", err)
+	}
 	if err := l.close(); err != nil {
 		t.Fatalf("close ledger: %v", err)
 	}
@@ -30,25 +39,40 @@ func TestAttentionRowsExported(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AttentionRows: %v", err)
 	}
-	if len(got) != 1 {
-		t.Fatalf("len(rows) = %d, want 1: %+v", len(got), got)
+	if len(got) != 2 {
+		t.Fatalf("len(rows) = %d, want 2: %+v", len(got), got)
 	}
-	want := AttentionRow{
-		Path: "/src/exhausted.md", Status: "exhausted",
-		Error: "validate: missing title", LastAttempt: wantTimestamp,
-		Model: "current-model", Attempts: 3,
+	sort.Slice(got, func(i, j int) bool { return got[i].Path < got[j].Path })
+	want := []AttentionRow{
+		{
+			Path: "/src/exhausted.md", Status: "exhausted",
+			Error: "validate: missing title", LastAttempt: wantTimestamp,
+			Model: "current-model", Attempts: 3,
+		},
+		{
+			Path: "/src/refused.md", Status: "refused",
+			Error: "digest: policy refusal", LastAttempt: refusedTimestamp,
+			Model: "current-model", Attempts: 1,
+		},
 	}
-	if got[0] != want {
-		t.Fatalf("row = %+v, want %+v", got[0], want)
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("rows[%d] = %+v, want %+v", i, got[i], want[i])
+		}
 	}
 
-	encoded, err := json.Marshal(got[0])
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
+	wantJSON := []string{
+		`{"path":"/src/exhausted.md","status":"exhausted","error":"validate: missing title","last_attempt":"2026-08-25T01:02:03.123456789Z","llm_model":"current-model","attempts":3}`,
+		`{"path":"/src/refused.md","status":"refused","error":"digest: policy refusal","last_attempt":"2026-08-25T01:02:04Z","llm_model":"current-model","attempts":1}`,
 	}
-	wantJSON := `{"path":"/src/exhausted.md","status":"exhausted","error":"validate: missing title","last_attempt":"2026-08-25T01:02:03.123456789Z","llm_model":"current-model","attempts":3}`
-	if string(encoded) != wantJSON {
-		t.Fatalf("JSON = %s, want %s", encoded, wantJSON)
+	for i := range wantJSON {
+		encoded, err := json.Marshal(got[i])
+		if err != nil {
+			t.Fatalf("marshal rows[%d]: %v", i, err)
+		}
+		if string(encoded) != wantJSON[i] {
+			t.Fatalf("JSON rows[%d] = %s, want %s", i, encoded, wantJSON[i])
+		}
 	}
 }
 
