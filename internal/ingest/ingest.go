@@ -349,6 +349,18 @@ func (r *Runner) recordFailure(entry scanEntry, hash, origin string, prev *ledge
 	}); err != nil {
 		slog.Error("recordFailure: ledger upsert", "path", entry.absPath, "error", err)
 	}
+	wasAlreadyExhausted := prev != nil && prev.llmModel == r.cfg.LLM.Model && prev.attempts >= maxAttempts
+	if class == classPermanent && attempts >= maxAttempts && !wasAlreadyExhausted {
+		report.NewAttention = append(report.NewAttention, FileResult{
+			Path: entry.absPath, Action: actionFailed, Error: msg,
+		})
+	}
+	wasAlreadyRefused := prev != nil && prev.status == "refused" && prev.llmModel == r.cfg.LLM.Model
+	if class == classRefused && !wasAlreadyRefused {
+		report.NewAttention = append(report.NewAttention, FileResult{
+			Path: entry.absPath, Action: actionRefused, Error: msg,
+		})
+	}
 	if class == classRefused {
 		report.Refused++
 		report.PerFile = append(report.PerFile, FileResult{Path: entry.absPath, Action: actionRefused, Error: msg})

@@ -37,6 +37,7 @@ type Report struct {
 	NotExamined  int
 	SumMismatch  string
 	PerFile      []FileResult
+	NewAttention []FileResult
 }
 
 func (r *Report) SumCheck() error {

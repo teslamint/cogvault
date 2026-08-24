@@ -121,6 +121,125 @@ func logFixture(t *testing.T, h *harness, extras ...string) {
 	}
 }
 
+func TestNewAttentionPermanentFailureReachesMaxAttempts(t *testing.T) {
+	h := newHarness(t, []string{"md"}, okLLM())
+	h.runner.cfg.LLM.Model = "current-model"
+	report := &Report{}
+	entry := scanEntry{absPath: filepath.Join(h.srcDir, "permanent.md"), sourceDir: h.srcDir}
+	prev := &ledgerRow{attempts: maxAttempts - 1, llmModel: "current-model"}
+
+	h.runner.recordFailure(entry, "hash", "scheduled", prev, report, "validate: invalid page", classPermanent)
+
+	want := []FileResult{{Path: entry.absPath, Action: actionFailed, Error: "validate: invalid page"}}
+	if !reflect.DeepEqual(report.NewAttention, want) {
+		t.Fatalf("NewAttention = %#v, want %#v", report.NewAttention, want)
+	}
+}
+
+func TestNewAttentionAlreadyExhaustedCurrentModelIsExcluded(t *testing.T) {
+	h := newHarness(t, []string{"md"}, okLLM())
+	h.runner.cfg.LLM.Model = "current-model"
+	report := &Report{}
+	entry := scanEntry{absPath: filepath.Join(h.srcDir, "exhausted.md"), sourceDir: h.srcDir}
+	prev := &ledgerRow{attempts: maxAttempts, llmModel: "current-model"}
+
+	h.runner.recordFailure(entry, "hash", "scheduled", prev, report, "validate: invalid page", classPermanent)
+
+	if len(report.NewAttention) != 0 {
+		t.Fatalf("NewAttention = %#v, want empty", report.NewAttention)
+	}
+}
+
+func TestNewAttentionNewRefusal(t *testing.T) {
+	h := newHarness(t, []string{"md"}, okLLM())
+	h.runner.cfg.LLM.Model = "current-model"
+	report := &Report{}
+	entry := scanEntry{absPath: filepath.Join(h.srcDir, "refused.md"), sourceDir: h.srcDir}
+
+	h.runner.recordFailure(entry, "hash", "scheduled", nil, report, "digest: policy refusal", classRefused)
+
+	want := []FileResult{{Path: entry.absPath, Action: actionRefused, Error: "digest: policy refusal"}}
+	if !reflect.DeepEqual(report.NewAttention, want) {
+		t.Fatalf("NewAttention = %#v, want %#v", report.NewAttention, want)
+	}
+}
+
+func TestNewAttentionAlreadyRefusedCurrentModelIsExcluded(t *testing.T) {
+	h := newHarness(t, []string{"md"}, okLLM())
+	h.runner.cfg.LLM.Model = "current-model"
+	report := &Report{}
+	entry := scanEntry{absPath: filepath.Join(h.srcDir, "refused.md"), sourceDir: h.srcDir}
+	prev := &ledgerRow{status: "refused", llmModel: "current-model"}
+
+	h.runner.recordFailure(entry, "hash", "scheduled", prev, report, "digest: policy refusal", classRefused)
+
+	if len(report.NewAttention) != 0 {
+		t.Fatalf("NewAttention = %#v, want empty", report.NewAttention)
+	}
+}
+
+func TestNewAttentionModelChangeCarryover(t *testing.T) {
+	h := newHarness(t, []string{"md"}, okLLM())
+	h.runner.cfg.LLM.Model = "new-model"
+	report := &Report{}
+	entry := scanEntry{absPath: filepath.Join(h.srcDir, "carryover.md"), sourceDir: h.srcDir}
+	prev := &ledgerRow{attempts: maxAttempts, llmModel: "old-model"}
+
+	h.runner.recordFailure(entry, "hash", "scheduled", prev, report, "validate: invalid page", classPermanent)
+
+	want := []FileResult{{Path: entry.absPath, Action: actionFailed, Error: "validate: invalid page"}}
+	if !reflect.DeepEqual(report.NewAttention, want) {
+		t.Fatalf("NewAttention = %#v, want %#v", report.NewAttention, want)
+	}
+}
+
+func TestNewAttentionTransientAndInfraFailuresAreExcluded(t *testing.T) {
+	for _, class := range []failureClass{classTransient, classInfra} {
+		t.Run(failureClassName(class), func(t *testing.T) {
+			h := newHarness(t, []string{"md"}, okLLM())
+			h.runner.cfg.LLM.Model = "current-model"
+			report := &Report{}
+			entry := scanEntry{absPath: filepath.Join(h.srcDir, "retry.md"), sourceDir: h.srcDir}
+			prev := &ledgerRow{attempts: maxAttempts, llmModel: "old-model"}
+
+			h.runner.recordFailure(entry, "hash", "scheduled", prev, report, "digest: retry", class)
+
+			if len(report.NewAttention) != 0 {
+				t.Fatalf("NewAttention = %#v, want empty", report.NewAttention)
+			}
+		})
+	}
+}
+
+func TestNewAttentionLedgerUpsertFailureStillProducesCandidate(t *testing.T) {
+	h := newHarness(t, []string{"md"}, okLLM())
+	h.runner.cfg.LLM.Model = "current-model"
+	report := &Report{}
+	entry := scanEntry{absPath: filepath.Join(h.srcDir, "closed-ledger.md"), sourceDir: h.srcDir}
+	prev := &ledgerRow{attempts: maxAttempts - 1, llmModel: "current-model"}
+	if err := h.runner.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	h.runner.recordFailure(entry, "hash", "scheduled", prev, report, "validate: invalid page", classPermanent)
+
+	want := []FileResult{{Path: entry.absPath, Action: actionFailed, Error: "validate: invalid page"}}
+	if !reflect.DeepEqual(report.NewAttention, want) {
+		t.Fatalf("NewAttention = %#v, want %#v", report.NewAttention, want)
+	}
+}
+
+func failureClassName(class failureClass) string {
+	switch class {
+	case classTransient:
+		return "transient"
+	case classInfra:
+		return "infra"
+	default:
+		return "unknown"
+	}
+}
+
 func TestRunHappyPathTwoFiles(t *testing.T) {
 	h := newHarness(t, []string{"md"}, okLLM())
 	a := h.write(t, "note-one.md", "content one")
