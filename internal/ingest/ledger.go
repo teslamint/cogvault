@@ -161,6 +161,54 @@ func (l *ledger) successRows() ([]ledgerRow, error) {
 	return result, rows.Err()
 }
 
+func (l *ledger) attentionRows(model string) ([]ledgerRow, error) {
+	rows, err := l.db.Query(
+		`WITH latest AS (
+			SELECT source_path, MAX(rowid) AS max_id
+			FROM ingest_ledger
+			WHERE (source_path, digested_at) IN (
+				SELECT source_path, MAX(digested_at)
+				FROM ingest_ledger
+				GROUP BY source_path
+			)
+			GROUP BY source_path
+		)
+		SELECT l.source_path, l.content_hash, l.digested_at, l.last_error,
+		       l.attempts, l.llm_model, l.status
+		FROM ingest_ledger l
+		JOIN latest lt ON l.rowid = lt.max_id
+		WHERE l.llm_model = ?
+		  AND ((l.status = 'failed' AND l.attempts >= 3)
+		       OR l.status = 'refused')`,
+		model,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("ingest.ledger.attentionRows: %w", err)
+	}
+	defer rows.Close()
+
+	var result []ledgerRow
+	for rows.Next() {
+		var row ledgerRow
+		if err := rows.Scan(
+			&row.sourcePath,
+			&row.contentHash,
+			&row.digestedAt,
+			&row.lastError,
+			&row.attempts,
+			&row.llmModel,
+			&row.status,
+		); err != nil {
+			return nil, fmt.Errorf("ingest.ledger.attentionRows scan: %w", err)
+		}
+		result = append(result, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("ingest.ledger.attentionRows rows: %w", err)
+	}
+	return result, nil
+}
+
 func (l *ledger) upsert(row ledgerRow) error {
 	_, err := l.db.Exec(
 		`INSERT OR REPLACE INTO ingest_ledger

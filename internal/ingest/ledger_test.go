@@ -3,6 +3,7 @@ package ingest
 import (
 	"database/sql"
 	"path/filepath"
+	"sort"
 	"testing"
 )
 
@@ -195,5 +196,55 @@ func TestLedgerWikiPageTakenByOther(t *testing.T) {
 	free, _ := l.wikiPageTakenByOther("sources/free.md", "/src/b.md")
 	if free {
 		t.Fatal("unused page reported taken")
+	}
+}
+
+func TestAttentionRows(t *testing.T) {
+	l := newTestLedger(t)
+	const model = "current-model"
+
+	seed := []ledgerRow{
+		{sourcePath: "/src/exhausted.md", contentHash: "exhausted", digestedAt: "2026-08-25T00:00:01Z", status: "failed", attempts: 3, lastError: "validate: missing title", llmModel: model},
+		{sourcePath: "/src/refused.md", contentHash: "refused", digestedAt: "2026-08-25T00:00:02Z", status: "refused", attempts: 1, lastError: "digest: policy refusal", llmModel: model},
+		{sourcePath: "/src/resolved.md", contentHash: "old", digestedAt: "2026-08-25T00:00:03Z", status: "failed", attempts: 3, llmModel: model},
+		{sourcePath: "/src/resolved.md", contentHash: "new", digestedAt: "2026-08-25T00:00:04Z", status: "success", llmModel: model},
+		{sourcePath: "/src/tied.md", contentHash: "old", digestedAt: "2026-08-25T00:00:05Z", status: "failed", attempts: 3, lastError: "old failure", llmModel: model},
+		{sourcePath: "/src/tied.md", contentHash: "new", digestedAt: "2026-08-25T00:00:05Z", status: "failed", attempts: 4, lastError: "new failure", llmModel: model},
+		{sourcePath: "/deleted/source.md", contentHash: "deleted", digestedAt: "2026-08-25T00:00:06Z", status: "failed", attempts: 3, llmModel: model},
+		{sourcePath: "/src/other-model.md", contentHash: "other", digestedAt: "2026-08-25T00:00:07Z", status: "failed", attempts: 3, llmModel: "other-model"},
+		{sourcePath: "/src/retrying.md", contentHash: "retrying", digestedAt: "2026-08-25T00:00:08Z", status: "failed", attempts: 2, llmModel: model},
+	}
+	for _, row := range seed {
+		if err := l.upsert(row); err != nil {
+			t.Fatalf("upsert %s: %v", row.sourcePath, err)
+		}
+	}
+
+	got, err := l.attentionRows(model)
+	if err != nil {
+		t.Fatalf("attentionRows: %v", err)
+	}
+	sort.Slice(got, func(i, j int) bool { return got[i].sourcePath < got[j].sourcePath })
+	if len(got) != 4 {
+		t.Fatalf("len(rows) = %d, want 4: %+v", len(got), got)
+	}
+	wantPaths := []string{"/deleted/source.md", "/src/exhausted.md", "/src/refused.md", "/src/tied.md"}
+	for i, want := range wantPaths {
+		if got[i].sourcePath != want {
+			t.Fatalf("rows[%d].sourcePath = %q, want %q", i, got[i].sourcePath, want)
+		}
+	}
+	if got[3].contentHash != "new" || got[3].lastError != "new failure" {
+		t.Fatalf("tied row = %+v, want latest rowid", got[3])
+	}
+}
+
+func TestAttentionRowsEmptyLedger(t *testing.T) {
+	got, err := newTestLedger(t).attentionRows("current-model")
+	if err != nil {
+		t.Fatalf("attentionRows: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("rows = %+v, want empty", got)
 	}
 }
