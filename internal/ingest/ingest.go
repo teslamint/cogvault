@@ -34,6 +34,8 @@ const (
 // ErrAlreadyRunning is returned by Run when another ingest holds the flock.
 var ErrAlreadyRunning = errors.New("ingest already running")
 
+var defaultNotify func(title, body string) error
+
 // failureClass adjudicates whether a digest failure consumes a retry attempt.
 // Only permanent (digest-output) problems increment attempts; transient LLM
 // errors and infrastructure errors (write/index/ledger) are recorded as failed
@@ -66,6 +68,7 @@ type Runner struct {
 	maxFileSize  int64
 	now          func() time.Time
 	readDir      func(string) ([]os.DirEntry, error)
+	notifyFunc   func(title, body string) error
 }
 
 func New(cfg *config.Config, store storage.Storage, idx index.Index, llmAdapter llm.Adapter, dbPath string) (*Runner, error) {
@@ -87,11 +90,37 @@ func New(cfg *config.Config, store storage.Storage, idx index.Index, llmAdapter 
 		maxFileSize:  int64(cfg.MaxFileSizeMB) << 20,
 		now:          time.Now,
 		readDir:      os.ReadDir,
+		notifyFunc:   defaultNotify,
 	}, nil
 }
 
 func (r *Runner) Close() error {
 	return r.ledger.close()
+}
+
+func (r *Runner) Notify(report *Report) {
+	if report == nil || len(report.NewAttention) == 0 {
+		return
+	}
+
+	first := report.NewAttention[0]
+	detail := first.Error
+	if _, after, ok := strings.Cut(detail, ":"); ok {
+		detail = after
+	}
+	detail = strings.TrimSpace(detail)
+	runes := []rune(detail)
+	if len(runes) > 60 {
+		detail = string(runes[:60])
+	}
+
+	body := fmt.Sprintf("%d건 주의 필요 — %s (%s)", len(report.NewAttention), filepath.Base(first.Path), detail)
+	if len(report.NewAttention) > 1 {
+		body += fmt.Sprintf(" 외 %d건", len(report.NewAttention)-1)
+	}
+	if err := r.notifyFunc("cogvault ingest", body); err != nil {
+		slog.Warn("ingest notification failed", "error", err)
+	}
 }
 
 func (r *Runner) Run(ctx context.Context, opts RunOptions) (*Report, error) {
