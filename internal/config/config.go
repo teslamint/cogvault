@@ -43,6 +43,16 @@ type AuthConfig struct {
 	OAuth            OAuthConfig `yaml:"oauth"`
 }
 
+// GitConfig controls the opt-in wiki auto-commit safety net (0024).
+type GitConfig struct {
+	// AutoCommit selects which operations commit to git: "off" (default,
+	// unchanged from pre-0024 behavior — only wiki_delete's own delete
+	// commit runs), "write" (also commit each successful wiki_write), or
+	// "write+ingest" (also commit the whole tree once per successful
+	// ingest run that digested at least one file).
+	AutoCommit string `yaml:"auto_commit"`
+}
+
 type Config struct {
 	WikiDir             string      `yaml:"wiki_dir"`
 	DBPath              string      `yaml:"db_path"`
@@ -54,6 +64,7 @@ type Config struct {
 	MaxFileSizeMB       int         `yaml:"max_file_size_mb"`
 	LLM                 LLMConfig   `yaml:"llm"`
 	Auth                AuthConfig  `yaml:"auth"`
+	Git                 GitConfig   `yaml:"git"`
 }
 
 const archiveExcludePath = "sources/_archived"
@@ -77,6 +88,23 @@ const maxStreamSecondsCeiling = 86400
 // config accepts that httpauth would panic on at startup.
 func ValidAuthModes() []string {
 	return []string{"none", "bearer", "oauth"}
+}
+
+// ValidGitAutoCommitModes returns the git.auto_commit values this package
+// accepts.
+func ValidGitAutoCommitModes() []string {
+	return []string{"off", "write", "write+ingest"}
+}
+
+// CommitsOnWrite reports whether wiki_write should auto-commit its change.
+func (g GitConfig) CommitsOnWrite() bool {
+	return g.AutoCommit == "write" || g.AutoCommit == "write+ingest"
+}
+
+// CommitsOnIngest reports whether a successful ingest run should commit the
+// whole wiki tree once.
+func (g GitConfig) CommitsOnIngest() bool {
+	return g.AutoCommit == "write+ingest"
 }
 
 func Load(configPath string) (*Config, error) {
@@ -181,6 +209,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Auth.OAuth.JWKSTTLSeconds == 0 {
 		c.Auth.OAuth.JWKSTTLSeconds = 900
+	}
+	if c.Git.AutoCommit == "" {
+		c.Git.AutoCommit = "off"
 	}
 }
 
@@ -288,6 +319,9 @@ func (c *Config) validate() error {
 	}
 	if c.Auth.OAuth.JWKSTTLSeconds < 0 {
 		return fmt.Errorf("auth.oauth.jwks_ttl_seconds: must be positive; expected a value in seconds")
+	}
+	if !slices.Contains(ValidGitAutoCommitModes(), c.Git.AutoCommit) {
+		return fmt.Errorf("git.auto_commit: %q not supported; use \"off\", \"write\", or \"write+ingest\"", c.Git.AutoCommit)
 	}
 	return nil
 }
