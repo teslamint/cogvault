@@ -45,3 +45,12 @@ The unauthenticated `/.well-known/oauth-protected-resource` document (RFC 9728) 
 ## Stream lifetime bound
 
 The deadline that closes a long-lived MCP event stream at its token's `exp` (or at a fixed cap when the credential has no expiry). Necessary because a streaming connection is authorized once at establishment and never revalidated, so without the bound an expired token keeps receiving.
+
+## Measured worst-case margin
+
+A timing-test safety margin sized against a directly measured worst-case
+overhead (e.g. subprocess fork/exec time under synthetic CPU-saturation
+load), not against a count of passing runs. "5 back-to-back passes" proves
+one load profile cooperated 5 times; it does not bound the margin against a
+load profile that hasn't occurred yet. *Avoid: validating a wall-clock test
+margin by repeated-run count alone.*
