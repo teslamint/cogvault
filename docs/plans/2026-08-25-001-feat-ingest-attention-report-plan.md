@@ -2,7 +2,8 @@
 schema: plan/v1
 title: "Ingest attention report: status command and push notification"
 type: feat
-status: approved
+status: done
+completed_by: 717a292b2e432bbad0d66651e2c0c9fc57b02527
 date: 2026-08-25
 execution: code
 origin: docs/specs/2026-08-24-ingest-attention-report-design.md

@@ -1,6 +1,7 @@
 ---
 module: release-loop
 date: "2026-08-17"
+last_updated: "2026-08-25"
 problem_type: workflow_issue
 component: external_review_merge_gate
 severity: high
@@ -106,3 +107,14 @@ evidence, and then merges.
 
 **Correct after interruption:** Re-query the PR. If it already merged, do not
 wait for nonexistent pre-merge threads; assess a revert or follow-up review PR.
+
+## Additional verified run
+
+PR #33 exercised this gate outside the feature that introduced it. CodeRabbit
+first reported an artifact-free skipped status. A manual review request created
+one submitted review and three review threads. Each finding was fixed, replied
+to, and resolved before the user approved squash merge.
+
+The same PR also confirmed a related rule: a resolved thread does not change a
+historical `CHANGES_REQUESTED` review object. Re-check thread resolution and
+merge state instead of treating that historical review state as a new finding.
