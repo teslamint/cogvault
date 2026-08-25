@@ -145,22 +145,29 @@ var ingestGitCommitTimeout = 10 * time.Second
 // postIngestGitCommit commits the whole wiki tree once after a successful
 // ingest run that digested at least one file (git.auto_commit: write+ingest,
 // 0024). Best-effort: failures log, never fail the ingest command — same
-// contract as wiki_write/wiki_delete's per-file auto-commit.
+// contract as wiki_write/wiki_delete's per-file auto-commit. `add` and
+// `commit` each get their own independent ingestGitCommitTimeout-bounded
+// context derived from cmd.Context() — sharing one context across both
+// would let a slow (not necessarily wedged) `git add -A` starve `git
+// commit` of its own timeout budget, turning a merely slow add into a
+// spurious commit failure.
 func postIngestGitCommit(cmd *cobra.Command, wikiDir string) {
-	ctx, cancel := context.WithTimeout(cmd.Context(), ingestGitCommitTimeout)
-	defer cancel()
-
 	// -- . scopes the add to wikiDir's own working directory: without it, a
 	// wikiDir nested inside a larger git repository (wikiDir is a plain
 	// subdirectory, not its own git root, in that layout) would stage
 	// changes anywhere in the enclosing repo's working tree, since `git -C
 	// wikiDir add -A` still resolves against the repo root, not wikiDir.
-	addCmd := exec.CommandContext(ctx, "git", "-C", wikiDir, "add", "-A", "--", ".")
+	addCtx, addCancel := context.WithTimeout(cmd.Context(), ingestGitCommitTimeout)
+	defer addCancel()
+	addCmd := exec.CommandContext(addCtx, "git", "-C", wikiDir, "add", "-A", "--", ".")
 	if err := addCmd.Run(); err != nil {
 		slog.Warn("post-ingest git add failed", "error", err)
 		return
 	}
-	commitCmd := exec.CommandContext(ctx, "git", "-C", wikiDir, "commit", "-m", "wiki: ingest snapshot")
+
+	commitCtx, commitCancel := context.WithTimeout(cmd.Context(), ingestGitCommitTimeout)
+	defer commitCancel()
+	commitCmd := exec.CommandContext(commitCtx, "git", "-C", wikiDir, "commit", "-m", "wiki: ingest snapshot")
 	if err := commitCmd.Run(); err != nil {
 		// A no-op ingest tree (all digests wrote identical content, or the
 		// working tree already matched) makes "nothing to commit" exit

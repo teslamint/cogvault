@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1011,5 +1012,57 @@ func TestGitAutoCommit_TimeoutBoundsWedgedCommit(t *testing.T) {
 	gitAutoCommit(t.TempDir(), "path.md", "wiki: write path.md")
 	if elapsed := time.Since(started); elapsed >= 5*time.Second {
 		t.Fatalf("gitAutoCommit took %s, want bounded by the shrunk gitCommitTimeout (fake git sleeps 10s unbounded)", elapsed)
+	}
+}
+
+// TestGitAutoCommit_SlowAddDoesNotStarveCommitTimeout is the regression test
+// for the initial implementation sharing one context.WithTimeout across both
+// the add and commit subprocesses: a slow-but-not-wedged `git add` (e.g. a
+// large working tree scan) would consume most of the shared budget, leaving
+// `git commit` too little time and turning a merely slow add into a
+// spurious commit failure. With independent per-command timeouts, an add
+// that takes most of gitCommitTimeout must not prevent the commit from
+// getting its own full budget.
+func TestGitAutoCommit_SlowAddDoesNotStarveCommitTimeout(t *testing.T) {
+	binDir, err := filepath.Abs("testdata/bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// add (200ms) + commit (150ms) = 350ms, which exceeds a 250ms budget: a
+	// shared context would let add consume most of the budget and kill
+	// commit partway through. Each individually fits under 250ms, so
+	// independent per-command timeouts must let both succeed.
+	t.Setenv("GIT_FAKE_ADD_SLEEP", "0.2")
+	t.Setenv("GIT_FAKE_COMMIT_SLEEP", "0.15")
+
+	original := gitCommitTimeout
+	gitCommitTimeout = 250 * time.Millisecond
+	t.Cleanup(func() { gitCommitTimeout = original })
+
+	var buf strings.Builder
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	started := time.Now()
+	gitAutoCommit(t.TempDir(), "path.md", "wiki: write path.md")
+	elapsed := time.Since(started)
+
+	// Positive proof both fake subprocesses actually ran their configured
+	// sleeps (not skipped, e.g. by an env var the fake binary failed to
+	// read): if both ran, elapsed must be at least their sum. A near-zero
+	// elapsed here would mean the negative log assertions below are
+	// vacuously passing.
+	if elapsed < 350*time.Millisecond {
+		t.Fatalf("elapsed = %s, want >= 350ms; the fake git add/commit sleeps may not have run at all", elapsed)
+	}
+
+	logs := buf.String()
+	if strings.Contains(logs, "git commit failed") {
+		t.Fatalf("commit must get its own full timeout budget, not the remainder after a slow add; logs: %s", logs)
+	}
+	if strings.Contains(logs, "git add failed") {
+		t.Fatalf("add must succeed within its own budget; logs: %s", logs)
 	}
 }

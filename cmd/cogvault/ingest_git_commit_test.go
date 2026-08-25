@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -246,5 +247,76 @@ func TestIngestGitCommit_TimeoutBoundsWedgedCommit(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed >= 5*time.Second {
 		t.Fatalf("ingest took %s, want bounded by the shrunk ingestGitCommitTimeout (fake git sleeps 10s unbounded)", elapsed)
+	}
+}
+
+// TestIngestGitCommit_SlowAddDoesNotStarveCommitTimeout is the regression
+// test for the initial implementation sharing one context.WithTimeout
+// across both the add and commit subprocesses: a slow-but-not-wedged
+// `git add -A -- .` (e.g. a large working tree scan) would consume most of
+// the shared budget, leaving `git commit` too little time and turning a
+// merely slow add into a spurious commit failure — silently dropping the
+// ingest snapshot commit. With independent per-command timeouts, an add
+// that takes most of ingestGitCommitTimeout must not prevent the commit
+// from landing.
+func TestIngestGitCommit_SlowAddDoesNotStarveCommitTimeout(t *testing.T) {
+	fakeClaudeOnPath(t)
+	t.Setenv("CLAUDE_FAKE_MODE", "ok")
+	configPath, srcDir, wikiDir, _ := setupIngestVault(t)
+	initTestGitRepo(t, wikiDir)
+	appendConfig(t, configPath, "git:\n  auto_commit: write+ingest\n")
+	writeAgedSource(t, srcDir, "one.pdf", "slow add fixture")
+
+	binDir, err := filepath.Abs("../../internal/mcp/testdata/bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The fake git binary on PATH shadows real git for every subprocess
+	// call this test's own process makes too (e.g. a gitLogSubjects
+	// helper), not only postIngestGitCommit's — so completion is asserted
+	// via captured log output plus elapsed time, not by re-invoking `git
+	// log`.
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// add (200ms) + commit (150ms) = 350ms, which exceeds a 250ms budget: a
+	// shared context would let add consume most of the budget and kill
+	// commit partway through. Each individually fits under 250ms, so
+	// independent per-command timeouts must let both succeed.
+	t.Setenv("GIT_FAKE_ADD_SLEEP", "0.2")
+	t.Setenv("GIT_FAKE_COMMIT_SLEEP", "0.15")
+
+	original := ingestGitCommitTimeout
+	ingestGitCommitTimeout = 250 * time.Millisecond
+	t.Cleanup(func() { ingestGitCommitTimeout = original })
+
+	var buf strings.Builder
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	started := time.Now()
+	stdout, _, err := executeCommand("ingest", "--config", configPath)
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	if !strings.Contains(stdout, "digested=1") {
+		t.Fatalf("expected digested=1, got: %q", stdout)
+	}
+
+	// Positive proof postIngestGitCommit actually ran both subprocesses
+	// sequentially (not skipped by a CommitsOnIngest() wiring bug): if both
+	// the 200ms fake add and the 150ms fake commit executed, elapsed must
+	// be at least their sum. A near-zero elapsed here would mean the
+	// negative log assertions below are vacuously passing.
+	if elapsed < 350*time.Millisecond {
+		t.Fatalf("elapsed = %s, want >= 350ms; postIngestGitCommit's add+commit may not have run at all", elapsed)
+	}
+
+	logs := buf.String()
+	if strings.Contains(logs, "post-ingest git commit failed") {
+		t.Fatalf("commit must get its own full timeout budget, not the remainder after a slow add; logs: %s", logs)
+	}
+	if strings.Contains(logs, "post-ingest git add failed") {
+		t.Fatalf("add must succeed within its own budget; logs: %s", logs)
 	}
 }

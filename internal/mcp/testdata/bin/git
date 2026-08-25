@@ -1,10 +1,22 @@
 #!/bin/sh
-# Fake `git` CLI for internal/mcp gitAutoCommit timeout tests. `add` always
-# succeeds immediately. `commit` sleeps when GIT_FAKE_COMMIT_SLEEP is set
-# (simulating a wedged index.lock), otherwise succeeds immediately.
+# Fake `git` CLI for internal/mcp gitAutoCommit timeout tests.
+#
+# `add` succeeds immediately, unless GIT_FAKE_ADD_SLEEP is set, in which case
+# it sleeps that long and then still succeeds (simulating a slow, but not
+# wedged, add — e.g. a large working tree scan).
+#
+# `commit` succeeds immediately, unless GIT_FAKE_COMMIT_SLEEP is set, in
+# which case it sleeps that long before succeeding. With independent
+# per-command timeouts this simulates a commit that needs real time (e.g.
+# writing objects) and should still succeed as long as it fits its own
+# budget; with a shared timeout it demonstrates the add starving the
+# commit's remaining budget.
 
 case "$*" in
 *" add "*)
+	if [ -n "$GIT_FAKE_ADD_SLEEP" ]; then
+		sleep "$GIT_FAKE_ADD_SLEEP"
+	fi
 	exit 0
 	;;
 *" commit "*)

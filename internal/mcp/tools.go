@@ -146,20 +146,25 @@ func handleWikiDelete(root string, store storage.Storage, idx index.Index) serve
 // against root when root is inside a git repository. wiki_delete calls this
 // unconditionally (its own delete-commit, unchanged since before 0024);
 // wiki_write calls it only when cfg.Git.CommitsOnWrite() (0024, opt-in, off
-// by default). Each subprocess is bounded by gitCommitTimeout so a wedged
-// index.lock cannot block the tool call indefinitely. Failures log, never
-// return a tool error — same contract as the pre-existing delete path.
+// by default). `add` and `commit` each get their own independent
+// gitCommitTimeout-bounded context — sharing one context across both would
+// let a slow (not necessarily wedged) `git add` starve `git commit` of its
+// own timeout budget, turning a merely slow add into a spurious commit
+// failure. Failures log, never return a tool error — same contract as the
+// pre-existing delete path.
 func gitAutoCommit(root, path, message string) {
-	ctx, cancel := context.WithTimeout(context.Background(), gitCommitTimeout)
-	defer cancel()
-
+	addCtx, addCancel := context.WithTimeout(context.Background(), gitCommitTimeout)
+	defer addCancel()
 	absPath := filepath.Join(root, path)
-	cmd := exec.CommandContext(ctx, "git", "-C", root, "add", absPath)
+	cmd := exec.CommandContext(addCtx, "git", "-C", root, "add", absPath)
 	if err := cmd.Run(); err != nil {
 		slog.Warn("git add failed", "path", path, "error", err)
 		return
 	}
-	commitCmd := exec.CommandContext(ctx, "git", "-C", root, "commit", "-m", message)
+
+	commitCtx, commitCancel := context.WithTimeout(context.Background(), gitCommitTimeout)
+	defer commitCancel()
+	commitCmd := exec.CommandContext(commitCtx, "git", "-C", root, "commit", "-m", message)
 	if err := commitCmd.Run(); err != nil {
 		slog.Warn("git commit failed", "path", path, "error", err)
 	}
