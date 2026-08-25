@@ -538,9 +538,10 @@ ingest, so it does **not** make the wiki recoverable (see
 Every command takes `--config <path>` (default `~/.config/cogvault/config.yaml`).
 launchd invokes `cogvault ingest --config <path>` explicitly (no useful cwd).
 
-Every command except `fetch` opens the index and runs a forced consistency
-check first (§2.3); a check that errors warns on stderr and does not stop the
-command. `fetch` reads the config only — it never opens the index or the wiki.
+Every command except `fetch` and `status` opens the index and runs a forced
+consistency check first (§2.3). A check error warns on stderr and does not stop
+the command. `fetch` reads the config only; it never opens the index or the
+wiki. `status` loads the config and the ingest ledger only.
 
 ### 9.1 init (two-step)
 
@@ -775,6 +776,37 @@ Reports, one line per issue as `<kind> <path> <message>`:
   gate, and that default does not change because the command shipped exiting 0
   and a caller may depend on it. With `--strict`: nonzero when any issue was
   reported, 0 when clean.
+
+### 9.13 status
+
+```
+cogvault status [--config <path>] [--json]
+```
+
+Reports source files that need ingest attention for the configured LLM model.
+The command selects the latest ledger row for each `source_path`. A latest
+`failed` row with at least three attempts appears as `exhausted`. A latest
+`refused` row appears as `refused`. Both rows must match the configured model.
+A newer row for the same source path excludes every older attention row.
+
+Human output uses the source filename and a local-time minute:
+
+```
+주의 필요: <N>건
+  <exhausted|refused>  <filename>  <error>  (<YYYY-MM-DD HH:MM>)
+```
+
+When no row needs attention, human output is `주의 필요 항목 없음.`.
+
+`--json` writes an object with `attention` and `model` fields. Each
+`attention` item contains `path`, `status`, `error`, `last_attempt`,
+`llm_model`, and `attempts`. JSON preserves `last_attempt` as the canonical UTC
+RFC3339 timestamp from the ledger. An empty result uses `"attention": []`.
+
+If the ledger database does not exist, the command returns the clean empty
+output and does not create the database. For an existing database, it opens
+the ledger and may run its idempotent schema DDL. The command does not open the
+index. It does not open wiki storage or acquire the ingest lock.
 
 ---
 
