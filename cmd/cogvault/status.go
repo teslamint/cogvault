@@ -39,6 +39,13 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	attemptedAt := make([]time.Time, len(rows))
+	for i, row := range rows {
+		attemptedAt[i], err = time.Parse(time.RFC3339Nano, row.LastAttempt)
+		if err != nil {
+			return fmt.Errorf("invalid last_attempt %q for %s: %w", row.LastAttempt, row.Path, err)
+		}
+	}
 
 	jsonOutput, _ := cmd.Flags().GetBool("json")
 	if jsonOutput {
@@ -57,17 +64,13 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	cmd.Printf("주의 필요: %d건\n", len(rows))
-	for _, row := range rows {
-		attemptedAt, err := time.Parse(time.RFC3339Nano, row.LastAttempt)
-		if err != nil {
-			return fmt.Errorf("invalid last_attempt %q for %s: %w", row.LastAttempt, row.Path, err)
-		}
+	for i, row := range rows {
 		cmd.Printf(
 			"  %s  %s  %s  (%s)\n",
 			row.Status,
 			filepath.Base(row.Path),
 			row.Error,
-			attemptedAt.In(time.Local).Format("2006-01-02 15:04"),
+			attemptedAt[i].In(time.Local).Format("2006-01-02 15:04"),
 		)
 	}
 	return nil

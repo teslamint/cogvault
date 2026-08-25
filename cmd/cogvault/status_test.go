@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const statusTestModel = "status-test-model"
@@ -17,8 +19,29 @@ func setupStatusVault(t *testing.T) (configPath, dbPath string) {
 	t.Helper()
 	configPath, srcDir, wikiDir, dbPath := setupIngestVault(t)
 	writeIngestConfigWithModel(t, configPath, wikiDir, dbPath, srcDir, statusTestModel)
-	if _, _, err := executeCommand("ingest", "--config", configPath, "--dry-run"); err != nil {
-		t.Fatalf("create ingest ledger: %v", err)
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open status ledger: %v", err)
+	}
+	_, execErr := db.Exec(`CREATE TABLE ingest_ledger (
+		source_path TEXT,
+		content_hash TEXT,
+		source_dir TEXT,
+		digested_at TEXT,
+		wiki_page TEXT,
+		status TEXT,
+		attempts INTEGER,
+		last_error TEXT,
+		run_origin TEXT,
+		llm_model TEXT NOT NULL DEFAULT '',
+		PRIMARY KEY (source_path, content_hash)
+	)`)
+	closeErr := db.Close()
+	if execErr != nil {
+		t.Fatalf("create status ledger: %v", execErr)
+	}
+	if closeErr != nil {
+		t.Fatalf("close status ledger: %v", closeErr)
 	}
 	return configPath, dbPath
 }
@@ -111,6 +134,7 @@ func TestStatusJSONOutput(t *testing.T) {
 
 func TestStatusMissingDatabaseIsClean(t *testing.T) {
 	configPath, _, _, dbPath := setupIngestVault(t)
+	lockPath := filepath.Join(filepath.Dir(dbPath), "ingest.lock")
 	if _, err := os.Stat(dbPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("database stat before status = %v, want not exist", err)
 	}
@@ -124,6 +148,9 @@ func TestStatusMissingDatabaseIsClean(t *testing.T) {
 	}
 	if _, err := os.Stat(dbPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("database stat after status = %v, want not exist", err)
+	}
+	if _, err := os.Stat(lockPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("lock stat after status = %v, want not exist", err)
 	}
 }
 
@@ -159,6 +186,67 @@ func TestStatusRejectsInvalidStoredTimestamp(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "invalid last_attempt") || !strings.Contains(err.Error(), "not-a-timestamp") {
 		t.Fatalf("error = %q, want clear invalid last_attempt error", err)
+	}
+}
+
+func TestStatusJSONRejectsInvalidStoredTimestamp(t *testing.T) {
+	configPath, dbPath := setupStatusVault(t)
+	seedStatusRow(t, dbPath, "/source/broken.pdf", "broken", "not-a-timestamp", "failed", 3, "validate: missing title")
+
+	_, _, err := executeCommand("status", "--config", configPath, "--json")
+	if err == nil {
+		t.Fatal("status --json succeeded with invalid stored timestamp, want error")
+	}
+	if !strings.Contains(err.Error(), "invalid last_attempt") || !strings.Contains(err.Error(), "not-a-timestamp") {
+		t.Fatalf("error = %q, want clear invalid last_attempt error", err)
+	}
+}
+
+func TestStatusExistingLedgerCreatesNoIndexSchemaOrLock(t *testing.T) {
+	configPath, dbPath := setupStatusVault(t)
+	lockPath := filepath.Join(filepath.Dir(dbPath), "ingest.lock")
+
+	if _, _, err := executeCommand("status", "--config", configPath); err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	if _, err := os.Stat(lockPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("lock stat after status = %v, want not exist", err)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open ledger for schema check: %v", err)
+	}
+	defer db.Close()
+	var indexTableCount int
+	if err := db.QueryRow(
+		`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name IN ('wiki_fts', 'file_meta', 'embeddings')`,
+	).Scan(&indexTableCount); err != nil {
+		t.Fatalf("inspect index schema: %v", err)
+	}
+	if indexTableCount != 0 {
+		t.Fatalf("index table count = %d, want 0", indexTableCount)
+	}
+}
+
+func TestStatusSucceedsWhileIngestLockHeld(t *testing.T) {
+	configPath, dbPath := setupStatusVault(t)
+	lockPath := filepath.Join(filepath.Dir(dbPath), "ingest.lock")
+	lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatalf("open test lock: %v", err)
+	}
+	defer lock.Close()
+	if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		t.Fatalf("acquire test lock: %v", err)
+	}
+	defer unix.Flock(int(lock.Fd()), unix.LOCK_UN)
+
+	stdout, _, err := executeCommand("status", "--config", configPath)
+	if err != nil {
+		t.Fatalf("status failed while ingest lock held: %v", err)
+	}
+	if stdout != "주의 필요 항목 없음.\n" {
+		t.Fatalf("status output = %q, want clean output", stdout)
 	}
 }
 
