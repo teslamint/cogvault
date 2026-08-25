@@ -51,8 +51,9 @@ directories the ingest pipeline reads directly (0021).
 - `pdftotext` text-extraction step (conditional fallback; **not activated** — O1
   verified headless PDF reading works, see 0021 D6).
 - Watch mode / resident daemon (batch + launchd chosen instead).
-- General git auto-commit. `wiki_delete` auto-commits its own deletion
-  (§8.8); `wiki_write` and `cogvault ingest` still never commit.
+- General git auto-commit is opt-in, off by default (`git.auto_commit`, §3.1,
+  0024). `wiki_delete` always auto-commits its own deletion regardless of
+  this setting (§8.8, unchanged since before 0024).
 
 Six entries that this list carried through Phase 1 have since shipped and are
 gone from it: URL/web extraction, the local LLM backend, periodic `cogvault
@@ -145,6 +146,8 @@ auth:                   # HTTP/SSE transport authorization (§8.1, §9.3). Ignor
                               # an explicit value that disagrees with it is a startup error.
     required_scopes: [string]  # optional. Every scope must be present in the token's scope claim.
     jwks_ttl_seconds: int    # JWKS cache TTL in seconds. Default: 900.
+git:                     # opt-in wiki auto-commit safety net (0024). Off by default.
+  auto_commit: string      # "off" (default), "write", or "write+ingest".
 ```
 
 `auth.max_body_mb`, `auth.max_stream_seconds`, and `auth.oauth.jwks_ttl_seconds`
@@ -495,7 +498,12 @@ Source {
 
 `path: string`, `content: string` (required) → `{status:"written", path, bytes, warnings:[]}`.
 `bytes` = `len(content)`; `warnings` always empty in Phase 1. Side effect:
-best-effort index reflection. Errors: `ErrPermission`, `ErrTraversal`, `ErrSymlink`.
+best-effort index reflection. When `git.auto_commit` is `write` or
+`write+ingest` (§3.1, default `off`), also auto-commits the write
+(`git add` + `git commit -m "wiki: write <path>"`) when `wiki_dir` is a git
+repository; a failed `git add`/`git commit` is logged, not returned as a
+tool error, and is bounded by a 10s subprocess timeout (0024). Errors:
+`ErrPermission`, `ErrTraversal`, `ErrSymlink`.
 
 ### 8.4 wiki_list
 
@@ -534,12 +542,17 @@ Source (JSON). Errors: `ErrNotFound`, `ErrPermission`, `ErrNotMarkdown`.
 
 `path: string` (required) → `{status:"deleted", path}`. Deletes the file from
 `wiki_dir` and removes it from the index if it was indexed. Side effect:
-auto-commits the deletion to git (`git add` + `git commit -m "wiki: delete
-<path>"`) when `wiki_dir` is a git repository; a failed `git add`/`git commit`
-is logged, not returned as a tool error. This auto-commit records only the
+always auto-commits the deletion to git (`git add` + `git commit -m "wiki:
+delete <path>"`) when `wiki_dir` is a git repository, regardless of
+`git.auto_commit` (§3.1) — this per-delete commit predates and is unaffected
+by that setting; a failed `git add`/`git commit` is logged, not returned as a
+tool error, and is bounded by a 10s subprocess timeout (0024). With
+`git.auto_commit: off` (the default), this auto-commit records only the
 deletion — `wiki_write` overwrites without committing, and nothing commits on
 ingest, so it does **not** make the wiki recoverable (see
-`docs/deployment/remote-mcp.md` "Security posture"). Errors: `ErrNotFound`,
+`docs/deployment/remote-mcp.md` "Security posture"). Setting `git.auto_commit`
+to `write` or `write+ingest` narrows, but does not eliminate, that gap — see
+§3.1 and the deployment guide. Errors: `ErrNotFound`,
 `ErrPermission`, `ErrTraversal`, `ErrSymlink`.
 
 ---
@@ -633,6 +646,17 @@ cogvault ingest [--config <path>] [--dry-run] [--limit N] [--scheduled]
 - Requires `claude` on PATH; if absent: `claude CLI not found in PATH; install
   Claude Code or add it to PATH`.
 - Prints the per-run report (§10.4) to stdout.
+- When `--dry-run` is not set and `git.auto_commit: write+ingest` (§3.1) and
+  the run digested at least one file, commits the whole `wiki_dir` tree once
+  (`git add -A -- .` + `git commit -m "wiki: ingest snapshot"`, run with
+  `wiki_dir` as the git working directory) after the run completes. The
+  `-- .` pathspec scopes the add to `wiki_dir` itself: without it, a
+  `wiki_dir` that is a plain subdirectory of a larger git repository (not
+  its own repo root) would stage every dirty file across that whole outer
+  repository, not only `wiki_dir`'s contents. A failed `git add`/`git
+  commit` (including "nothing to commit", which is the expected outcome
+  when a digest reproduced identical content) is logged, not returned as a
+  command error, and is bounded by a 10s subprocess timeout (0024).
 - **Exit codes**: nonzero only on a run-level failure (e.g. lock contention:
   `ingest already running (lock held)`, or a ctx-cancelled run). Per-file
   failures inside a completed run do **not** fail the run (exit 0).

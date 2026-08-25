@@ -1,8 +1,8 @@
-# 0024: Wiki Git Safety Net (Draft)
+# 0024: Wiki Git Safety Net
 
-- Status: draft (구현 전; 승인 필요)
+- Status: accepted
 - Date: 2026-08-25
-- Context owner: this decision; amends `docs/deployment/remote-mcp.md` "Security posture" and `SPEC.md` §8.7/§8.8 on acceptance.
+- Context owner: this decision; amends `docs/deployment/remote-mcp.md` "Security posture" and `SPEC.md` §3.1/§8.3/§8.8/§9.4.
 
 ## Problem
 
@@ -15,9 +15,9 @@ snapshot duty to the operator (`docs/deployment/remote-mcp.md`: "cogvault will
 never do this step for you"), which leaves the default configuration with no
 recovery.
 
-## Decision (proposed)
+## Decision
 
-Make the safety net available but **opt-in**, preserving the current default
+The safety net is available but **opt-in**, preserving the pre-0024 default
 behavior and the documented operator responsibility:
 
 1. New config key `git.auto_commit`:
@@ -56,5 +56,47 @@ behavior and the documented operator responsibility:
 
 ## Status
 
-Awaiting approval. On approval: implement, then promote this file from draft
-to accepted per `docs/decisions/README.md`.
+Accepted and implemented (2026-08-25):
+
+- `internal/config`: `GitConfig{AutoCommit string}` + `ValidGitAutoCommitModes()`
+  + `CommitsOnWrite()`/`CommitsOnIngest()` predicates. Default `"off"`;
+  invalid values rejected.
+- `internal/mcp/tools.go`: `gitAutoCommit(root, path, message)` takes an
+  explicit commit message and is bounded by `gitCommitTimeout` (10s, a `var`
+  so tests can shrink it). `wiki_write` calls it only when
+  `cfg.Git.CommitsOnWrite()`; `wiki_delete`'s own call is unconditional,
+  unchanged from before this decision.
+- `cmd/cogvault/ingest.go`: `postIngestGitCommit` runs after a successful
+  `cogvault ingest` run when `cfg.Git.CommitsOnIngest()` and
+  `report.Digested > 0`; `git add -A -- .` + one `git commit -m "wiki: ingest
+  snapshot"` over the whole `wiki_dir`, bounded by `ingestGitCommitTimeout`
+  (10s, also a `var`). Duplicated rather than shared with `internal/mcp`'s
+  helper — `cmd` depends on `mcp`/`ingest` per DESIGN.md's dependency graph,
+  not the reverse.
+  **Correction during review** (same day): the initial implementation used
+  bare `git add -A`, which resolves against the enclosing git repository's
+  root, not `wikiDir`, whenever `wikiDir` is a plain subdirectory of a
+  larger repo rather than its own git root — it would have staged and
+  committed dirty files anywhere in that outer repo. Fixed to
+  `git add -A -- .`, which scopes the add to `wikiDir` regardless of repo
+  nesting. `internal/mcp`'s per-file `gitAutoCommit` was unaffected — it
+  passes an absolute single-file path, never `-A`.
+- Docs updated: `SPEC.md` §1.3, §3.1, §8.3, §8.8, §9.4; `DESIGN.md` §2.2,
+  §2.8, §2.9; `CLAUDE.md` Working Context invariant 6 (also reworded during
+  the same review pass so "`write` or `write+ingest`" could not be misread
+  as `write` alone also covering ingest runs — `write` covers `wiki_write`
+  only, `write+ingest` is the one that additionally covers ingest);
+  `docs/deployment/remote-mcp.md` §7 (Security posture) and its backup
+  guidance.
+- Tests: `internal/config/config_test.go` (defaults, all three modes,
+  invalid rejection); `internal/mcp/tools_test.go` (`write` commits,
+  `off` does not, `wiki_delete` always commits regardless of mode, a
+  non-git `wiki_dir` logs and does not error, the timeout bounds a wedged
+  commit via a fake `git` binary at `internal/mcp/testdata/bin/git`);
+  `cmd/cogvault/ingest_git_commit_test.go` (`write+ingest` commits after a
+  digesting run, `off` and `write`-alone do not, `--dry-run` does not, a
+  zero-digest run does not, a `wikiDir` nested inside a larger repo does
+  not stage or commit files outside `wikiDir`
+  (`TestIngestGitCommit_NestedWikiDirDoesNotStageOutsideFiles`, confirmed
+  to fail against the pre-fix `-A`-without-pathspec code), the timeout
+  bounds a wedged commit reusing the same fake `git` binary).

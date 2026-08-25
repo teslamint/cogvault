@@ -76,6 +76,12 @@ safety and policy; filesystem existence/permissions are enforced by
 storage/runtime. Source directory existence is checked at ingest runtime, not
 config load.
 
+`GitConfig` (0024) adds `Git.AutoCommit string` (`"off"` default, `"write"`,
+or `"write+ingest"`), validated against `ValidGitAutoCommitModes()` the same
+way `Auth.Mode` is validated against `ValidAuthModes()`. `CommitsOnWrite()`
+and `CommitsOnIngest()` are the two call-site predicates `internal/mcp` and
+`cmd/cogvault` read instead of comparing the string directly.
+
 ### 2.3 storage/fs
 
 ```go
@@ -294,10 +300,15 @@ five are read-only, non-destructive. `IdempotentHint`/`OpenWorldHint` stay at
 `tools.go`: `wiki_search` drops the `scope` parameter; tool descriptions say
 "wiki root" instead of "vault". `handleWikiSearch` calls `idx.Search(query,
 limit)`. `handleWikiDelete` calls `store.Delete`, removes the path from the
-index if it was indexed, then `gitAutoCommit` best-effort `git add`s and
-`git commit`s the deletion when `wiki_dir` is a git repository — failures are
-logged, not returned as a tool error (§2.10 covers the authorization layer
-that gates this over the network). Instructions/`mapError`/write-then-index
+index if it was indexed, then unconditionally calls `gitAutoCommit` (0024:
+takes a commit message parameter, `context.WithTimeout(..., gitCommitTimeout)`
+bounds each `git add`/`git commit` subprocess to 10s), best-effort `git add`s
+and `git commit`s the deletion when `wiki_dir` is a git repository — failures
+are logged, not returned as a tool error (§2.10 covers the authorization
+layer that gates this over the network). `handleWikiWrite` calls the same
+`gitAutoCommit` after a successful write only when `cfg.Git.CommitsOnWrite()`
+(default false) — this is the only conditional caller; `wiki_delete`'s call
+is unconditional and predates 0024. Instructions/`mapError`/write-then-index
 otherwise unchanged.
 
 ### 2.9 cmd/cogvault
@@ -308,7 +319,22 @@ vault flag is deleted. `wire.go`: `resolveConfigPath(cmd)` + `bootstrap(configPa
 `index.NewSQLiteIndex(cfg.WikiDir, cfg.DBPath, cfg)`. `init.go` is the two-step
 flow (SPEC §9.1). `ingest.go` (new): flags → `ingest.RunOptions`, `exec.LookPath`
 for `claude` → `llm.NewClaudeCode`, prints `report.String()`, nonzero exit only on
-run-level failure.
+run-level failure. When `cfg.Git.CommitsOnIngest()` (0024) and the run digested
+at least one file, `postIngestGitCommit` runs after `postIngestEmbed`: a
+context-bounded (`ingestGitCommitTimeout`, 10s) `git add -A -- .` + one
+`git commit -m "wiki: ingest snapshot"` over the whole `cfg.WikiDir` tree,
+best-effort — failures (including "nothing to commit", the expected outcome
+when a digest reproduces identical content) log and never fail the command.
+The `-- .` pathspec is load-bearing, not cosmetic: `git -C wikiDir add -A`
+resolves against the enclosing repository's root, not `wikiDir`, whenever
+`wikiDir` is a plain subdirectory of a larger repo rather than its own git
+root — a bare `-A` would stage and commit dirty files anywhere in that
+outer repo. `TestIngestGitCommit_NestedWikiDirDoesNotStageOutsideFiles`
+(`cmd/cogvault/ingest_git_commit_test.go`) pins this: it fails against a
+`-A`-without-pathspec regression. This constant/helper is independent of
+`internal/mcp`'s `gitAutoCommit`; cmd depends on mcp per the dependency
+graph (§1), not the reverse, so the 10s-timeout git-commit logic is
+duplicated rather than shared.
 
 `status.go` loads the config and calls `ingest.AttentionRows` directly. It does
 not bootstrap storage, the index, or the ingest runner. Human output uses local
