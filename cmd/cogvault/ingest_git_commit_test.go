@@ -277,15 +277,18 @@ func TestIngestGitCommit_SlowAddDoesNotStarveCommitTimeout(t *testing.T) {
 	// via captured log output plus elapsed time, not by re-invoking `git
 	// log`.
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	// add (200ms) + commit (150ms) = 350ms, which exceeds a 250ms budget: a
-	// shared context would let add consume most of the budget and kill
-	// commit partway through. Each individually fits under 250ms, so
-	// independent per-command timeouts must let both succeed.
-	t.Setenv("GIT_FAKE_ADD_SLEEP", "0.2")
-	t.Setenv("GIT_FAKE_COMMIT_SLEEP", "0.15")
+	// add (300ms) + commit (300ms) = 600ms, which exceeds a 500ms budget: a
+	// shared context would let add consume 300ms, leaving only 200ms for
+	// commit's 300ms sleep — commit gets killed. Each individually fits
+	// under 500ms with a 200ms margin, wide enough to absorb process
+	// fork/exec and scheduler jitter under load (a tighter 250ms budget /
+	// 200ms sleep pairing was observed to flake under full-suite
+	// contention: add's wall-clock time crept past its own 250ms budget).
+	t.Setenv("GIT_FAKE_ADD_SLEEP", "0.3")
+	t.Setenv("GIT_FAKE_COMMIT_SLEEP", "0.3")
 
 	original := ingestGitCommitTimeout
-	ingestGitCommitTimeout = 250 * time.Millisecond
+	ingestGitCommitTimeout = 500 * time.Millisecond
 	t.Cleanup(func() { ingestGitCommitTimeout = original })
 
 	var buf strings.Builder
@@ -305,11 +308,11 @@ func TestIngestGitCommit_SlowAddDoesNotStarveCommitTimeout(t *testing.T) {
 
 	// Positive proof postIngestGitCommit actually ran both subprocesses
 	// sequentially (not skipped by a CommitsOnIngest() wiring bug): if both
-	// the 200ms fake add and the 150ms fake commit executed, elapsed must
+	// the 300ms fake add and the 300ms fake commit executed, elapsed must
 	// be at least their sum. A near-zero elapsed here would mean the
 	// negative log assertions below are vacuously passing.
-	if elapsed < 350*time.Millisecond {
-		t.Fatalf("elapsed = %s, want >= 350ms; postIngestGitCommit's add+commit may not have run at all", elapsed)
+	if elapsed < 600*time.Millisecond {
+		t.Fatalf("elapsed = %s, want >= 600ms; postIngestGitCommit's add+commit may not have run at all", elapsed)
 	}
 
 	logs := buf.String()
