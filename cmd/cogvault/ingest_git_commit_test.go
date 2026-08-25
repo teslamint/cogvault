@@ -277,18 +277,24 @@ func TestIngestGitCommit_SlowAddDoesNotStarveCommitTimeout(t *testing.T) {
 	// via captured log output plus elapsed time, not by re-invoking `git
 	// log`.
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	// add (300ms) + commit (300ms) = 600ms, which exceeds a 500ms budget: a
-	// shared context would let add consume 300ms, leaving only 200ms for
-	// commit's 300ms sleep — commit gets killed. Each individually fits
-	// under 500ms with a 200ms margin, wide enough to absorb process
-	// fork/exec and scheduler jitter under load (a tighter 250ms budget /
-	// 200ms sleep pairing was observed to flake under full-suite
-	// contention: add's wall-clock time crept past its own 250ms budget).
-	t.Setenv("GIT_FAKE_ADD_SLEEP", "0.3")
-	t.Setenv("GIT_FAKE_COMMIT_SLEEP", "0.3")
+	// add (900ms) + commit (900ms) = 1800ms, which exceeds a 1500ms budget
+	// by 300ms: a shared context lets add consume ~900ms+overhead, leaving
+	// at most ~600ms for commit's 900ms+overhead sleep — commit gets
+	// killed. Each individually fits under 1500ms with a ~600ms margin.
+	// Margin sizing: measured fake-git-binary fork/exec overhead directly
+	// under synthetic 16-core CPU-spin contention (the worst case observed,
+	// well beyond real `go test -race ./...` contention) topped out at
+	// ~210ms; ~600ms margin is ~3x that worst case. A prior 250ms budget /
+	// 200ms sleep pairing (50ms margin) flaked once under real full-suite
+	// `-race` contention: add's own wall-clock time (sleep + overhead)
+	// crept past its own 250ms individual timeout, killing add itself, not
+	// commit — the failure mode this margin must absorb is add exceeding
+	// its own budget, not only the shared-context starvation scenario.
+	t.Setenv("GIT_FAKE_ADD_SLEEP", "0.9")
+	t.Setenv("GIT_FAKE_COMMIT_SLEEP", "0.9")
 
 	original := ingestGitCommitTimeout
-	ingestGitCommitTimeout = 500 * time.Millisecond
+	ingestGitCommitTimeout = 1500 * time.Millisecond
 	t.Cleanup(func() { ingestGitCommitTimeout = original })
 
 	var buf strings.Builder
@@ -308,11 +314,11 @@ func TestIngestGitCommit_SlowAddDoesNotStarveCommitTimeout(t *testing.T) {
 
 	// Positive proof postIngestGitCommit actually ran both subprocesses
 	// sequentially (not skipped by a CommitsOnIngest() wiring bug): if both
-	// the 300ms fake add and the 300ms fake commit executed, elapsed must
+	// the 900ms fake add and the 900ms fake commit executed, elapsed must
 	// be at least their sum. A near-zero elapsed here would mean the
 	// negative log assertions below are vacuously passing.
-	if elapsed < 600*time.Millisecond {
-		t.Fatalf("elapsed = %s, want >= 600ms; postIngestGitCommit's add+commit may not have run at all", elapsed)
+	if elapsed < 1800*time.Millisecond {
+		t.Fatalf("elapsed = %s, want >= 1800ms; postIngestGitCommit's add+commit may not have run at all", elapsed)
 	}
 
 	logs := buf.String()
