@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/mark3labs/mcp-go/server"
@@ -93,10 +97,68 @@ func runServe(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		cmd.Printf("%s server listening on %s\n", transport, addr)
-		return newHTTPServer(addr, handler).ListenAndServe()
+		return serveUntilSignal(cmd.Context(), addr, handler)
 	default:
 		return fmt.Errorf("--transport: %q not supported; use \"stdio\", \"sse\", or \"http\"", transport)
 	}
+}
+
+// serveUntilSignal runs the HTTP server until SIGINT or SIGTERM (or ctx is
+// canceled), then drains: in-flight requests get the shutdown grace period
+// before the process exits. Without it ListenAndServe dies with the process
+// on the first signal, cutting active SSE/Streamable HTTP streams
+// mid-response. The listener is created up front so a bind failure surfaces
+// before the signal handling starts, and tests can inject their own via
+// serveListener.
+func serveUntilSignal(ctx context.Context, addr string, handler http.Handler) error {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", addr, err)
+	}
+	return serveListener(ctx, ln, handler)
+}
+
+// serveListener is the testable core of serveUntilSignal: it serves on the
+// given listener until ctx is canceled or a signal arrives, then shuts the
+// server down with a grace period.
+func serveListener(ctx context.Context, ln net.Listener, handler http.Handler) error {
+	srv := newHTTPServer(ln.Addr().String(), handler)
+	signalCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Serve(ln) }()
+
+	select {
+	case err := <-errCh:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	case <-signalCtx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			return fmt.Errorf("shutdown: %w", err)
+		}
+		return nil
+	}
+}
+
+// requireAddrHost rejects an --addr with an empty host part (":8080"), which
+// binds every interface. Operators must name the interface explicitly — the
+// loopback guard already rejects such addrs in "none" auth mode, but bearer
+// mode would otherwise accept and silently expose the port on all
+// interfaces, and sseBaseURL would build the malformed "http://:8080".
+func requireAddrHost(addr string) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("addr: %q is not a valid host:port; expected a value like \"host:port\"", addr)
+	}
+	if host == "" {
+		return fmt.Errorf("addr: %q has no host; name an interface explicitly (e.g. \"localhost:8080\")", addr)
+	}
+	return nil
 }
 
 // newHTTPServer constructs the *http.Server used for the "sse" and "http"
@@ -172,6 +234,9 @@ func sessionIdleTTLFor(maxStreamSeconds int) time.Duration {
 // exist so an operator sees an actionable error instead of that panic in
 // the first place.
 func buildServeHandler(cfg *config.Config, mcpSrv *server.MCPServer, f serveFlags) (http.Handler, error) {
+	if err := requireAddrHost(f.addr); err != nil {
+		return nil, err
+	}
 	loopback, err := isLoopbackAddr(f.addr)
 	if err != nil {
 		return nil, err

@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/teslamint/cogvault/internal/adapter"
 	"gopkg.in/yaml.v3"
 )
 
@@ -23,6 +24,9 @@ type LLMConfig struct {
 	BaseURL          string `yaml:"base_url"`
 	EmbeddingModel   string `yaml:"embedding_model"`
 	EmbeddingBaseURL string `yaml:"embedding_base_url"`
+	// TimeoutSeconds bounds one digest call. Zero means the per-backend
+	// default (5 minutes); negative is a config error.
+	TimeoutSeconds int `yaml:"timeout_seconds"`
 }
 
 type OAuthConfig struct {
@@ -163,6 +167,9 @@ func (c *Config) applyDefaults() {
 	if c.LLM.Backend == "" {
 		c.LLM.Backend = "claudecode"
 	}
+	if c.LLM.TimeoutSeconds == 0 {
+		c.LLM.TimeoutSeconds = 300
+	}
 	if c.Auth.Mode == "" {
 		c.Auth.Mode = "none"
 	}
@@ -224,7 +231,7 @@ func (c *Config) validate() error {
 		return fmt.Errorf("db_path: must be a file path, not a directory")
 	}
 	cleanWiki := filepath.Clean(c.WikiDir)
-	if hasPathPrefix(cleanedDB, cleanWiki) {
+	if adapter.HasPathPrefix(cleanedDB, cleanWiki) {
 		return fmt.Errorf("db_path: must not be inside wiki_dir; expected a path outside the wiki root")
 	}
 	for i, s := range c.Sources {
@@ -233,7 +240,7 @@ func (c *Config) validate() error {
 			return err
 		}
 		cleanSrc := filepath.Clean(s.Path)
-		if hasPathPrefix(cleanSrc, cleanWiki) || hasPathPrefix(cleanWiki, cleanSrc) {
+		if adapter.HasPathPrefix(cleanSrc, cleanWiki) || adapter.HasPathPrefix(cleanWiki, cleanSrc) {
 			return fmt.Errorf("%s: must not overlap wiki_dir; expected a path that is neither equal to, inside, nor containing the wiki root", field)
 		}
 	}
@@ -255,6 +262,9 @@ func (c *Config) validate() error {
 	}
 	if c.LLM.Backend != "claudecode" && c.LLM.Backend != "ollama" {
 		return fmt.Errorf("llm.backend: %q not supported; use \"claudecode\" or \"ollama\"", c.LLM.Backend)
+	}
+	if c.LLM.TimeoutSeconds < 0 {
+		return fmt.Errorf("llm.timeout_seconds: must be positive; expected a value in seconds")
 	}
 	if c.LLM.EmbeddingBaseURL != "" && c.LLM.EmbeddingModel == "" {
 		return fmt.Errorf("llm.embedding_base_url: requires embedding_model to be set")
@@ -316,12 +326,6 @@ func validatePath(field, path string) error {
 	return nil
 }
 
-// hasPathPrefix reports whether path equals prefix or lies under it.
-// Both arguments must already be filepath.Clean-ed.
-func hasPathPrefix(path, prefix string) bool {
-	return path == prefix || strings.HasPrefix(path, prefix+string(os.PathSeparator))
-}
-
 // expandTilde expands a leading "~/" (or an exact "~") to the user's home
 // directory. A "~" anywhere else in the path is left literal.
 func expandTilde(path string) string {
@@ -343,14 +347,7 @@ func hasUnexpandedTilde(path string) bool {
 }
 
 func containsDotDot(path string) bool {
-	for _, sep := range []string{"/", string(os.PathSeparator)} {
-		for _, component := range strings.Split(path, sep) {
-			if component == ".." {
-				return true
-			}
-		}
-	}
-	return false
+	return adapter.ContainsDotDot(path)
 }
 
 func containsString(items []string, want string) bool {

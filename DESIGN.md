@@ -67,10 +67,14 @@ func (c *Config) SchemaPath() string             // "_schema.md" (root-relative)
 
 `expandTilde` applies to `WikiDir`, `DBPath`, and each `Sources[i].Path`
 (leading `~/` or exact `~` → `$HOME`; `~` mid-path literal). `validate` requires
-those three absolute after expansion and rejects overlaps via `hasPathPrefix`.
-Responsibility boundary unchanged (0001): config validates path-string safety and
-policy; filesystem existence/permissions are enforced by storage/runtime. Source
-directory existence is checked at ingest runtime, not config load.
+those three absolute after expansion and rejects overlaps via
+`adapter.HasPathPrefix` — the prefix/`..` path predicates live once in
+`internal/adapter` (`HasPathPrefix`, `ContainsDotDot`) and config/storage
+delegate to them; the former per-package copies were drift-prone duplicated
+logic. Responsibility boundary unchanged (0001): config validates path-string
+safety and policy; filesystem existence/permissions are enforced by
+storage/runtime. Source directory existence is checked at ingest runtime, not
+config load.
 
 ### 2.3 storage/fs
 
@@ -110,7 +114,11 @@ type SQLiteIndex struct {
 v2 changes:
 
 - **`Search(query, limit)`** — the `scope` parameter and `appendScopeFilter` are
-  removed; the index holds wiki pages only.
+  removed; the index holds wiki pages only. `matchQuery` quotes each
+  whitespace-separated token individually and joins with implicit AND —
+  whole-query quoting (the old `escapeMatch`) made every multi-word query a
+  strict adjacent-phrase match and missed non-adjacent hits (F1/SC3). The
+  LIKE fallback orders by path.
 - **Schema versioning** — `PRAGMA user_version=3` replaces the `mod_time`-column
   sniffing migration. A DB with tables at `user_version < 3` is dropped and
   recreated. `file_meta` gains `size INTEGER`, `mtime TEXT`, and
@@ -141,13 +149,17 @@ type Adapter interface {
 }
 var ErrTransient error   // wraps quota/rate-limit/timeout/transport/API failures
 var ErrRefused error     // anchored provider policy refusal; model-gated
-func NewClaudeCode(binPath, model string) *ClaudeCode
+func NewClaudeCode(binPath, model string, opts ...Option) *ClaudeCode
+func NewOllama(baseURL, model string, opts ...Option) *Ollama   // second backend
+func WithTimeout(d time.Duration) Option                        // 0/negative => 5m default
 ```
 
-**Responsibility**: define the digestion contract and one backend. `claudecode`
+**Responsibility**: define the digestion contract and two backends sharing the
+`Option`/`WithTimeout` construction seam (timeout comes from
+`llm.timeout_seconds`, default 5m). `claudecode`
 runs `claude --print --output-format json --allowedTools "Read"` with the prompt
 (schema text + instructions + absolute source path) on **stdin** (avoids ARG_MAX),
-a per-call 5-minute timeout, strips an optional leading/trailing ``` fence, and
+a per-call timeout, strips an optional leading/trailing ``` fence, and
 parses stdout as an event array. Only the final `type: "result"` event can
 classify structured output or provide a diagnostic. `buildPrompt`
 uses `SourceExt` to emit a type-aware read instruction (PDF/markdown/generic) and
@@ -159,6 +171,15 @@ false; otherwise structured refusal classification requires `is_error` plus
 `error_during_execution`. Classification checks that eligible result, stderr,
 and non-JSON-looking plain stdout before selecting a message, so policy evidence
 in one stream wins over a generic failure in another.
+
+`ollama` POSTs `/api/generate` (non-streaming) with the same prompt and
+classifies like claudecode's spirit, not its letter: HTTP 408/429 and all 5xx
+are `ErrTransient` (Ollama returns 500/503 while a model loads or under load —
+burning the ledger's bounded attempts on those would permanently exhaust files
+over self-healing blips), other 4xx are permanent client errors, transport
+errors are transient, and the response is fence-stripped with the same
+`stripFence` as claudecode so ```-wrapped model output is not a permanent
+parse failure.
 
 `isRefusalText` canonicalizes each candidate, then accepts only a candidate
 beginning `policy refusal:`, or the anchored case-insensitive provider grammar
@@ -294,7 +315,9 @@ not bootstrap storage, the index, or the ingest runner. Human output uses local
 timestamps. JSON preserves the stored canonical UTC timestamp.
 
 `serve.go`: `serve` takes `--transport` (`stdio` default, `sse`, or `http`),
-`--addr` (default `localhost:8080`, `sse`/`http` only), `--endpoint-path`
+`--addr` (default `localhost:8080`, `sse`/`http` only; `requireAddrHost`
+rejects an empty host part — `:8080` binds every interface and would build
+the malformed SSE base URL `http://:8080`), `--endpoint-path`
 (default `/mcp`, `http` only — normalized to a leading slash, no trailing
 slash), and `--public-url` (required in `oauth` mode; also feeds SSE message
 endpoints and Origin checks). `stdio` calls `server.ServeStdio` directly.
@@ -328,6 +351,13 @@ socket-level read/write deadline (§2.10). `validatePublicURL` also rejects
 userinfo (`user:pass@host`) in `--public-url`, alongside the query/fragment/
 trailing-slash checks, since it would otherwise leak into the advertised
 resource, the token `aud`, and the `WWW-Authenticate` challenge.
+
+`sse`/`http` serve through `serveUntilSignal`: the TCP listener binds before
+signal handling starts (bind failures surface immediately), and SIGINT/SIGTERM
+trigger `srv.Shutdown` with a 10-second grace period so in-flight
+SSE/Streamable HTTP streams drain instead of dying with the process.
+`serveListener` is the listener-injected core tests drive; the signal path
+wraps it via `signal.NotifyContext`.
 
 ### 2.10 httpauth (new)
 

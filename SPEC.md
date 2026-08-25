@@ -127,6 +127,7 @@ llm:
   backend: string       # default "claudecode". Allowed: "claudecode", "ollama".
   model: string         # optional. Passed as --model to the LLM backend. Default: empty (backend default).
   base_url: string      # optional, "ollama" backend only. Default: http://localhost:11434.
+  timeout_seconds: int  # optional. Per-digest-call bound for either backend. Default: 300. Negative rejected.
   embedding_model: string    # optional. Required by `cogvault embed` (§9.8); enables embedding-ranked `similar` (§9.9).
   embedding_base_url: string # optional. Default: http://localhost:11434. Rejected unless embedding_model is set.
 max_file_size_mb: int   # ingest file size cap in MB. Default: 32. Negative rejected.
@@ -374,7 +375,17 @@ indexed (they are mostly binary; their digested pages carry the text).
 
 `limit` default 10, max 100. Descending score. Empty result = empty array.
 Korean supported, including queries ≤ 2 characters (LIKE fallback). Method is
-internal (FTS5 MATCH for ≥ 3 chars with trigram; LIKE otherwise).
+internal (FTS5 MATCH for ≥ 3 chars with trigram; LIKE otherwise). Multi-word
+FTS queries match **per token**: each whitespace-separated token is quoted
+individually and joined with implicit AND, so `hacking bitcoin` finds pages
+containing both words anywhere — not only the adjacent phrase (F1/SC3).
+LIKE-fallback results are ordered by path for determinism.
+
+`Rebuild` clears `wiki_fts` and `file_meta` **and the `embeddings` table when
+it exists** — embeddings are keyed `(path, model)` with no FK to `file_meta`,
+so a bulk clear that skips them would orphan rows for deleted pages forever
+(the per-path `Remove` path already cleans its own). A rebuild on a DB that
+never used embeddings must not fail on the absent table.
 
 ### 6.7 Consistency (bounded staleness)
 
@@ -594,11 +605,14 @@ cogvault serve [--config <path>] [--transport stdio|sse|http] [--addr <host:port
   only — never a flag or config key, and at least 32 bytes — keeping it out
   of the config file and shell history.
 - Startup guards (`sse`/`http` only), each a fatal error before the server
-  starts listening: `auth.mode: none` on a non-loopback `--addr`;
-  `auth.mode: oauth` without `--public-url`; `auth.mode: bearer` with
-  `COGVAULT_BEARER_TOKEN` unset or under 32 bytes; a configured
-  `auth.oauth.audience` that disagrees with the advertised resource
-  (`<public-url><endpoint-path>`).
+  starts listening: `--addr` with an empty host part (`:8080` binds every
+  interface and would also produce a malformed SSE base URL); `auth.mode:
+  none` on a non-loopback `--addr`; `auth.mode: oauth` without
+  `--public-url`; `auth.mode: bearer` with `COGVAULT_BEARER_TOKEN` unset or
+  under 32 bytes; a configured `auth.oauth.audience` that disagrees with the
+  advertised resource (`<public-url><endpoint-path>`).
+- **Shutdown**: `sse`/`http` run until SIGINT/SIGTERM, then drain in-flight
+  requests with a 10-second grace period instead of dying with the process.
 - See `docs/deployment/remote-mcp.md` for the full remote setup (tunneling,
   identity-provider prerequisites, security posture).
 
@@ -633,19 +647,25 @@ cogvault fetch [--config <path>] [--source-dir <dir>] [--name <file>] <url>
   written. With no `sources[]` configured and no flag: `no source directories
   configured; use --source-dir`. The directory is created if absent.
 - `--name` (default: derived from the URL path, or the host when the path is
-  empty, prefixed `web-` and truncated to 80 characters): `.md` is appended
-  unless already present.
+  empty, prefixed `web-` and truncated to **80 runes** without splitting a
+  multi-byte character): `.md` is appended unless already present. An explicit
+  `--name` must be a plain filename (no path separators, not `.` or `..`,
+  checked before the `.md` suffix is appended) — a name that could escape the
+  source directory is rejected with `must be a plain filename`.
 - `GET` with a 30-second timeout. A non-`200` response is an error
   (`fetch <url>: HTTP <code>`); so is an unparsable URL.
 - **The response body is read through a 10 MiB limit and silently truncated
   past it** — a larger page produces a short file, not an error.
-- Writes YAML frontmatter (`source_url`, `fetched_at` as a UTC date) followed
-  by the raw response body. No HTML-to-text extraction happens here; the LLM
-  digest step handles the markup.
-- This is the one command that writes outside `wiki_dir`. It deposits a capture
-  file into a source directory as an explicit user action; the pipeline's
-  relationship to `sources[]` is unchanged — ingest still only reads them, and
-  they remain unaddressable over MCP.
+- **Content validation**: a response whose `Content-Type` is not text-ish
+  (`text/*`, `application/json|xml`; an absent header is allowed and left to
+  the UTF-8 gate) is rejected with `unsupported Content-Type`, and a body
+  that is not valid UTF-8 is rejected — binary media must not become a
+  `.md` capture.
+- Writes YAML frontmatter (`source_url` **quoted**, `fetched_at` as a UTC
+  date) followed by the raw response body. No HTML-to-text extraction happens
+  here; the LLM digest step handles the markup. The file is written to a
+  temp name and renamed into place, so a crash cannot leave a partial
+  capture.
 
 ### 9.6 digest
 
@@ -946,9 +966,10 @@ model/content-hash re-attempt gate.
 
 ### 10.7 Behavior constants and promoted knobs
 
-LLM timeout 5m, maximum diagnostic length 2,000 runes (including `…`), max
-permanent-failure attempts 3, settle window 2m — these remain code constants,
-promoted to config keys only on demonstrated need.
+LLM timeout default 5m (`llm.timeout_seconds`, default 300, must be positive),
+maximum diagnostic length 2,000 runes (including `…`), max permanent-failure
+attempts 3, settle window 2m — the timeout is the promoted knob; the rest
+remain code constants, promoted only on demonstrated need.
 
 Max file size was promoted to `max_file_size_mb` (default 32MB) after a real
 corpus file (42MB PDF) was permanently skipped (F9).
@@ -1024,6 +1045,9 @@ runtime dependency of `cogvault ingest`, not a Go module.
 - Fake `claude` in `testdata/bin` records argv/stdin, returns canned JSON.
   Success; timeout → `ErrTransient`; rate-limit/nonzero-exit → `ErrTransient`;
   malformed JSON → permanent; missing binary → transport (transient).
+- Ollama backend (`httptest`): success and fenced ```-wrapped output both
+  yield the unwrapped page; 408/429/5xx → `ErrTransient`; 4xx (400/404) →
+  permanent; empty response → permanent error.
 
 ### Ingest
 - Two files → pages + index rows + `success` rows. Second run digests nothing

@@ -39,7 +39,7 @@ exported wrapper converts to `[]AttentionRow`.
 **Display status mapping**: the ledger stores exhausted files as
 `status='failed'` with `attempts >= maxAttempts`. The `status` command and
 notification must display this as `exhausted`, not `failed`. The
-`AttentionRows` function performs this mapping: `failed + attempts >= 3` →
+`AttentionRows` function performs this mapping: `failed + attempts >= maxAttempts` (bound as a query parameter, not a literal) →
 `Status: "exhausted"` in `AttentionRow`.
 
 **Timestamp display**: ledger stores `digested_at` as UTC RFC3339Nano, and
@@ -103,7 +103,7 @@ No contradictions; no unavailable evidence.
 |---|---|
 | `cmd/cogvault/main.go` | Register `newStatusCmd()` |
 | `cmd/cogvault/ingest.go` | Call `runner.Notify(report)` when `--scheduled` and `err == nil` |
-| `internal/ingest/ledger.go` | Add unexported `attentionRows(model string) ([]ledgerRow, error)` with latest-row CTE |
+| `internal/ingest/ledger.go` | Add unexported `attentionRows(model string, maxAttempts int) ([]ledgerRow, error)` with latest-row CTE |
 | `internal/ingest/ledger_test.go` | Test `attentionRows` with seeded rows |
 | `internal/ingest/report.go` | Add `NewAttention []FileResult` field |
 | `internal/ingest/ingest.go` | Populate `NewAttention` in `recordFailure`; add `Notify` method + injectable `notifyFunc` + `NewAttention` population in `Runner` |
@@ -135,7 +135,7 @@ Files:
 Interfaces:
   Consumes: `ledger.db` (existing `*sql.DB`)
   Produces:
-    - unexported: `func (l *ledger) attentionRows(model string) ([]ledgerRow, error)`
+    - unexported: `func (l *ledger) attentionRows(model string, maxAttempts int) ([]ledgerRow, error)`
     - exported: `type AttentionRow struct { Path, Status, Error, LastAttempt, Model string; Attempts int }` (JSON-tagged; `LastAttempt` remains UTC RFC3339Nano)
     - exported: `func AttentionRows(dbPath, model string) ([]AttentionRow, error)` — encapsulates DB-absent guard, ledger open, query, and `failed→exhausted` mapping
 
@@ -166,15 +166,19 @@ Steps:
      FROM ingest_ledger l
      JOIN latest lt ON l.rowid = lt.max_id
      WHERE l.llm_model = ?
-       AND ((l.status = 'failed' AND l.attempts >= 3)
+       AND ((l.status = 'failed' AND l.attempts >= ?)
             OR l.status = 'refused');
      ```
+     Bind the attempts threshold as a query argument (`maxAttempts` from
+     `ingest.go`) rather than inlining `3`: `ingest.go:154` already gates
+     re-digestion on `prev.attempts >= maxAttempts`, and a second literal
+     would silently drift if the constant ever changes.
   4. Run tests; confirm pass, no regressions.
   5. Create `attention.go` with exported `AttentionRow` struct (JSON tags: `path`, `status`, `error`, `last_attempt`, `llm_model`, `attempts`) and `AttentionRows(dbPath, model string) ([]AttentionRow, error)`:
      - `os.Stat(dbPath)`: if absent, return `nil, nil`.
      - `openLedger(dbPath)` → `defer l.close()`.
-     - Call `l.attentionRows(model)`.
-     - Convert: `failed + attempts >= 3` → Status `"exhausted"`; `refused` → Status `"refused"`. Preserve `digested_at` as UTC RFC3339Nano in `LastAttempt`.
+     - Call `l.attentionRows(model, maxAttempts)`.
+     - Convert: `failed + attempts >= maxAttempts` → Status `"exhausted"`; `refused` → Status `"refused"`. Preserve `digested_at` as UTC RFC3339Nano in `LastAttempt`.
   6. Write `attention_test.go::TestAttentionRowsExported` covering DB-absent → nil, exported fields, status mapping, and exact UTC `LastAttempt` preservation.
   7. Run tests; confirm pass.
   8. Commit: `feat(ingest): add ledger attention query with latest-row semantics`

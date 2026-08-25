@@ -17,14 +17,36 @@ type Ollama struct {
 	client  *http.Client
 }
 
-func NewOllama(baseURL, model string) *Ollama {
+// Option customizes an LLM adapter at construction.
+type Option func(*adapterOptions)
+
+type adapterOptions struct {
+	timeout time.Duration
+}
+
+// WithTimeout bounds one digest call (HTTP round trip for ollama, process
+// run for claudecode). Zero or negative keeps the per-backend default
+// (5 minutes).
+func WithTimeout(d time.Duration) Option {
+	return func(o *adapterOptions) {
+		if d > 0 {
+			o.timeout = d
+		}
+	}
+}
+
+func NewOllama(baseURL, model string, opts ...Option) *Ollama {
 	if baseURL == "" {
 		baseURL = "http://localhost:11434"
+	}
+	ao := adapterOptions{timeout: 5 * time.Minute}
+	for _, opt := range opts {
+		opt(&ao)
 	}
 	return &Ollama{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		model:   model,
-		client:  &http.Client{Timeout: 5 * time.Minute},
+		client:  &http.Client{Timeout: ao.timeout},
 	}
 }
 
@@ -54,11 +76,20 @@ func (o *Ollama) Digest(ctx context.Context, req DigestRequest) (*DigestResult, 
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusTooManyRequests {
-		return nil, fmt.Errorf("llm.Digest %s: HTTP %d: %w", req.SourcePath, resp.StatusCode, ErrTransient)
+	code := resp.StatusCode
+	// Server-side failures (5xx) and explicit retry signals (408, 429) are
+	// transient: Ollama returns 500/503 while a model is loading or under
+	// load, and burning the ledger's bounded attempts on those would
+	// permanently exhaust files over blips the server recovers from on its
+	// own. This mirrors the claudecode backend, which classifies equivalent
+	// CLI failures as transient. Remaining 4xx codes are client errors
+	// (e.g. a missing model name) that no retry can fix, so they stay
+	// permanent and consume attempts.
+	if code == http.StatusRequestTimeout || code == http.StatusTooManyRequests || code >= 500 {
+		return nil, fmt.Errorf("llm.Digest %s: HTTP %d: %w", req.SourcePath, code, ErrTransient)
 	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("llm.Digest %s: HTTP %d", req.SourcePath, resp.StatusCode)
+	if code != http.StatusOK {
+		return nil, fmt.Errorf("llm.Digest %s: HTTP %d", req.SourcePath, code)
 	}
 
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
@@ -73,7 +104,7 @@ func (o *Ollama) Digest(ctx context.Context, req DigestRequest) (*DigestResult, 
 		return nil, fmt.Errorf("llm.Digest %s: parse response: %w", req.SourcePath, err)
 	}
 
-	page := strings.TrimSpace(result.Response)
+	page := strings.TrimSpace(stripFence(result.Response))
 	if page == "" {
 		return nil, fmt.Errorf("llm.Digest %s: empty response", req.SourcePath)
 	}

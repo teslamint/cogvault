@@ -258,13 +258,16 @@ JOIN latest lt ON l.source_path = lt.source_path
              AND l.digested_at = lt.max_at
 WHERE l.llm_model = ?
   AND (
-    (l.status = 'failed' AND l.attempts >= 3)
+    (l.status = 'failed' AND l.attempts >= ?)
     OR l.status = 'refused'
   );
 ```
 
-The hardcoded `3` mirrors `maxAttempts` in `ingest.go`. If `maxAttempts`
-becomes configurable, the query must accept it as a parameter.
+The attempts threshold is bound as a query parameter from `maxAttempts` in
+`ingest.go` (currently 3) rather than inlined: `ingest.go` already gates
+re-digestion on `prev.attempts >= maxAttempts`, and a second literal would
+drift if the constant changes. If `maxAttempts` later becomes configurable,
+only the binding site changes.
 
 **Timestamp ordering caveat**: `digested_at` is RFC3339Nano text, which strips
 trailing fractional-second zeros (`…05.1Z` sorts above `…05.11Z`

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 	"github.com/teslamint/cogvault/internal/config"
@@ -65,27 +66,71 @@ func runFetch(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("read response: %w", err)
 	}
+	// A URL that returns binary media (PDF, image) would otherwise be
+	// deposited as a .md capture and pushed to the LLM digest as garbage.
+	// Two gates: the declared Content-Type (when present) and a sniff of
+	// the body itself — hosts that lie (`text/plain` over a PDF) or omit
+	// the header must not slip binary through. httpDetectContentType
+	// returns the sniffed type of the first 512 bytes.
+	if ct := resp.Header.Get("Content-Type"); ct != "" && !isTextContentType(ct) {
+		return fmt.Errorf("fetch %s: unsupported Content-Type %q; expected a text response", rawURL, ct)
+	}
+	if sniffed := http.DetectContentType(body); !isTextContentType(sniffed) {
+		return fmt.Errorf("fetch %s: response body sniffs as %q; expected text", rawURL, sniffed)
+	}
+	if !utf8.Valid(body) {
+		return fmt.Errorf("fetch %s: response body is not valid UTF-8", rawURL)
+	}
 
 	name, _ := cmd.Flags().GetString("name")
 	if name == "" {
 		name = slugFromURL(rawURL)
 	}
+	// The name ends up inside filepath.Join(srcDir, name); a user-supplied
+	// name with separators or ".." could escape the source directory. The
+	// CLI runs with local-user trust, unlike the MCP boundary, but staying
+	// consistent with the repo's own storage-layer traversal protection
+	// costs one check. Validated before the ".md" suffix is appended so a
+	// bare ".." cannot become a legal-looking "...md".
+	if name != filepath.Base(name) || name == "." || name == ".." {
+		return fmt.Errorf("--name: %q must be a plain filename", name)
+	}
 	if !strings.HasSuffix(name, ".md") {
 		name += ".md"
 	}
-
-	outPath := filepath.Join(srcDir, name)
 	if err := os.MkdirAll(srcDir, 0o755); err != nil {
 		return fmt.Errorf("create source dir: %w", err)
 	}
+	outPath := filepath.Join(srcDir, name)
 
 	content := formatFetchedContent(rawURL, body)
-	if err := os.WriteFile(outPath, []byte(content), 0o644); err != nil {
+	// Temp-file + rename: a crash mid os.WriteFile leaves a partial capture
+	// in the source directory; atomic replacement prevents that.
+	tmp := outPath + ".tmp"
+	if err := os.WriteFile(tmp, []byte(content), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, outPath); err != nil {
+		_ = os.Remove(tmp)
 		return fmt.Errorf("write %s: %w", outPath, err)
 	}
 
 	cmd.Printf("saved %s (%d bytes) → run cogvault ingest to digest\n", outPath, len(content))
 	return nil
+}
+
+// isTextContentType reports whether a Content-Type header names a text-ish
+// type fetch is willing to store as a markdown capture. An absent header is
+// allowed (some plain-file hosts omit it) and left to the UTF-8 gate.
+func isTextContentType(ct string) bool {
+	mt := strings.TrimSpace(strings.SplitN(ct, ";", 2)[0])
+	mt = strings.ToLower(mt)
+	switch mt {
+	case "", "text/plain", "text/markdown", "text/x-markdown", "text/html",
+		"application/json", "application/xml", "text/xml":
+		return true
+	}
+	return strings.HasPrefix(mt, "text/")
 }
 
 func slugFromURL(rawURL string) string {
@@ -100,17 +145,28 @@ func slugFromURL(rawURL string) string {
 	}
 	path = strings.ReplaceAll(path, "/", "-")
 	path = strings.ReplaceAll(path, " ", "-")
-	if len(path) > 80 {
-		path = path[:80]
-	}
+	path = truncateRunes(path, 80)
 	return "web-" + path
+}
+
+// truncateRunes cuts s to at most n runes without splitting a multi-byte
+// character; a byte-slice cut would produce invalid UTF-8 filenames from
+// non-ASCII URLs.
+func truncateRunes(s string, n int) string {
+	runes := []rune(s)
+	if len(runes) <= n {
+		return s
+	}
+	return string(runes[:n])
 }
 
 func formatFetchedContent(sourceURL string, body []byte) string {
 	var b strings.Builder
 	b.WriteString("---\n")
-	b.WriteString(fmt.Sprintf("source_url: %s\n", sourceURL))
-	b.WriteString(fmt.Sprintf("fetched_at: %s\n", time.Now().UTC().Format("2006-01-02")))
+	// Quoted: a URL containing " #" would otherwise start a YAML comment
+	// and truncate the value at parse time.
+	fmt.Fprintf(&b, "source_url: %q\n", sourceURL)
+	fmt.Fprintf(&b, "fetched_at: %s\n", time.Now().UTC().Format("2006-01-02"))
 	b.WriteString("---\n\n")
 	b.Write(body)
 	return b.String()

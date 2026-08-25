@@ -3,14 +3,14 @@ package storage
 import (
 	"errors"
 	"fmt"
+	"github.com/teslamint/cogvault/internal/adapter"
+	"github.com/teslamint/cogvault/internal/config"
+	cverr "github.com/teslamint/cogvault/internal/errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/teslamint/cogvault/internal/config"
-	cverr "github.com/teslamint/cogvault/internal/errors"
 )
 
 type FSStorage struct {
@@ -264,7 +264,7 @@ func (fs *FSStorage) resolvePath(path string) (string, string, error) {
 	if filepath.IsAbs(path) {
 		return "", "", fmt.Errorf("storage: %s: %w", path, cverr.ErrTraversal)
 	}
-	if containsDotDot(path) {
+	if adapter.ContainsDotDot(path) {
 		return "", "", fmt.Errorf("storage: %s: %w", path, cverr.ErrTraversal)
 	}
 
@@ -293,7 +293,7 @@ func (fs *FSStorage) resolvePath(path string) (string, string, error) {
 func (fs *FSStorage) isExcludeRead(path string) bool {
 	cleanedPath := filepath.Clean(path)
 	for _, entry := range fs.cfg.ExcludeRead {
-		if hasPathPrefix(cleanedPath, filepath.Clean(entry)) {
+		if adapter.HasPathPrefix(cleanedPath, filepath.Clean(entry)) {
 			return true
 		}
 	}
@@ -303,23 +303,8 @@ func (fs *FSStorage) isExcludeRead(path string) bool {
 func (fs *FSStorage) isAllExcluded(path string) bool {
 	cleanedPath := filepath.Clean(path)
 	for _, entry := range fs.cfg.AllExcluded() {
-		if hasPathPrefix(cleanedPath, filepath.Clean(entry)) {
+		if adapter.HasPathPrefix(cleanedPath, filepath.Clean(entry)) {
 			return true
-		}
-	}
-	return false
-}
-
-func hasPathPrefix(path, prefix string) bool {
-	return path == prefix || strings.HasPrefix(path, prefix+string(os.PathSeparator))
-}
-
-func containsDotDot(path string) bool {
-	for _, sep := range []string{"/", string(os.PathSeparator)} {
-		for _, component := range strings.Split(path, sep) {
-			if component == ".." {
-				return true
-			}
 		}
 	}
 	return false

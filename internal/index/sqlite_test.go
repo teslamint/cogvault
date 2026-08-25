@@ -549,6 +549,34 @@ func TestSearchEmptyResult(t *testing.T) {
 	}
 }
 
+func TestSearchMultiWordNonAdjacent(t *testing.T) {
+	// Per-token AND matching: "hacking bitcoin" must find a page containing
+	// both words far apart — the old whole-phrase quoting required them
+	// adjacent and missed it (F1/SC3).
+	root := t.TempDir()
+	idx := newTestIndex(t, root, testCfg())
+
+	idx.Add("a.md", "hacking techniques explained at length then bitcoin mining", map[string]string{"title": "A"})
+	idx.Add("b.md", "gardening tips only", map[string]string{"title": "B"})
+
+	results, err := idx.Search("hacking bitcoin", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Path != "a.md" {
+		t.Fatalf("results = %+v, want a.md only", results)
+	}
+}
+
+func TestMatchQueryQuoting(t *testing.T) {
+	if got := matchQuery(`say "hi" now`); got != `"say" """hi""" "now"` {
+		t.Fatalf("matchQuery = %q", got)
+	}
+	if got := matchQuery("  "); got != `""` {
+		t.Fatalf("matchQuery(whitespace) = %q, want empty quoted token", got)
+	}
+}
+
 func TestSearchEmptyQuery(t *testing.T) {
 	root := t.TempDir()
 	idx := newTestIndex(t, root, testCfg())
@@ -714,6 +742,43 @@ func TestRebuild(t *testing.T) {
 	}
 	if fm.Path != "notes/test.md" {
 		t.Fatalf("Path = %q", fm.Path)
+	}
+}
+
+func TestRebuildClearsEmbeddings(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, filepath.Join(root, "notes", "test.md"), "# Test\nBody")
+
+	cfg := testCfg()
+	store := storage.NewFSStorage(root, cfg)
+	adpt := obsidian.New()
+
+	idx := newTestIndex(t, root, cfg)
+	if err := idx.InitEmbeddingsTable(); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.Add("notes/test.md", "# Test\nBody", map[string]string{"title": "Test"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.StoreEmbedding("notes/test.md", "hash1", "m1", []float32{1, 0}); err != nil {
+		t.Fatal(err)
+	}
+	// An orphan: the page will be gone at rebuild time.
+	if err := idx.StoreEmbedding("notes/gone.md", "hash2", "m1", []float32{0, 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := idx.Rebuild(store, adpt); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+
+	if _, err := idx.GetEmbedding("notes/gone.md", "m1"); err == nil {
+		t.Fatal("orphan embedding survived Rebuild")
+	}
+	// Rebuild without an embeddings table must not fail.
+	idx2 := newTestIndex(t, t.TempDir(), testCfg())
+	if err := idx2.Rebuild(store, adpt); err != nil {
+		t.Fatalf("Rebuild without embeddings table: %v", err)
 	}
 }
 

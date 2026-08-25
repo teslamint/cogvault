@@ -3,14 +3,14 @@ package main
 import (
 	"errors"
 	"fmt"
-	"log/slog"
-	"os/exec"
-
 	"github.com/spf13/cobra"
 	"github.com/teslamint/cogvault/internal/index"
 	"github.com/teslamint/cogvault/internal/ingest"
 	"github.com/teslamint/cogvault/internal/llm"
 	"github.com/teslamint/cogvault/internal/storage"
+	"log/slog"
+	"os/exec"
+	"time"
 )
 
 type reportNotifier interface {
@@ -47,15 +47,17 @@ func runIngest(cmd *cobra.Command, args []string) error {
 
 	var adpt llm.Adapter
 	if !dryRun {
+		timeout := time.Duration(cfg.LLM.TimeoutSeconds) * time.Second
+		opts := []llm.Option{llm.WithTimeout(timeout)}
 		switch cfg.LLM.Backend {
 		case "ollama":
-			adpt = llm.NewOllama(cfg.LLM.BaseURL, cfg.LLM.Model)
+			adpt = llm.NewOllama(cfg.LLM.BaseURL, cfg.LLM.Model, opts...)
 		default:
 			binPath, err := exec.LookPath("claude")
 			if err != nil {
 				return fmt.Errorf("claude CLI not found in PATH; install Claude Code or add it to PATH")
 			}
-			adpt = llm.NewClaudeCode(binPath, cfg.LLM.Model)
+			adpt = llm.NewClaudeCode(binPath, cfg.LLM.Model, opts...)
 		}
 	}
 

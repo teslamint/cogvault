@@ -227,10 +227,45 @@ func (s *SQLiteIndex) Rebuild(store storage.Storage, adpt adapter.Adapter) error
 		s.mu.Unlock()
 		return fmt.Errorf("index.Rebuild: %w", err)
 	}
+	// Embeddings are keyed by (path, model) with no FK to file_meta, so a
+	// bulk clear that skips this table leaves permanent orphan rows for
+	// deleted pages — rows the per-path Remove path does clean up. The
+	// table may legitimately not exist yet (embeddings never used); check
+	// sqlite_master rather than sniffing error strings, which are not an
+	// API contract. A failed existence probe aborts the rebuild instead of
+	// silently skipping cleanup.
+	exists, err := tableExists(s.db, "embeddings")
+	if err != nil {
+		s.mu.Unlock()
+		return fmt.Errorf("index.Rebuild: probe embeddings table: %w", err)
+	}
+	if exists {
+		if _, err := s.db.Exec(`DELETE FROM embeddings`); err != nil {
+			s.mu.Unlock()
+			return fmt.Errorf("index.Rebuild: %w", err)
+		}
+	}
 	s.mu.Unlock()
 
-	_, _, _, err := s.CheckConsistency(store, adpt, true)
+	_, _, _, err = s.CheckConsistency(store, adpt, true)
 	return err
+}
+
+// tableExists reports whether a table or view with the given name exists.
+// A query failure is returned, not folded into false: the caller must be
+// able to distinguish "absent" from "cannot tell".
+func tableExists(db *sql.DB, name string) (bool, error) {
+	var one int
+	err := db.QueryRow(
+		`SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name = ?`, name,
+	).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *SQLiteIndex) Search(query string, limit int) ([]Result, error) {
@@ -257,7 +292,7 @@ func (s *SQLiteIndex) Search(query string, limit int) ([]Result, error) {
 }
 
 func (s *SQLiteIndex) searchFTS(query string, limit int) ([]Result, error) {
-	escaped := escapeMatch(query)
+	escaped := matchQuery(query)
 
 	q := `SELECT f.path, f.title, f.type, f.category, snippet(wiki_fts, 2, '', '', '...', 32), rank
 		FROM wiki_fts JOIN file_meta f ON wiki_fts.path = f.path
@@ -294,11 +329,10 @@ func (s *SQLiteIndex) searchLIKE(query string, limit int) ([]Result, error) {
 
 	q := `SELECT f.path, f.title, f.type, f.category, wiki_fts.content
 		FROM wiki_fts JOIN file_meta f ON wiki_fts.path = f.path
-		WHERE wiki_fts.content LIKE ? ESCAPE '\'`
-	args := []any{pattern}
-
-	q += ` LIMIT ?`
-	args = append(args, limit)
+		WHERE wiki_fts.content LIKE ? ESCAPE '\'
+		ORDER BY f.path
+		LIMIT ?`
+	args := []any{pattern, limit}
 
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
@@ -423,7 +457,7 @@ func (s *SQLiteIndex) searchSimilarFTS(path string, limit int) ([]Result, error)
 		return []Result{}, nil
 	}
 
-	escaped := escapeMatch(query)
+	escaped := matchQuery(query)
 	rows, err := s.db.Query(
 		`SELECT f.path, f.title, f.type, f.category, snippet(wiki_fts, 2, '', '', '...', 32), rank
 		FROM wiki_fts JOIN file_meta f ON wiki_fts.path = f.path
@@ -576,7 +610,7 @@ func (s *SQLiteIndex) CheckConsistency(store storage.Storage, adpt adapter.Adapt
 }
 
 func (s *SQLiteIndex) loadIndexedHashes() (map[string]fileState, error) {
-	rows, err := s.db.Query(`SELECT path, content_hash, size, mtime FROM file_meta`)
+	rows, err := s.db.Query(`SELECT path, size, mtime FROM file_meta`)
 	if err != nil {
 		return nil, err
 	}
@@ -586,7 +620,7 @@ func (s *SQLiteIndex) loadIndexedHashes() (map[string]fileState, error) {
 	for rows.Next() {
 		var path string
 		var st fileState
-		if err := rows.Scan(&path, &st.hash, &st.size, &st.mtime); err != nil {
+		if err := rows.Scan(&path, &st.size, &st.mtime); err != nil {
 			return nil, err
 		}
 		indexed[path] = st
@@ -615,7 +649,6 @@ type changeEntry struct {
 }
 
 type fileState struct {
-	hash  string
 	size  int64
 	mtime string
 }
@@ -630,8 +663,25 @@ func contentHash(data []byte) string {
 	return fmt.Sprintf("%x", h)
 }
 
-func escapeMatch(query string) string {
-	return `"` + strings.ReplaceAll(query, `"`, `""`) + `"`
+// matchQuery builds an FTS5 MATCH expression from a free-text query: every
+// whitespace-separated token is quoted individually and joined by implicit
+// AND. Quoting the whole query (the old escapeMatch) turned any multi-word
+// query into a strict phrase match — "bitcoin hacking" only matched the
+// adjacent phrase, missing "hacking … bitcoin" — the documented F1/SC3
+// weakness. Per-token quoting keeps each token exact (no interpretation of
+// user quotes as FTS syntax) while AND-ing across the query. With the
+// trigram tokenizer a quoted token matches its substring trigrams, so short
+// CJK tokens still work.
+func matchQuery(query string) string {
+	tokens := strings.Fields(query)
+	if len(tokens) == 0 {
+		return `""`
+	}
+	quoted := make([]string, len(tokens))
+	for i, tok := range tokens {
+		quoted[i] = `"` + strings.ReplaceAll(tok, `"`, `""`) + `"`
+	}
+	return strings.Join(quoted, " ")
 }
 
 func escapeLike(s string) string {

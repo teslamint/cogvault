@@ -56,8 +56,12 @@ type ClaudeCode struct {
 	maxStderr int           // 0 => maxStderrBytes; overridden in tests
 }
 
-func NewClaudeCode(binPath, model string) *ClaudeCode {
-	return &ClaudeCode{binPath: binPath, model: model}
+func NewClaudeCode(binPath, model string, opts ...Option) *ClaudeCode {
+	ao := adapterOptions{}
+	for _, opt := range opts {
+		opt(&ao)
+	}
+	return &ClaudeCode{binPath: binPath, model: model, timeout: ao.timeout}
 }
 
 func (c *ClaudeCode) Name() string { return "claudecode" }

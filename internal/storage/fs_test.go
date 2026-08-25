@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/teslamint/cogvault/internal/adapter"
 	"github.com/teslamint/cogvault/internal/config"
 	cverr "github.com/teslamint/cogvault/internal/errors"
 )
@@ -382,7 +383,7 @@ func TestEmptyPathRejected(t *testing.T) {
 	}
 }
 
-func TestContainsDotDot(t *testing.T) {
+func TestContainsDotDotDelegatesToAdapter(t *testing.T) {
 	tests := []struct {
 		path string
 		want bool
@@ -396,8 +397,8 @@ func TestContainsDotDot(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		if got := containsDotDot(tt.path); got != tt.want {
-			t.Fatalf("containsDotDot(%q) = %v, want %v", tt.path, got, tt.want)
+		if got := adapter.ContainsDotDot(tt.path); got != tt.want {
+			t.Fatalf("adapter.ContainsDotDot(%q) = %v, want %v", tt.path, got, tt.want)
 		}
 	}
 }
