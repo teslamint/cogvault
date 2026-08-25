@@ -1,0 +1,19 @@
+#!/bin/sh
+# Fake `git` CLI for internal/mcp gitAutoCommit timeout tests. `add` always
+# succeeds immediately. `commit` sleeps when GIT_FAKE_COMMIT_SLEEP is set
+# (simulating a wedged index.lock), otherwise succeeds immediately.
+
+case "$*" in
+*" add "*)
+	exit 0
+	;;
+*" commit "*)
+	if [ -n "$GIT_FAKE_COMMIT_SLEEP" ]; then
+		sleep "$GIT_FAKE_COMMIT_SLEEP"
+	fi
+	exit 0
+	;;
+*)
+	exit 0
+	;;
+esac
