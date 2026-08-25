@@ -3,11 +3,14 @@
 package ingest
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 )
 
 const wantNotificationScript = `on run argv
@@ -80,5 +83,21 @@ func TestOsascriptNotifyPassesContentOnlyAsArguments(t *testing.T) {
 				t.Fatalf("osascript argv = %#v, want %#v", got, want)
 			}
 		})
+	}
+}
+
+func TestOsascriptNotifyContextHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := osascriptNotifyContext(ctx, "title", "body")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("osascriptNotifyContext() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestNotificationTimeout(t *testing.T) {
+	if notificationTimeout != 5*time.Second {
+		t.Fatalf("notificationTimeout = %s, want 5s", notificationTimeout)
 	}
 }

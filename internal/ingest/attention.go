@@ -27,7 +27,7 @@ func AttentionRows(dbPath, model string) ([]AttentionRow, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer l.close()
+	defer func() { _ = l.close() }()
 
 	rows, err := l.attentionRows(model)
 	if err != nil {
