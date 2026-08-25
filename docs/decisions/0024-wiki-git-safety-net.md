@@ -62,10 +62,13 @@ Accepted and implemented (2026-08-25):
   + `CommitsOnWrite()`/`CommitsOnIngest()` predicates. Default `"off"`;
   invalid values rejected.
 - `internal/mcp/tools.go`: `gitAutoCommit(root, path, message)` takes an
-  explicit commit message and is bounded by `gitCommitTimeout` (10s, a `var`
-  so tests can shrink it). `wiki_write` calls it only when
-  `cfg.Git.CommitsOnWrite()`; `wiki_delete`'s own call is unconditional,
-  unchanged from before this decision.
+  explicit commit message; `add` and `commit` each get their own
+  independent `gitCommitTimeout`-bounded context (10s, a `var` so tests can
+  shrink it). `wiki_write` calls it only when `cfg.Git.CommitsOnWrite()`;
+  `wiki_delete`'s own call is unconditional (unchanged from before this
+  decision), though the commit itself only lands when the deleted file was
+  already git-tracked — `git add` on a never-tracked path fails with no
+  matching pathspec.
 - `cmd/cogvault/ingest.go`: `postIngestGitCommit` runs after a successful
   `cogvault ingest` run when `cfg.Git.CommitsOnIngest()` and
   `report.Digested > 0`; `git add -A -- .` + one `git commit -m "wiki: ingest
@@ -90,13 +93,41 @@ Accepted and implemented (2026-08-25):
   guidance.
 - Tests: `internal/config/config_test.go` (defaults, all three modes,
   invalid rejection); `internal/mcp/tools_test.go` (`write` commits,
-  `off` does not, `wiki_delete` always commits regardless of mode, a
-  non-git `wiki_dir` logs and does not error, the timeout bounds a wedged
-  commit via a fake `git` binary at `internal/mcp/testdata/bin/git`);
-  `cmd/cogvault/ingest_git_commit_test.go` (`write+ingest` commits after a
-  digesting run, `off` and `write`-alone do not, `--dry-run` does not, a
-  zero-digest run does not, a `wikiDir` nested inside a larger repo does
-  not stage or commit files outside `wikiDir`
+  `off` does not, `wiki_delete` calls the commit path regardless of mode
+  when the deleted file was already git-tracked, a non-git `wiki_dir` logs
+  and does not error, the timeout bounds a wedged commit, a slow-but-not-
+  wedged add does not starve commit's own timeout budget
+  (`TestGitAutoCommit_SlowAddDoesNotStarveCommitTimeout`) via a fake `git`
+  binary at `internal/mcp/testdata/bin/git`); `cmd/cogvault/ingest_git_commit_test.go`
+  (`write+ingest` commits after a digesting run, `off` and `write`-alone do
+  not, `--dry-run` does not, a zero-digest run does not, a `wikiDir` nested
+  inside a larger repo does not stage or commit files outside `wikiDir`
   (`TestIngestGitCommit_NestedWikiDirDoesNotStageOutsideFiles`, confirmed
-  to fail against the pre-fix `-A`-without-pathspec code), the timeout
-  bounds a wedged commit reusing the same fake `git` binary).
+  to fail against the pre-fix `-A`-without-pathspec code), a slow-but-not-
+  wedged add does not starve commit's own budget
+  (`TestIngestGitCommit_SlowAddDoesNotStarveCommitTimeout`, confirmed to
+  fail against the pre-fix shared-context code), the timeout bounds a
+  wedged commit reusing the same fake `git` binary).
+
+**Second correction pass** (same day, via `coderabbit review --committed
+--base main` after the webhook-triggered PR review stalled for several
+hours with zero artifacts): three findings, all reproduced before fixing.
+
+1. `gitAutoCommit` and `postIngestGitCommit` shared one
+   `context.WithTimeout` across both their `git add` and `git commit`
+   subprocesses. A slow-but-not-wedged `add` (e.g. a large working-tree
+   scan) could consume most of the shared budget, leaving `commit` too
+   little time and silently dropping an otherwise-successful commit.
+   Reproduced with `exec.CommandContext` against a 100ms shared budget
+   split 80ms add / 50ms commit: add succeeded, commit was killed by
+   context exhaustion. Fixed to two independent per-command timeout
+   contexts in both functions; each is now bounded by its own full budget
+   regardless of how long the other command took.
+2. CLAUDE.md invariant 6 and `SPEC.md` §1.3/§8.8 claimed `wiki_delete`
+   "always" auto-commits its deletion. Reproduced in `/tmp`: `git add` on a
+   path git never tracked (the normal case for any page written while
+   `git.auto_commit: off`, the default) fails with "did not match any
+   files" (exit 128), so no commit is created — the delete leaves no git
+   record at all in that case. The call is unconditional (it always
+   *attempts*); the commit is not unconditional. Reworded in both
+   documents, plus `DESIGN.md` §2.8.

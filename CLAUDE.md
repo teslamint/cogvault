@@ -16,7 +16,11 @@ Read these non-obvious invariants before editing:
    Owner: `DESIGN.md`, `docs/solutions/database-issues/sqlite-pool-pragma-and-busy-snapshot.md`
 5. Ingest has a cross-process single-writer lock so scheduled and manual runs never overlap.
    Owner: `docs/decisions/0021-v2-refounding.md` D2/D4, `DESIGN.md`
-6. `wiki_delete` always auto-commits its own deletion to git. `wiki_write`
+6. `wiki_delete` attempts to auto-commit its own deletion to git, but only
+   actually commits when the deleted file was already git-tracked —
+   `git add` on a path git never tracked fails (exit 128, no matching
+   pathspec), so a page `wiki_write` never committed (the default,
+   `git.auto_commit: off`) produces no delete-commit either. `wiki_write`
    additionally auto-commits when `git.auto_commit` is `write` or
    `write+ingest`; `cogvault ingest` additionally auto-commits only under
    `write+ingest` specifically — `write` alone covers `wiki_write` but not

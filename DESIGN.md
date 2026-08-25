@@ -301,15 +301,20 @@ five are read-only, non-destructive. `IdempotentHint`/`OpenWorldHint` stay at
 "wiki root" instead of "vault". `handleWikiSearch` calls `idx.Search(query,
 limit)`. `handleWikiDelete` calls `store.Delete`, removes the path from the
 index if it was indexed, then unconditionally calls `gitAutoCommit` (0024:
-takes a commit message parameter, `context.WithTimeout(..., gitCommitTimeout)`
-bounds each `git add`/`git commit` subprocess to 10s), best-effort `git add`s
-and `git commit`s the deletion when `wiki_dir` is a git repository — failures
-are logged, not returned as a tool error (§2.10 covers the authorization
-layer that gates this over the network). `handleWikiWrite` calls the same
-`gitAutoCommit` after a successful write only when `cfg.Git.CommitsOnWrite()`
-(default false) — this is the only conditional caller; `wiki_delete`'s call
-is unconditional and predates 0024. Instructions/`mapError`/write-then-index
-otherwise unchanged.
+takes a commit message parameter; `add` and `commit` each get their own
+independent `context.WithTimeout(..., gitCommitTimeout)`, 10s — a shared
+context would let a slow add starve commit's own budget), best-effort
+`git add`s and `git commit`s the deletion when `wiki_dir` is a git
+repository — failures are logged, not returned as a tool error (§2.10
+covers the authorization layer that gates this over the network).
+"Unconditional" means the call always happens, not that it always commits:
+`git add` on a path git never tracked (e.g. under the default
+`git.auto_commit: off`, where `wiki_write` never committed it) fails with
+no matching pathspec, so that delete produces no commit either.
+`handleWikiWrite` calls the same `gitAutoCommit` after a successful write
+only when `cfg.Git.CommitsOnWrite()` (default false) — this is the only
+conditional caller; `wiki_delete`'s call is unconditional and predates 0024.
+Instructions/`mapError`/write-then-index otherwise unchanged.
 
 ### 2.9 cmd/cogvault
 

@@ -52,8 +52,9 @@ directories the ingest pipeline reads directly (0021).
   verified headless PDF reading works, see 0021 D6).
 - Watch mode / resident daemon (batch + launchd chosen instead).
 - General git auto-commit is opt-in, off by default (`git.auto_commit`, §3.1,
-  0024). `wiki_delete` always auto-commits its own deletion regardless of
-  this setting (§8.8, unchanged since before 0024).
+  0024). `wiki_delete` attempts to auto-commit its own deletion regardless of
+  this setting, but only actually commits when the deleted file was already
+  git-tracked (§8.8, unchanged since before 0024).
 
 Six entries that this list carried through Phase 1 have since shipped and are
 gone from it: URL/web extraction, the local LLM backend, periodic `cogvault
@@ -542,14 +543,19 @@ Source (JSON). Errors: `ErrNotFound`, `ErrPermission`, `ErrNotMarkdown`.
 
 `path: string` (required) → `{status:"deleted", path}`. Deletes the file from
 `wiki_dir` and removes it from the index if it was indexed. Side effect:
-always auto-commits the deletion to git (`git add` + `git commit -m "wiki:
-delete <path>"`) when `wiki_dir` is a git repository, regardless of
-`git.auto_commit` (§3.1) — this per-delete commit predates and is unaffected
-by that setting; a failed `git add`/`git commit` is logged, not returned as a
-tool error, and is bounded by a 10s subprocess timeout (0024). With
-`git.auto_commit: off` (the default), this auto-commit records only the
-deletion — `wiki_write` overwrites without committing, and nothing commits on
-ingest, so it does **not** make the wiki recoverable (see
+attempts to auto-commit the deletion to git (`git add` + `git commit -m
+"wiki: delete <path>"`) when `wiki_dir` is a git repository, regardless of
+`git.auto_commit` (§3.1) — this per-delete commit attempt predates and is
+unaffected by that setting. The commit only actually lands when the deleted
+file was already git-tracked: `git add` on a path git never tracked (e.g. a
+page `wiki_write` wrote under the default `git.auto_commit: off`, which
+never commits) fails with no matching pathspec, so the delete produces no
+commit either — deleting an untracked page leaves no git record of the
+deletion at all. A failed `git add`/`git commit` is logged, not returned as
+a tool error, and is bounded by a 10s subprocess timeout (0024). With
+`git.auto_commit: off` (the default), a delete commit that does land records
+only the deletion — `wiki_write` overwrites without committing, and nothing
+commits on ingest, so it does **not** make the wiki recoverable (see
 `docs/deployment/remote-mcp.md` "Security posture"). Setting `git.auto_commit`
 to `write` or `write+ingest` narrows, but does not eliminate, that gap — see
 §3.1 and the deployment guide. Errors: `ErrNotFound`,
