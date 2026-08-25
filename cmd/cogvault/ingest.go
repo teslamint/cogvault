@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"github.com/spf13/cobra"
@@ -93,6 +94,9 @@ func runIngest(cmd *cobra.Command, args []string) error {
 	if !dryRun && cfg.LLM.EmbeddingModel != "" && report != nil && report.Digested > 0 {
 		postIngestEmbed(cmd, idx, store, cfg.LLM.EmbeddingModel, cfg.LLM.EmbeddingBaseURL)
 	}
+	if !dryRun && cfg.Git.CommitsOnIngest() && report != nil && report.Digested > 0 {
+		postIngestGitCommit(cmd, cfg.WikiDir)
+	}
 	return nil
 }
 
@@ -126,5 +130,41 @@ func postIngestEmbed(cmd *cobra.Command, idx *index.SQLiteIndex, store *storage.
 	cmd.Printf("post-ingest embed: %d embedded, %d skipped, %d failed\n", res.embedded, res.skipped, res.failed)
 	if res.failed > 0 {
 		cmd.PrintErrln("warning: some post-ingest embeddings failed")
+	}
+}
+
+// ingestGitCommitTimeout bounds the git add/commit subprocess pair so a
+// wedged index.lock cannot block the CLI command indefinitely (0024). It
+// mirrors internal/mcp/tools.go's gitCommitTimeout; the two packages stay
+// independent per DESIGN.md's unidirectional dependency graph (cmd depends
+// on mcp/ingest, not the reverse), so the constant is duplicated rather than
+// shared. A var, not a const, so tests can shrink it to exercise the
+// timeout path without a multi-second sleep.
+var ingestGitCommitTimeout = 10 * time.Second
+
+// postIngestGitCommit commits the whole wiki tree once after a successful
+// ingest run that digested at least one file (git.auto_commit: write+ingest,
+// 0024). Best-effort: failures log, never fail the ingest command — same
+// contract as wiki_write/wiki_delete's per-file auto-commit.
+func postIngestGitCommit(cmd *cobra.Command, wikiDir string) {
+	ctx, cancel := context.WithTimeout(cmd.Context(), ingestGitCommitTimeout)
+	defer cancel()
+
+	// -- . scopes the add to wikiDir's own working directory: without it, a
+	// wikiDir nested inside a larger git repository (wikiDir is a plain
+	// subdirectory, not its own git root, in that layout) would stage
+	// changes anywhere in the enclosing repo's working tree, since `git -C
+	// wikiDir add -A` still resolves against the repo root, not wikiDir.
+	addCmd := exec.CommandContext(ctx, "git", "-C", wikiDir, "add", "-A", "--", ".")
+	if err := addCmd.Run(); err != nil {
+		slog.Warn("post-ingest git add failed", "error", err)
+		return
+	}
+	commitCmd := exec.CommandContext(ctx, "git", "-C", wikiDir, "commit", "-m", "wiki: ingest snapshot")
+	if err := commitCmd.Run(); err != nil {
+		// A no-op ingest tree (all digests wrote identical content, or the
+		// working tree already matched) makes "nothing to commit" exit
+		// nonzero; that is expected, not a real failure, so it only logs.
+		slog.Warn("post-ingest git commit failed", "error", err)
 	}
 }
