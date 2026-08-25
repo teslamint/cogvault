@@ -2,11 +2,14 @@ package ingest
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"log/slog"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/teslamint/cogvault/internal/llm"
 )
 
 func TestNotifyOneEntry(t *testing.T) {
@@ -134,5 +137,88 @@ func TestNewlyExhaustedNotifies(t *testing.T) {
 	want := "1건 주의 필요 — exhausted.md (invalid page)"
 	if body != want {
 		t.Fatalf("body = %q, want %q", body, want)
+	}
+}
+
+func TestRunNewlyExhaustedNotifiesOnce(t *testing.T) {
+	m := &mockLLM{fn: func(_ llm.DigestRequest) (*llm.DigestResult, error) {
+		return nil, errPermanent
+	}}
+	h := newHarness(t, []string{"md"}, m)
+	h.runner.cfg.LLM.Model = "current-model"
+	src := h.write(t, "exhausted.md", "one")
+	hash := contentHash([]byte("one"))
+	if err := h.runner.ledger.upsert(ledgerRow{
+		sourcePath:  src,
+		contentHash: hash,
+		sourceDir:   h.srcDir,
+		status:      "failed",
+		attempts:    maxAttempts - 1,
+		lastError:   "digest: previous failure",
+		runOrigin:   "scheduled",
+		llmModel:    "current-model",
+	}); err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+
+	notifications := 0
+	h.runner.notifyFunc = func(_, _ string) error {
+		notifications++
+		return nil
+	}
+	report, err := h.runner.Run(context.Background(), RunOptions{Origin: "scheduled"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	h.runner.Notify(report)
+
+	if report.Failed != 1 || len(report.NewAttention) != 1 {
+		t.Fatalf("report = %+v, want failed=1 with one new attention", report)
+	}
+	if notifications != 1 {
+		t.Fatalf("notifications = %d, want 1", notifications)
+	}
+}
+
+func TestRunAlreadyExhaustedDoesNotNotify(t *testing.T) {
+	m := &mockLLM{fn: func(_ llm.DigestRequest) (*llm.DigestResult, error) {
+		return nil, errPermanent
+	}}
+	h := newHarness(t, []string{"md"}, m)
+	h.runner.cfg.LLM.Model = "current-model"
+	src := h.write(t, "exhausted.md", "one")
+	hash := contentHash([]byte("one"))
+	if err := h.runner.ledger.upsert(ledgerRow{
+		sourcePath:  src,
+		contentHash: hash,
+		sourceDir:   h.srcDir,
+		status:      "failed",
+		attempts:    maxAttempts,
+		lastError:   "digest: permanent failure",
+		runOrigin:   "scheduled",
+		llmModel:    "current-model",
+	}); err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+
+	notifications := 0
+	h.runner.notifyFunc = func(_, _ string) error {
+		notifications++
+		return nil
+	}
+	report, err := h.runner.Run(context.Background(), RunOptions{Origin: "scheduled"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	h.runner.Notify(report)
+
+	if report.Skipped != 1 || len(report.NewAttention) != 0 {
+		t.Fatalf("report = %+v, want skipped=1 with no new attention", report)
+	}
+	if len(m.requests) != 0 {
+		t.Fatalf("llm calls = %d, want 0", len(m.requests))
+	}
+	if notifications != 0 {
+		t.Fatalf("notifications = %d, want 0", notifications)
 	}
 }
