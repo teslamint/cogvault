@@ -78,8 +78,13 @@ func handleWikiWrite(root string, cfg *config.Config, store storage.Storage, idx
 
 		if strings.HasSuffix(strings.ToLower(path), ".md") {
 			src, parseErr := adpt.Parse(root, path, false)
-			if parseErr == nil {
-				_ = idx.Add(path, content, index.BuildMeta(src))
+			if parseErr != nil {
+				// The page is written; only the index update failed. The
+				// interval-gated consistency check heals the drift, but the
+				// operator should see why search may briefly miss it.
+				slog.Warn("wiki_write: parse for indexing failed", "path", path, "error", parseErr)
+			} else if err := idx.Add(path, content, index.BuildMeta(src)); err != nil {
+				slog.Warn("wiki_write: index add failed", "path", path, "error", err)
 			}
 		}
 
