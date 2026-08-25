@@ -255,3 +255,31 @@ func TestAttentionRowsEmptyLedger(t *testing.T) {
 		t.Fatalf("rows = %+v, want empty", got)
 	}
 }
+
+func TestAttentionRowsOrdersVariableRFC3339NanoChronologically(t *testing.T) {
+	l := newTestLedger(t)
+	const model = "current-model"
+
+	seed := []ledgerRow{
+		{sourcePath: "/src/fractional-resolved.md", contentHash: "old", digestedAt: "2026-08-25T00:00:00.1Z", status: "failed", attempts: 3, llmModel: model},
+		{sourcePath: "/src/fractional-resolved.md", contentHash: "new", digestedAt: "2026-08-25T00:00:00.11Z", status: "success", llmModel: model},
+		{sourcePath: "/src/fractional-attention.md", contentHash: "old", digestedAt: "2026-08-25T00:00:01.1Z", status: "success", llmModel: model},
+		{sourcePath: "/src/fractional-attention.md", contentHash: "new", digestedAt: "2026-08-25T00:00:01.11Z", status: "failed", attempts: 3, llmModel: model},
+	}
+	for _, row := range seed {
+		if err := l.upsert(row); err != nil {
+			t.Fatalf("upsert %s: %v", row.sourcePath, err)
+		}
+	}
+
+	got, err := l.attentionRows(model)
+	if err != nil {
+		t.Fatalf("attentionRows: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("rows = %+v, want only the chronologically newer failure", got)
+	}
+	if got[0].sourcePath != "/src/fractional-attention.md" || got[0].contentHash != "new" {
+		t.Fatalf("row = %+v, want the chronologically newer failure", got[0])
+	}
+}

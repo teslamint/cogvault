@@ -163,15 +163,35 @@ func (l *ledger) successRows() ([]ledgerRow, error) {
 
 func (l *ledger) attentionRows(model string) ([]ledgerRow, error) {
 	rows, err := l.db.Query(
-		`WITH latest AS (
-			SELECT source_path, MAX(rowid) AS max_id
+		`WITH normalized AS (
+			SELECT rowid AS row_id, source_path,
+			       CASE
+			         WHEN instr(digested_at, '.') = 0 THEN
+			           substr(digested_at, 1, length(digested_at) - 1) || '.000000000Z'
+			         ELSE
+			           substr(digested_at, 1, instr(digested_at, '.')) ||
+			           substr(
+			             substr(
+			               digested_at,
+			               instr(digested_at, '.') + 1,
+			               length(digested_at) - instr(digested_at, '.') - 1
+			             ) || '000000000',
+			             1,
+			             9
+			           ) || 'Z'
+			       END AS sort_key
 			FROM ingest_ledger
-			WHERE (source_path, digested_at) IN (
-				SELECT source_path, MAX(digested_at)
-				FROM ingest_ledger
-				GROUP BY source_path
-			)
+		), latest_time AS (
+			SELECT source_path, MAX(sort_key) AS max_key
+			FROM normalized
 			GROUP BY source_path
+		), latest AS (
+			SELECT n.source_path, MAX(n.row_id) AS max_id
+			FROM normalized n
+			JOIN latest_time lt
+			  ON n.source_path = lt.source_path
+			 AND n.sort_key = lt.max_key
+			GROUP BY n.source_path
 		)
 		SELECT l.source_path, l.content_hash, l.digested_at, l.last_error,
 		       l.attempts, l.llm_model, l.status
