@@ -27,6 +27,7 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(newGraphCmd())
 	cmd.AddCommand(newEmbedCmd())
 	cmd.AddCommand(newSimilarCmd())
+	cmd.AddCommand(newStatusCmd())
 	cmd.SetOut(os.Stdout)
 	return cmd
 }

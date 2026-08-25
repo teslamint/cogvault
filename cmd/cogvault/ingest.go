@@ -13,6 +13,12 @@ import (
 	"github.com/teslamint/cogvault/internal/storage"
 )
 
+type reportNotifier interface {
+	Notify(*ingest.Report)
+}
+
+var runIngestNotify = notifyAfterRun
+
 func newIngestCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "ingest",
@@ -74,6 +80,7 @@ func runIngest(cmd *cobra.Command, args []string) error {
 	if report != nil {
 		cmd.Print(report.String())
 	}
+	runIngestNotify(runner, report, scheduled, err)
 	if err != nil {
 		if errors.Is(err, ingest.ErrAlreadyRunning) {
 			return fmt.Errorf("ingest already running (lock held)")
@@ -85,6 +92,12 @@ func runIngest(cmd *cobra.Command, args []string) error {
 		postIngestEmbed(cmd, idx, store, cfg.LLM.EmbeddingModel, cfg.LLM.EmbeddingBaseURL)
 	}
 	return nil
+}
+
+func notifyAfterRun(notifier reportNotifier, report *ingest.Report, scheduled bool, runErr error) {
+	if scheduled && report != nil && runErr == nil {
+		notifier.Notify(report)
+	}
 }
 
 func postIngestEmbed(cmd *cobra.Command, idx *index.SQLiteIndex, store *storage.FSStorage, model, baseURL string) {

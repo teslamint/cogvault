@@ -1,0 +1,131 @@
+//go:build darwin
+
+package ingest
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"reflect"
+	"testing"
+	"time"
+)
+
+const wantNotificationScript = `on run argv
+	display notification (item 2 of argv) with title (item 1 of argv)
+end run`
+
+func init() {
+	if os.Getenv("COGVAULT_OSASCRIPT_BLOCK") == "1" {
+		time.Sleep(time.Hour)
+		os.Exit(0)
+	}
+
+	argsPath := os.Getenv("COGVAULT_OSASCRIPT_ARGS_PATH")
+	if argsPath == "" {
+		return
+	}
+
+	f, err := os.Create(argsPath)
+	if err != nil {
+		os.Exit(2)
+	}
+	err = json.NewEncoder(f).Encode(os.Args[1:])
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		os.Exit(2)
+	}
+	os.Exit(0)
+}
+
+func fakeOsascriptOnPath(t *testing.T) string {
+	t.Helper()
+	tmpDir := t.TempDir()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(executable, filepath.Join(tmpDir, "osascript")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", tmpDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return tmpDir
+}
+
+func TestOsascriptNotifyPassesContentOnlyAsArguments(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+	}{
+		{name: "quote", value: `before"after`},
+		{name: "backslash", value: `before\after`},
+		{name: "BEL", value: "before\aafter"},
+		{name: "newline", value: "before\nafter"},
+		{name: "Unicode separators", value: "before\u2028middle\u2029after"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := fakeOsascriptOnPath(t)
+			argsPath := filepath.Join(tmpDir, "args.json")
+			t.Setenv("COGVAULT_OSASCRIPT_ARGS_PATH", argsPath)
+
+			title := "title-" + tt.value
+			body := "body-" + tt.value
+			if err := osascriptNotify(title, body); err != nil {
+				t.Fatalf("osascriptNotify() error = %v", err)
+			}
+
+			data, err := os.ReadFile(argsPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			if err := json.Unmarshal(data, &got); err != nil {
+				t.Fatal(err)
+			}
+			want := []string{"-e", wantNotificationScript, title, body}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("osascript argv = %#v, want %#v", got, want)
+			}
+		})
+	}
+}
+
+func TestOsascriptNotifyContextHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := osascriptNotifyContext(ctx, "title", "body")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("osascriptNotifyContext() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestNotificationTimeout(t *testing.T) {
+	if notificationTimeout != 5*time.Second {
+		t.Fatalf("notificationTimeout = %s, want 5s", notificationTimeout)
+	}
+}
+
+func TestOsascriptNotifyTimesOutBlockingProcess(t *testing.T) {
+	fakeOsascriptOnPath(t)
+	t.Setenv("COGVAULT_OSASCRIPT_BLOCK", "1")
+
+	originalTimeout := notificationTimeout
+	notificationTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { notificationTimeout = originalTimeout })
+
+	started := time.Now()
+	err := osascriptNotify("title", "body")
+	if err == nil {
+		t.Fatal("osascriptNotify() error = nil, want timeout")
+	}
+	if elapsed := time.Since(started); elapsed >= time.Second {
+		t.Fatalf("osascriptNotify() elapsed = %s, want less than 1s", elapsed)
+	}
+}

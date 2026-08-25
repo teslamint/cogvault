@@ -196,7 +196,9 @@ type Runner struct { /* cfg, store, idx, llm, dbPath, ledger, seams */ }
 func New(cfg *config.Config, store storage.Storage, idx index.Index,
          llmAdapter llm.Adapter, dbPath string) (*Runner, error)
 func (r *Runner) Run(ctx context.Context, opts RunOptions) (*Report, error)
+func (r *Runner) Notify(report *Report)
 func (r *Runner) Close() error
+func AttentionRows(dbPath, model string) ([]AttentionRow, error)
 type RunOptions struct { DryRun bool; Limit int; Origin string }
 ```
 
@@ -229,12 +231,23 @@ the configured model and are skipped only while both model and content hash are
 unchanged; either change permits a re-attempt. Historical refused rows are not
 reclassified or migrated.
 
+`Run` adds a `NewAttention` entry when the current run first reaches an
+exhausted or refused state. `Notify` formats those entries for best-effort
+delivery after a successful scheduled run. The Darwin notifier passes the
+title and body as `osascript` arguments. It uses `exec.CommandContext` with a
+five-second timeout. Other platforms use a no-op notifier.
+
 **Ledger** (`ledger.go`): owns its **own** `sql.Open("sqlite", dsn)` to `db_path`
 with DSN pragmas `busy_timeout(5000)` + `journal_mode(WAL)` on **every** pooled
 connection (not a one-shot `PRAGMA` exec). The `index` package never touches the
 `ingest_ledger` table; WAL + busy_timeout make the second connection to the same
 DB file safe. DDL and transitions (`lookup`, `supersedePrevSuccess`, `upsert`) per
 SPEC §10.6.
+
+`AttentionRows` opens only the ledger connection. It selects the latest row
+for each source path with a fixed-width UTC nanosecond sort key. It returns
+exhausted and refused rows for the current model. A missing database returns
+an empty result without creating files.
 
 **Report** (`report.go`): builds the `Report` struct + a `String()` renderer;
 printing is the CLI's job. Actionable transient diagnostics flow unchanged from
@@ -275,6 +288,10 @@ vault flag is deleted. `wire.go`: `resolveConfigPath(cmd)` + `bootstrap(configPa
 flow (SPEC §9.1). `ingest.go` (new): flags → `ingest.RunOptions`, `exec.LookPath`
 for `claude` → `llm.NewClaudeCode`, prints `report.String()`, nonzero exit only on
 run-level failure.
+
+`status.go` loads the config and calls `ingest.AttentionRows` directly. It does
+not bootstrap storage, the index, or the ingest runner. Human output uses local
+timestamps. JSON preserves the stored canonical UTC timestamp.
 
 `serve.go`: `serve` takes `--transport` (`stdio` default, `sse`, or `http`),
 `--addr` (default `localhost:8080`, `sse`/`http` only), `--endpoint-path`
@@ -472,15 +489,17 @@ resolveConfigPath → Load → bootstrap(store/index/adapter) → CheckConsisten
 | `llm/llm.go` | Adapter interface, DigestRequest/Result, ErrTransient, ErrRefused |
 | `llm/claudecode.go` | `claude --print` backend; final-event parsing; refusal classification; safe diagnostic selection, canonicalization, and bound |
 | `ingest/ingest.go` | Runner: scan, hash/model gate, digest, classify, validate, write, index, ledger, lock, ctx |
-| `ingest/ledger.go` | `ingest_ledger` DDL + transitions; model-gated refused rows; own DB connection |
-| `ingest/report.go` | Report struct + String(); per-file normalized diagnostic |
+| `ingest/attention.go` | Exported attention rows and missing-database guard |
+| `ingest/ledger.go` | `ingest_ledger` DDL + transitions; latest attention query; own DB connection |
+| `ingest/notify_*.go` | Platform notification delivery; five-second Darwin process bound |
+| `ingest/report.go` | Report struct + String(); per-file diagnostic and new-attention items |
 | `mcp/server.go` | MCP server, instructions, tool registration + annotations |
 | `mcp/tools.go` | seven tools, mapError, listWithMeta (no scope), gitAutoCommit |
 | `httpauth/auth.go` | Config, Middleware, Mount, credential checks, resource bounds |
 | `httpauth/metadata.go` | Protected Resource Metadata handler |
 | `httpauth/oauth.go` | OAuthValidator (JWT validation via golang-jwt/jwt/v5) |
 | `httpauth/jwks.go` | JWKSCache (OIDC discovery + JWKS fetch, key decode) |
-| `cmd/cogvault/*` | cobra CLI: `--config`, init/search/serve/ingest |
+| `cmd/cogvault/*` | cobra CLI: `--config`, init/search/serve/ingest/status |
 | `Makefile` | build/install (with adhoc codesign at destination), test, clean |
 | `schema/schema.go` + `default_schema.md` | `go:embed` default schema |
 

@@ -161,6 +161,75 @@ func (l *ledger) successRows() ([]ledgerRow, error) {
 	return result, rows.Err()
 }
 
+func (l *ledger) attentionRows(model string) ([]ledgerRow, error) {
+	rows, err := l.db.Query(
+		`WITH normalized AS (
+			SELECT rowid AS row_id, source_path,
+			       CASE
+			         WHEN instr(digested_at, '.') = 0 THEN
+			           substr(digested_at, 1, length(digested_at) - 1) || '.000000000Z'
+			         ELSE
+			           substr(digested_at, 1, instr(digested_at, '.')) ||
+			           substr(
+			             substr(
+			               digested_at,
+			               instr(digested_at, '.') + 1,
+			               length(digested_at) - instr(digested_at, '.') - 1
+			             ) || '000000000',
+			             1,
+			             9
+			           ) || 'Z'
+			       END AS sort_key
+			FROM ingest_ledger
+		), latest_time AS (
+			SELECT source_path, MAX(sort_key) AS max_key
+			FROM normalized
+			GROUP BY source_path
+		), latest AS (
+			SELECT n.source_path, MAX(n.row_id) AS max_id
+			FROM normalized n
+			JOIN latest_time lt
+			  ON n.source_path = lt.source_path
+			 AND n.sort_key = lt.max_key
+			GROUP BY n.source_path
+		)
+		SELECT l.source_path, l.content_hash, l.digested_at, l.last_error,
+		       l.attempts, l.llm_model, l.status
+		FROM ingest_ledger l
+		JOIN latest lt ON l.rowid = lt.max_id
+		WHERE l.llm_model = ?
+		  AND ((l.status = 'failed' AND l.attempts >= ?)
+		       OR l.status = 'refused')`,
+		model,
+		maxAttempts,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("ingest.ledger.attentionRows: %w", err)
+	}
+	defer rows.Close()
+
+	var result []ledgerRow
+	for rows.Next() {
+		var row ledgerRow
+		if err := rows.Scan(
+			&row.sourcePath,
+			&row.contentHash,
+			&row.digestedAt,
+			&row.lastError,
+			&row.attempts,
+			&row.llmModel,
+			&row.status,
+		); err != nil {
+			return nil, fmt.Errorf("ingest.ledger.attentionRows scan: %w", err)
+		}
+		result = append(result, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("ingest.ledger.attentionRows rows: %w", err)
+	}
+	return result, nil
+}
+
 func (l *ledger) upsert(row ledgerRow) error {
 	_, err := l.db.Exec(
 		`INSERT OR REPLACE INTO ingest_ledger
