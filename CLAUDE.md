@@ -16,11 +16,18 @@ Read these non-obvious invariants before editing:
    Owner: `DESIGN.md`, `docs/solutions/database-issues/sqlite-pool-pragma-and-busy-snapshot.md`
 5. Ingest has a cross-process single-writer lock so scheduled and manual runs never overlap.
    Owner: `docs/decisions/0021-v2-refounding.md` D2/D4, `DESIGN.md`
-6. `wiki_delete` exists and auto-commits its deletion to git — that does not
-   make the wiki recoverable: `wiki_write` overwrites without committing, and
-   nothing commits on ingest, so the delete-commit typically has no prior
-   version to restore.
-   Owner: `SPEC.md` §8.8, `docs/deployment/remote-mcp.md` (Security posture)
+6. `wiki_delete` attempts to auto-commit its own deletion to git, but only
+   actually commits when the deleted file was already git-tracked —
+   `git add` on a path git never tracked fails (exit 128, no matching
+   pathspec), so a page `wiki_write` never committed (the default,
+   `git.auto_commit: off`) produces no delete-commit either. `wiki_write`
+   additionally auto-commits when `git.auto_commit` is `write` or
+   `write+ingest`; `cogvault ingest` additionally auto-commits only under
+   `write+ingest` specifically — `write` alone covers `wiki_write` but not
+   ingest runs (default `off`, neither; 0024). Even fully enabled, git
+   inside the wiki is not a backup: it narrows, but does not eliminate, the
+   "no recovery from a compromised credential" gap.
+   Owner: `SPEC.md` §3.1/§8.3/§8.8/§9.4, `docs/decisions/0024-wiki-git-safety-net.md`, `docs/deployment/remote-mcp.md` (Security posture)
 7. `SPEC.md`, `DESIGN.md`, and accepted decisions override plans; `docs/plans/` are non-canonical working notes and may become stale.
    Owner: `docs/decisions/0012-agent-documentation-governance.md`
 

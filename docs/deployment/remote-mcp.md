@@ -274,7 +274,8 @@ carrying the required scopes — grants the **full tool set**, including
 per-tool scope split narrower than whatever scopes you configure in `oauth`
 mode.
 
-**cogvault provides no recovery from a compromised credential.** Specifically:
+**cogvault provides no recovery from a compromised credential by default.**
+With the default `git.auto_commit: off` (SPEC §3.1):
 
 - `wiki_write` overwrites the target file unconditionally and does **not**
   commit to git.
@@ -285,20 +286,41 @@ mode.
   was **never tracked** in the first place. It does not hand you a prior
   version to restore.
 
-In short: git inside this wiki is not a safety net for anything `wiki_write`
-touched, and it is only incidentally a record — never a restore path — for
-what `wiki_delete` removed. An attacker (or a bug, or a mistake) holding a
-valid credential can silently overwrite or delete the entire wiki, and
-cogvault has no built-in way to get it back.
+In short: with `git.auto_commit: off`, git inside this wiki is not a safety
+net for anything `wiki_write` touched, and it is only incidentally a record —
+never a restore path — for what `wiki_delete` removed. An attacker (or a bug,
+or a mistake) holding a valid credential can silently overwrite or delete the
+entire wiki, and cogvault has no built-in way to get it back.
 
-**Backups are the operator's responsibility.** Back up `wiki_dir` outside of
-cogvault, on a schedule independent of cogvault's own delete-only
-auto-commit — for example:
+**`git.auto_commit: write` or `write+ingest` (0024) narrows this, but is not
+a substitute for backups.** Setting `git.auto_commit: write` commits every
+successful `wiki_write` (`git add` + `git commit -m "wiki: write <path>"`);
+`write+ingest` additionally commits the whole tree once after a `cogvault
+ingest` run that digested at least one file (`git add -A -- .` + `git commit -m
+"wiki: ingest snapshot"`). Either mode gives you real prior-version history
+for the operations it covers — a compromised credential that only calls
+`wiki_write`/`wiki_delete` (or an ingest run) now leaves recoverable commits
+behind. It does **not** protect against:
+
+- the same credential also running `git` itself (`rm -rf .git`, a forced
+  push, history rewriting) — same-repo history is attacker-writable by
+  anything that can reach the filesystem or a shell;
+- a commit subprocess that fails silently (logged, not surfaced as a tool or
+  command error — check the server's logs, not just tool responses, if you
+  are relying on this);
+- anything written directly to disk outside cogvault's own write path.
+
+Off-repo snapshots (below) remain the real safety net regardless of this
+setting.
+
+**Backups are the operator's responsibility regardless of `git.auto_commit`.**
+Back up `wiki_dir` outside of cogvault, on a schedule independent of
+cogvault's own git activity (whichever mode you run) — for example:
 
 ```bash
 # Option A: commit the whole tree yourself, on a schedule (cron/launchd).
-# This is what actually turns "only wiki_delete commits" into a safety net —
-# cogvault will never do this step for you.
+# Redundant with git.auto_commit: write+ingest, but still worth doing if
+# you run write-only or off mode, or want commits between ingest runs.
 git -C /path/to/wiki_dir add -A && git -C /path/to/wiki_dir commit -m "snapshot $(date -u +%FT%TZ)"
 
 # Option B: an independent copy (swap in your OS's snapshot/backup tool).

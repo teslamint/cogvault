@@ -544,3 +544,65 @@ func TestContainsDotDot(t *testing.T) {
 		}
 	}
 }
+
+func TestGitAutoCommitDefaultsOff(t *testing.T) {
+	p := writeConfigFile(t, "wiki_dir: /data/wiki\ndb_path: /state/db.db\n")
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Git.AutoCommit != "off" {
+		t.Errorf("Git.AutoCommit = %q, want %q (default)", cfg.Git.AutoCommit, "off")
+	}
+	if cfg.Git.CommitsOnWrite() {
+		t.Error("CommitsOnWrite() = true for default off mode, want false")
+	}
+	if cfg.Git.CommitsOnIngest() {
+		t.Error("CommitsOnIngest() = true for default off mode, want false")
+	}
+}
+
+func TestGitAutoCommitModes(t *testing.T) {
+	tests := []struct {
+		mode            string
+		commitsOnWrite  bool
+		commitsOnIngest bool
+	}{
+		{"off", false, false},
+		{"write", true, false},
+		{"write+ingest", true, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.mode, func(t *testing.T) {
+			p := writeConfigFile(t, "wiki_dir: /data/wiki\ndb_path: /state/db.db\ngit:\n  auto_commit: "+tt.mode+"\n")
+			cfg, err := Load(p)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.Git.AutoCommit != tt.mode {
+				t.Errorf("Git.AutoCommit = %q, want %q", cfg.Git.AutoCommit, tt.mode)
+			}
+			if got := cfg.Git.CommitsOnWrite(); got != tt.commitsOnWrite {
+				t.Errorf("CommitsOnWrite() = %v, want %v", got, tt.commitsOnWrite)
+			}
+			if got := cfg.Git.CommitsOnIngest(); got != tt.commitsOnIngest {
+				t.Errorf("CommitsOnIngest() = %v, want %v", got, tt.commitsOnIngest)
+			}
+		})
+	}
+}
+
+func TestGitAutoCommitInvalidRejected(t *testing.T) {
+	p := writeConfigFile(t, "wiki_dir: /data/wiki\ndb_path: /state/db.db\ngit:\n  auto_commit: sometimes\n")
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "git.auto_commit") {
+		t.Errorf("error %q should mention git.auto_commit", msg)
+	}
+	if !strings.Contains(msg, "not supported") {
+		t.Errorf("error %q should say not supported", msg)
+	}
+}

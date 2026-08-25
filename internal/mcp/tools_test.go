@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -819,5 +821,248 @@ func TestToolAnnotations(t *testing.T) {
 
 	if len(tools) != len(want) {
 		t.Errorf("registered tool count = %d, want %d (expected-value table is stale relative to registered tools)", len(tools), len(want))
+	}
+}
+
+// --- gitAutoCommit (0024) ---
+
+// initTestGitRepo creates a git repository at dir with a local (not global)
+// identity, so the test never depends on the host's ~/.gitconfig having
+// user.name/user.email set.
+func initTestGitRepo(t *testing.T, dir string) {
+	t.Helper()
+	run := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	run("init", "-q")
+	run("config", "user.name", "cogvault-test")
+	run("config", "user.email", "cogvault-test@example.com")
+}
+
+// gitLogSubjects returns the commit subject lines for dir, oldest first.
+func gitLogSubjects(t *testing.T, dir string) []string {
+	t.Helper()
+	cmd := exec.Command("git", "log", "--reverse", "--format=%s")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		// No commits yet is not a test failure; callers assert on the slice.
+		return nil
+	}
+	trimmed := strings.TrimSpace(string(out))
+	if trimmed == "" {
+		return nil
+	}
+	return strings.Split(trimmed, "\n")
+}
+
+func realFSCfg(gitAutoCommitMode string) *config.Config {
+	cfg := testCfg()
+	cfg.Git.AutoCommit = gitAutoCommitMode
+	return cfg
+}
+
+func TestGitAutoCommit_WikiWriteCommitsWhenModeWrite(t *testing.T) {
+	root := t.TempDir()
+	initTestGitRepo(t, root)
+	cfg := realFSCfg("write")
+	os.MkdirAll(filepath.Join(root, cfg.WikiDir), 0o755)
+	store := storage.NewFSStorage(root, cfg)
+	idx := &mockIndex{addFn: func(string, string, map[string]string) error { return nil }}
+	adpt := &mockAdapter{parseFn: func(string, string, bool) (*adapter.Source, error) {
+		return &adapter.Source{Frontmatter: map[string]any{}}, nil
+	}}
+
+	handler := handleWikiWrite(root, cfg, store, idx, adpt)
+	result, err := handler(context.Background(), makeReq(map[string]any{
+		"path":    "_wiki/committed.md",
+		"content": "# Committed",
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %v", result.Content)
+	}
+
+	subjects := gitLogSubjects(t, root)
+	want := "wiki: write " + filepath.Join(cfg.WikiDir, "committed.md")
+	if len(subjects) != 1 || subjects[0] != want {
+		t.Fatalf("git log subjects = %v, want [%q]", subjects, want)
+	}
+}
+
+func TestGitAutoCommit_WikiWriteDoesNotCommitWhenModeOff(t *testing.T) {
+	root := t.TempDir()
+	initTestGitRepo(t, root)
+	cfg := realFSCfg("off")
+	os.MkdirAll(filepath.Join(root, cfg.WikiDir), 0o755)
+	store := storage.NewFSStorage(root, cfg)
+	idx := &mockIndex{addFn: func(string, string, map[string]string) error { return nil }}
+	adpt := &mockAdapter{parseFn: func(string, string, bool) (*adapter.Source, error) {
+		return &adapter.Source{Frontmatter: map[string]any{}}, nil
+	}}
+
+	handler := handleWikiWrite(root, cfg, store, idx, adpt)
+	result, err := handler(context.Background(), makeReq(map[string]any{
+		"path":    "_wiki/uncommitted.md",
+		"content": "# Uncommitted",
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %v", result.Content)
+	}
+
+	if subjects := gitLogSubjects(t, root); len(subjects) != 0 {
+		t.Fatalf("git log subjects = %v, want none (git.auto_commit: off is the default and must not commit)", subjects)
+	}
+}
+
+func TestGitAutoCommit_WikiDeleteAlwaysCommitsRegardlessOfMode(t *testing.T) {
+	for _, mode := range []string{"off", "write", "write+ingest"} {
+		t.Run(mode, func(t *testing.T) {
+			root := t.TempDir()
+			initTestGitRepo(t, root)
+			cfg := realFSCfg(mode)
+			os.MkdirAll(filepath.Join(root, cfg.WikiDir), 0o755)
+			store := storage.NewFSStorage(root, cfg)
+			target := filepath.Join(cfg.WikiDir, "gone.md")
+			if err := os.WriteFile(filepath.Join(root, target), []byte("# Gone"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			// wiki_delete's own commit removes a tracked file's deletion; a
+			// path git never saw fails `git add` with exit 128 (pathspec
+			// no match), same as it would for a real operator's untracked
+			// scratch file. Commit it first so this test exercises the
+			// "delete a tracked page" path the feature is meant for.
+			addCmd := exec.Command("git", "-C", root, "add", target)
+			if out, err := addCmd.CombinedOutput(); err != nil {
+				t.Fatalf("git add fixture: %v: %s", err, out)
+			}
+			commitCmd := exec.Command("git", "-C", root, "commit", "-m", "fixture: add "+target)
+			if out, err := commitCmd.CombinedOutput(); err != nil {
+				t.Fatalf("git commit fixture: %v: %s", err, out)
+			}
+			idx := &mockIndex{removeFn: func(string) error { return nil }}
+
+			handler := handleWikiDelete(root, store, idx)
+			result, err := handler(context.Background(), makeReq(map[string]any{"path": target}))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result.IsError {
+				t.Fatalf("unexpected tool error: %v", result.Content)
+			}
+
+			subjects := gitLogSubjects(t, root)
+			want := "wiki: delete " + target
+			if len(subjects) != 2 || subjects[1] != want {
+				t.Fatalf("git.auto_commit=%s: git log subjects = %v, want [\"fixture: add %s\" %q] (wiki_delete's own commit predates and is unaffected by git.auto_commit)", mode, subjects, target, want)
+			}
+		})
+	}
+}
+
+func TestGitAutoCommit_NotAGitRepoLogsAndDoesNotError(t *testing.T) {
+	root := t.TempDir() // no git init
+	cfg := realFSCfg("write")
+	os.MkdirAll(filepath.Join(root, cfg.WikiDir), 0o755)
+	store := storage.NewFSStorage(root, cfg)
+	idx := &mockIndex{addFn: func(string, string, map[string]string) error { return nil }}
+	adpt := &mockAdapter{parseFn: func(string, string, bool) (*adapter.Source, error) {
+		return &adapter.Source{Frontmatter: map[string]any{}}, nil
+	}}
+
+	handler := handleWikiWrite(root, cfg, store, idx, adpt)
+	result, err := handler(context.Background(), makeReq(map[string]any{
+		"path":    "_wiki/nogit.md",
+		"content": "# No Git",
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("wiki_write must succeed even when wiki_dir is not a git repository, got tool error: %v", result.Content)
+	}
+	data, readErr := os.ReadFile(filepath.Join(root, "_wiki", "nogit.md"))
+	if readErr != nil || string(data) != "# No Git" {
+		t.Fatalf("file content = %q, %v; write must still land on disk", data, readErr)
+	}
+}
+
+func TestGitAutoCommit_TimeoutBoundsWedgedCommit(t *testing.T) {
+	binDir, err := filepath.Abs("testdata/bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GIT_FAKE_COMMIT_SLEEP", "10")
+
+	original := gitCommitTimeout
+	gitCommitTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { gitCommitTimeout = original })
+
+	started := time.Now()
+	gitAutoCommit(t.TempDir(), "path.md", "wiki: write path.md")
+	if elapsed := time.Since(started); elapsed >= 5*time.Second {
+		t.Fatalf("gitAutoCommit took %s, want bounded by the shrunk gitCommitTimeout (fake git sleeps 10s unbounded)", elapsed)
+	}
+}
+
+// TestGitAutoCommit_SlowAddDoesNotStarveCommitTimeout is the regression test
+// for the initial implementation sharing one context.WithTimeout across both
+// the add and commit subprocesses: a slow-but-not-wedged `git add` (e.g. a
+// large working tree scan) would consume most of the shared budget, leaving
+// `git commit` too little time and turning a merely slow add into a
+// spurious commit failure. With independent per-command timeouts, an add
+// that takes most of gitCommitTimeout must not prevent the commit from
+// getting its own full budget.
+func TestGitAutoCommit_SlowAddDoesNotStarveCommitTimeout(t *testing.T) {
+	binDir, err := filepath.Abs("testdata/bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// add (200ms) + commit (150ms) = 350ms, which exceeds a 250ms budget: a
+	// shared context would let add consume most of the budget and kill
+	// commit partway through. Each individually fits under 250ms, so
+	// independent per-command timeouts must let both succeed.
+	t.Setenv("GIT_FAKE_ADD_SLEEP", "0.2")
+	t.Setenv("GIT_FAKE_COMMIT_SLEEP", "0.15")
+
+	original := gitCommitTimeout
+	gitCommitTimeout = 250 * time.Millisecond
+	t.Cleanup(func() { gitCommitTimeout = original })
+
+	var buf strings.Builder
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	started := time.Now()
+	gitAutoCommit(t.TempDir(), "path.md", "wiki: write path.md")
+	elapsed := time.Since(started)
+
+	// Positive proof both fake subprocesses actually ran their configured
+	// sleeps (not skipped, e.g. by an env var the fake binary failed to
+	// read): if both ran, elapsed must be at least their sum. A near-zero
+	// elapsed here would mean the negative log assertions below are
+	// vacuously passing.
+	if elapsed < 350*time.Millisecond {
+		t.Fatalf("elapsed = %s, want >= 350ms; the fake git add/commit sleeps may not have run at all", elapsed)
+	}
+
+	logs := buf.String()
+	if strings.Contains(logs, "git commit failed") {
+		t.Fatalf("commit must get its own full timeout budget, not the remainder after a slow add; logs: %s", logs)
+	}
+	if strings.Contains(logs, "git add failed") {
+		t.Fatalf("add must succeed within its own budget; logs: %s", logs)
 	}
 }
