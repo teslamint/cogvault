@@ -118,3 +118,8 @@ to, and resolved before the user approved squash merge.
 The same PR also confirmed a related rule: a resolved thread does not change a
 historical `CHANGES_REQUESTED` review object. Re-check thread resolution and
 merge state instead of treating that historical review state as a new finding.
+
+After replying to a finding, fetch the thread again before closing the gate.
+CodeRabbit can append an acknowledgment after the reply. The completion check
+is that every root thread is resolved and every comment is accounted for. It is
+not that the historical review decision changed.
