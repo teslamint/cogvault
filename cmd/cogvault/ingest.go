@@ -17,6 +17,8 @@ type reportNotifier interface {
 	Notify(*ingest.Report)
 }
 
+var runIngestNotify = notifyAfterRun
+
 func newIngestCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "ingest",
@@ -78,7 +80,7 @@ func runIngest(cmd *cobra.Command, args []string) error {
 	if report != nil {
 		cmd.Print(report.String())
 	}
-	notifyAfterRun(runner, report, scheduled, err)
+	runIngestNotify(runner, report, scheduled, err)
 	if err != nil {
 		if errors.Is(err, ingest.ErrAlreadyRunning) {
 			return fmt.Errorf("ingest already running (lock held)")

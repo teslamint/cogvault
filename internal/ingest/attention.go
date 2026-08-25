@@ -36,7 +36,7 @@ func AttentionRows(dbPath, model string) ([]AttentionRow, error) {
 	result := make([]AttentionRow, 0, len(rows))
 	for _, row := range rows {
 		status := row.status
-		if status == "failed" && row.attempts >= 3 {
+		if status == "failed" && row.attempts >= maxAttempts {
 			status = "exhausted"
 		}
 		result = append(result, AttentionRow{

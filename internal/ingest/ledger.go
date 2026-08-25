@@ -198,9 +198,10 @@ func (l *ledger) attentionRows(model string) ([]ledgerRow, error) {
 		FROM ingest_ledger l
 		JOIN latest lt ON l.rowid = lt.max_id
 		WHERE l.llm_model = ?
-		  AND ((l.status = 'failed' AND l.attempts >= 3)
+		  AND ((l.status = 'failed' AND l.attempts >= ?)
 		       OR l.status = 'refused')`,
 		model,
+		maxAttempts,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("ingest.ledger.attentionRows: %w", err)

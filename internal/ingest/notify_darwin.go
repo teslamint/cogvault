@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-const notificationTimeout = 5 * time.Second
+var notificationTimeout = 5 * time.Second
 
 const notificationScript = `on run argv
 	display notification (item 2 of argv) with title (item 1 of argv)

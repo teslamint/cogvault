@@ -18,6 +18,11 @@ const wantNotificationScript = `on run argv
 end run`
 
 func init() {
+	if os.Getenv("COGVAULT_OSASCRIPT_BLOCK") == "1" {
+		time.Sleep(time.Hour)
+		os.Exit(0)
+	}
+
 	argsPath := os.Getenv("COGVAULT_OSASCRIPT_ARGS_PATH")
 	if argsPath == "" {
 		return
@@ -37,6 +42,20 @@ func init() {
 	os.Exit(0)
 }
 
+func fakeOsascriptOnPath(t *testing.T) string {
+	t.Helper()
+	tmpDir := t.TempDir()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(executable, filepath.Join(tmpDir, "osascript")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", tmpDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return tmpDir
+}
+
 func TestOsascriptNotifyPassesContentOnlyAsArguments(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -51,17 +70,8 @@ func TestOsascriptNotifyPassesContentOnlyAsArguments(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tmpDir := t.TempDir()
-			executable, err := os.Executable()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Symlink(executable, filepath.Join(tmpDir, "osascript")); err != nil {
-				t.Fatal(err)
-			}
-
+			tmpDir := fakeOsascriptOnPath(t)
 			argsPath := filepath.Join(tmpDir, "args.json")
-			t.Setenv("PATH", tmpDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 			t.Setenv("COGVAULT_OSASCRIPT_ARGS_PATH", argsPath)
 
 			title := "title-" + tt.value
@@ -99,5 +109,23 @@ func TestOsascriptNotifyContextHonorsCancellation(t *testing.T) {
 func TestNotificationTimeout(t *testing.T) {
 	if notificationTimeout != 5*time.Second {
 		t.Fatalf("notificationTimeout = %s, want 5s", notificationTimeout)
+	}
+}
+
+func TestOsascriptNotifyTimesOutBlockingProcess(t *testing.T) {
+	fakeOsascriptOnPath(t)
+	t.Setenv("COGVAULT_OSASCRIPT_BLOCK", "1")
+
+	originalTimeout := notificationTimeout
+	notificationTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { notificationTimeout = originalTimeout })
+
+	started := time.Now()
+	err := osascriptNotify("title", "body")
+	if err == nil {
+		t.Fatal("osascriptNotify() error = nil, want timeout")
+	}
+	if elapsed := time.Since(started); elapsed >= time.Second {
+		t.Fatalf("osascriptNotify() elapsed = %s, want less than 1s", elapsed)
 	}
 }
