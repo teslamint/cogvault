@@ -281,15 +281,25 @@ func TestIngestGitCommit_SlowAddDoesNotStarveCommitTimeout(t *testing.T) {
 	// by 300ms: a shared context lets add consume ~900ms+overhead, leaving
 	// at most ~600ms for commit's 900ms+overhead sleep — commit gets
 	// killed. Each individually fits under 1500ms with a ~600ms margin.
-	// Margin sizing: measured fake-git-binary fork/exec overhead directly
+	// Margin sizing (third revision — do not widen a fourth time; see the
+	// note below): measured fake-git-binary fork/exec overhead directly
 	// under synthetic 16-core CPU-spin contention (the worst case observed,
 	// well beyond real `go test -race ./...` contention) topped out at
-	// ~210ms; ~600ms margin is ~3x that worst case. A prior 250ms budget /
-	// 200ms sleep pairing (50ms margin) flaked once under real full-suite
-	// `-race` contention: add's own wall-clock time (sleep + overhead)
-	// crept past its own 250ms individual timeout, killing add itself, not
-	// commit — the failure mode this margin must absorb is add exceeding
+	// ~210ms; ~600ms margin is ~3x that worst case. Prior revisions: a
+	// 250ms budget / 200ms sleep pairing (50ms margin) flaked once under
+	// real full-suite `-race` contention — add's own wall-clock time
+	// (sleep + overhead) crept past its own 250ms individual timeout,
+	// killing add itself, not commit; a 500ms/300ms pairing (200ms margin,
+	// still within noise of the measured 210ms worst case) was the second
+	// revision. The failure mode this margin must absorb is add exceeding
 	// its own budget, not only the shared-context starvation scenario.
+	// If this margin ever flakes again, do not widen it a fourth time —
+	// redesign away from wall-clock discrimination entirely (e.g. have the
+	// fake git write a marker file after add completes and after commit
+	// completes, and assert on marker presence/order instead of elapsed
+	// duration). A timing-based test cannot be made unconditionally safe
+	// against unbounded scheduler contention; a fourth widening would only
+	// repeat this same investigation with a bigger number.
 	t.Setenv("GIT_FAKE_ADD_SLEEP", "0.9")
 	t.Setenv("GIT_FAKE_COMMIT_SLEEP", "0.9")
 
