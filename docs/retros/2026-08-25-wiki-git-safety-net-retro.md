@@ -19,15 +19,22 @@
 
 ## Success criteria: measured vs declared
 
-Decision 0024 has no `## Success Criteria` section (pre-dates the `designing` skill's spec template) — its "Status" section lists implementation/doc/test deliverables instead of measurable criteria. Treating those deliverables as the closest equivalent:
+Decision 0024 has no `## Success Criteria` section — it pre-dates the
+`designing` skill's spec template and states a Status/deliverable list
+instead. Per this template's rule ("do not reconstruct criteria after the
+fact"), this section is skipped rather than mapping that deliverable list
+onto criteria it was never written to satisfy.
 
-| # | Declared criterion | Measurement (command / rubric) | Measured result | Verdict |
-|---|---|---|---|---|
-| 1 | `GitConfig` + `ValidGitAutoCommitModes()` + `CommitsOnWrite()`/`CommitsOnIngest()`, default off, invalid rejected | `go test ./internal/config/... -run TestGitAutoCommit -v -count=1` | verified: PASS (3 subtests: defaults, all three modes, invalid rejection) | Met |
-| 2 | `wiki_write` commits only under `write`/`write+ingest`; `wiki_delete` always attempts, commits only if already tracked | `go test ./internal/mcp/... -run TestGitAutoCommit -v -count=1` | verified: PASS (write-commits, off-does-not, delete-always-attempts-across-3-modes, non-git-repo-logs, timeout-bounds-wedged, slow-add-does-not-starve-commit) | Met |
-| 3 | `cogvault ingest` commits whole tree only under `write+ingest` and only when `Digested > 0`; `-- .` pathspec scopes to `wikiDir` even when nested in a larger repo | `go test ./cmd/cogvault/... -run TestIngestGitCommit -v -count=1` | verified: PASS (write+ingest-commits, off/write-alone-do-not, dry-run-does-not, zero-digest-does-not, nested-repo-pathspec-regression, timeout-bounds-wedged, slow-add-does-not-starve-commit) | Met |
-| 4 | Full suite stays green post-merge | `gofmt -l cmd internal && go vet ./... && go build ./... && go test -race -count=1 ./...` on `main` HEAD `263f4ea` | verified: PASS, run 3x back-to-back | Met |
-| 5 | Timing-margin regression tests do not flake under contention | `go test -race -count=1 ./...` x5 (PR #35), mutation test under synthetic 16-core CPU-spin load x10 each direction (PR #36) | verified: 0 flakes across all runs after PR #36's margin | Met (only after two widening iterations — see Findings) |
+**Fresh verification (informational only, not a declared-criteria
+substitute)** — re-run during this retro, on `main` HEAD `d1100c7`:
+
+| Command | Result |
+|---|---|
+| `go test ./internal/config/... -run TestGitAutoCommit -v -count=1` | PASS (3 subtests) |
+| `go test ./internal/mcp/... -run TestGitAutoCommit -v -count=1` | PASS (6 subtests) |
+| `go test ./cmd/cogvault/... -run TestIngestGitCommit -v -count=1` | PASS (7 subtests) |
+| `gofmt -l cmd internal && go vet ./... && go build ./... && go test -race -count=1 ./...` | PASS, 3x back-to-back |
+| Both `..._SlowAddDoesNotStarveCommitTimeout` tests under synthetic 16-core CPU-spin load | PASS, 3x each |
 
 ## Carry-forward from previous retro
 
@@ -95,6 +102,4 @@ Decision 0024 has no `## Success Criteria` section (pre-dates the `designing` sk
 
 ## Compounding
 
-- compound invocation: `not attempted — no reusable lesson this cycle`
-
-(The Lessons-section item above is itself compoundable, but per Phase 7's gate this retro defers the `compound` dispatch to a follow-up invocation rather than running it inline here, since no `compound`-capable dispatch was exercised during this retro's authoring.)
+- compound invocation: `Documentation complete — docs/solutions/best-practices/measure-timing-margins-not-repeated-runs.md`
