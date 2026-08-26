@@ -24,10 +24,19 @@ Read these non-obvious invariants before editing:
    additionally auto-commits when `git.auto_commit` is `write` or
    `write+ingest`; `cogvault ingest` additionally auto-commits only under
    `write+ingest` specifically — `write` alone covers `wiki_write` but not
-   ingest runs (default `off`, neither; 0024). Even fully enabled, git
-   inside the wiki is not a backup: it narrows, but does not eliminate, the
-   "no recovery from a compromised credential" gap.
-   Owner: `SPEC.md` §3.1/§8.3/§8.8/§9.4, `docs/decisions/0024-wiki-git-safety-net.md`, `docs/deployment/remote-mcp.md` (Security posture)
+   ingest runs (default `off`, neither; 0024). Every auto-commit path runs
+   through `internal/gitutil`: one advisory lock per repository (git refuses
+   concurrent index operations, so unsynchronized commits are silently
+   dropped), independent 10s bounds on lock/add/commit, and SIGTERM-with-grace
+   so a timed-out `git` clears its own `.git/index.lock`. Paths containing a
+   `.git`, `.gitattributes`, or `.gitmodules` component are rejected by every
+   mutating storage method, outside the configurable exclude lists — `git add`
+   executes filters those files define, so writing them is remote code
+   execution, not a visibility question. Even fully enabled, git inside the
+   wiki is not a backup: it narrows, but does not eliminate, the "no recovery
+   from a compromised credential" gap, and committed content survives a later
+   `wiki_delete` in history.
+   Owner: `SPEC.md` §3.1/§8.3/§8.8/§8.8.1/§9.4, `docs/decisions/0024-wiki-git-safety-net.md`, `docs/deployment/remote-mcp.md` (Security posture)
 7. `SPEC.md`, `DESIGN.md`, and accepted decisions override plans; `docs/plans/` are non-canonical working notes and may become stale.
    Owner: `docs/decisions/0012-agent-documentation-governance.md`
 

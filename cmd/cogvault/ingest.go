@@ -1,17 +1,18 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"os/exec"
+	"time"
+
 	"github.com/spf13/cobra"
+	"github.com/teslamint/cogvault/internal/gitutil"
 	"github.com/teslamint/cogvault/internal/index"
 	"github.com/teslamint/cogvault/internal/ingest"
 	"github.com/teslamint/cogvault/internal/llm"
 	"github.com/teslamint/cogvault/internal/storage"
-	"log/slog"
-	"os/exec"
-	"time"
 )
 
 type reportNotifier interface {
@@ -133,42 +134,39 @@ func postIngestEmbed(cmd *cobra.Command, idx *index.SQLiteIndex, store *storage.
 	}
 }
 
-// ingestGitCommitTimeout bounds the git add/commit subprocess pair so a
-// wedged index.lock cannot block the CLI command indefinitely (0024). It
-// mirrors internal/mcp/tools.go's gitCommitTimeout; the two packages stay
-// independent per DESIGN.md's unidirectional dependency graph (cmd depends
-// on mcp/ingest, not the reverse), so the constant is duplicated rather than
-// shared. A var, not a const, so tests can shrink it to exercise the
-// timeout path without a multi-second sleep.
-var ingestGitCommitTimeout = 10 * time.Second
+// ingestGitCommitTimeout is the CLI-facing name for the shared git
+// subprocess budget. The mechanism itself lives in internal/gitutil so this
+// command and the MCP server agree on one bound and one lock when they
+// target the same repository; assigning through gitutil.CommitTimeout keeps
+// a test's shrunk budget effective for the subprocesses it actually runs.
 
 // postIngestGitCommit commits the whole wiki tree once after a successful
 // ingest run that digested at least one file (git.auto_commit: write+ingest,
 // 0024). Best-effort: failures log, never fail the ingest command — same
-// contract as wiki_write/wiki_delete's per-file auto-commit. `add` and
-// `commit` each get their own independent ingestGitCommitTimeout-bounded
-// context derived from cmd.Context() — sharing one context across both
-// would let a slow (not necessarily wedged) `git add -A` starve `git
-// commit` of its own timeout budget, turning a merely slow add into a
-// spurious commit failure.
+// contract as wiki_write/wiki_delete's per-file auto-commit.
+//
+// Serialization, per-command timeouts, and SIGTERM-with-grace termination
+// live in internal/gitutil, shared with internal/mcp's per-file commits: a
+// scheduled ingest can run while a `cogvault serve` process is handling
+// wiki_write calls against the same repository, and git refuses concurrent
+// index operations, so without a shared lock one side's commit would be
+// silently dropped.
 func postIngestGitCommit(cmd *cobra.Command, wikiDir string) {
 	// -- . scopes the add to wikiDir's own working directory: without it, a
 	// wikiDir nested inside a larger git repository (wikiDir is a plain
 	// subdirectory, not its own git root, in that layout) would stage
 	// changes anywhere in the enclosing repo's working tree, since `git -C
 	// wikiDir add -A` still resolves against the repo root, not wikiDir.
-	addCtx, addCancel := context.WithTimeout(cmd.Context(), ingestGitCommitTimeout)
-	defer addCancel()
-	addCmd := exec.CommandContext(addCtx, "git", "-C", wikiDir, "add", "-A", "--", ".")
-	if err := addCmd.Run(); err != nil {
-		slog.Warn("post-ingest git add failed", "error", err)
+	stage, err := gitutil.Commit(cmd.Context(), wikiDir, []string{"-A", "--", "."}, "wiki: ingest snapshot")
+	if err == nil {
 		return
 	}
-
-	commitCtx, commitCancel := context.WithTimeout(cmd.Context(), ingestGitCommitTimeout)
-	defer commitCancel()
-	commitCmd := exec.CommandContext(commitCtx, "git", "-C", wikiDir, "commit", "-m", "wiki: ingest snapshot")
-	if err := commitCmd.Run(); err != nil {
+	switch stage {
+	case gitutil.StageLock:
+		slog.Warn("post-ingest git commit lock unavailable", "error", err)
+	case gitutil.StageAdd:
+		slog.Warn("post-ingest git add failed", "error", err)
+	default:
 		// A no-op ingest tree (all digests wrote identical content, or the
 		// working tree already matched) makes "nothing to commit" exit
 		// nonzero; that is expected, not a real failure, so it only logs.

@@ -313,6 +313,31 @@ behind. It does **not** protect against:
 Off-repo snapshots (below) remain the real safety net regardless of this
 setting.
 
+**Committed history is permanent — that cuts both ways.** Enabling `write`
+or `write+ingest` means a page's content survives its own deletion. A later
+`wiki_delete` removes the working-tree copy and commits that removal, but the
+prior content stays fully recoverable from git history for as long as the
+repository exists — and propagates into every backup you take afterwards. If
+a page turns out to hold a credential, a token, or personal data, deleting it
+through the MCP tools does **not** erase it; that needs history rewriting
+(`git filter-repo` or equivalent) plus re-taking any backup made in between.
+Under the default `off`, deleting a page that was never committed leaves no
+trace at all. Weigh this before enabling the mode on a wiki that ingests
+material you may later need to purge.
+
+**Paths git treats as configuration are not writable through the MCP tools.**
+`wiki_write`, `wiki_delete`, and internal moves reject any path containing a
+`.git`, `.gitattributes`, or `.gitmodules` component with `access denied`,
+in any capitalization and regardless of your `exclude`/`exclude_read`
+settings. This is deliberate and not configurable: `git add` runs the clean
+filter that `.gitattributes` names, using a command line read from
+`.git/config`, so a credential able to write both files would get arbitrary
+command execution as the cogvault server process the next time *anyone*
+triggered an auto-commit. Capitalization matters because macOS filesystems
+are case-insensitive by default — `.GIT/config` is the same file as
+`.git/config` there. `.gitignore` remains writable: it selects paths, it
+never names a command.
+
 **Backups are the operator's responsibility regardless of `git.auto_commit`.**
 Back up `wiki_dir` outside of cogvault, on a schedule independent of
 cogvault's own git activity (whichever mode you run) — for example:

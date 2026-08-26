@@ -131,3 +131,99 @@ hours with zero artifacts): three findings, all reproduced before fixing.
    record at all in that case. The call is unconditional (it always
    *attempts*); the commit is not unconditional. Reworded in both
    documents, plus `DESIGN.md` §2.8.
+
+**Third correction pass** (2026-08-26, post-merge multi-lane review of the
+whole `c33d88d..HEAD` range): one P0 and five P1 findings, each independently
+validated against the code before fixing.
+
+1. **P0 — `wiki_write` to git-controlled paths chained into remote code
+   execution.** `storage.FSStorage.Write` rejected only `ExcludeRead` entries
+   and `_schema.md`; it never excluded `.git/`. `git add` executes the clean
+   filter that `.gitattributes` names, with the filter's command line read
+   from `.git/config`. So a credential holder could `wiki_write`
+   `.gitattributes` (`*.md filter=evil`) plus `.git/config` (`[filter "evil"]
+   clean = <command>`), after which the *next* ordinary `wiki_write` by anyone
+   ran that command as the cogvault server process. Reproduced end-to-end
+   three times independently. This inverted the decision's own threat
+   ceiling: 0024 assumed "a valid credential grants full read/write/delete
+   access" as the worst case, and the auto-commit mechanism turned that into
+   arbitrary execution.
+   Fixed in `internal/storage/fs.go`: `isGitControlled` rejects any path with
+   a `.git`, `.gitattributes`, or `.gitmodules` component, at any depth, on
+   `Write`, `Delete`, and both ends of `Move`. It is deliberately **not** a
+   `cfg.Exclude` default — an operator editing a list that otherwise only
+   controls search visibility must not be able to re-open an RCE.
+   `.gitignore` stays writable: it selects paths, it never names a command.
+
+   **Follow-up within the same pass**: the first version of this guard
+   compared components case-sensitively, which on APFS (macOS default, this
+   project's primary platform) was no guard at all — `wiki_write` to
+   `.GIT/config` and `.GitAttributes` resolves to the real files and the full
+   exploit still fired, reproduced end-to-end through the live MCP stdio
+   surface with the marker file created and `.git/config` poisoned. Now
+   compared with `strings.EqualFold`, uniformly rather than by probing
+   filesystem semantics, so the boundary does not depend on the host. The
+   guard's tests carry case variants and were confirmed to fail against a
+   case-sensitive mutant.
+2. **P1 — concurrent commits silently dropped (intra- and cross-process).**
+   Neither `gitAutoCommit` nor `postIngestGitCommit` held any lock, and git
+   refuses concurrent index operations on one repository. Two MCP handlers,
+   or a scheduled `ingest` racing a live `serve`, would have one side fail
+   `git add`/`git commit` with only a `slog.Warn` while the tool call still
+   reported success — the write lands on disk but the safety net's history
+   entry never exists. Measured: 8 concurrent unsynchronized commits produced
+   1 commit and 7 exit-128 failures.
+   Fixed by serializing on one advisory `flock` per repository. `flock`
+   excludes per *open file description*, so two goroutines in one process
+   contend exactly as two processes do — verified by direct probe rather than
+   assumed, since a first implementation carried a redundant in-process
+   semaphore on the belief that `flock` was per-process. The lock file lives
+   in the OS temp directory keyed by a hash of the resolved repository path,
+   not in the working tree, so the whole-tree `git add -A -- .` cannot commit
+   it as wiki content.
+3. **P1 — the timeout could manufacture the wedged `index.lock` it defends
+   against.** Neither call site set `Cancel`/`WaitDelay`, so Go's default for
+   a cancelled `CommandContext` is `SIGKILL`. Both `git add` and `git commit`
+   hold `.git/index.lock` for their duration and remove it from their own
+   SIGTERM handler; `SIGKILL` cannot be trapped, so a timeout left that lock
+   on disk with no cleanup path anywhere in cogvault — breaking every later
+   auto-commit until an operator deleted it by hand, and unlike the original
+   hypothetical wedge, persisting past the tool call.
+   Fixed: timed-out subprocesses get `SIGTERM` plus a `TerminateGrace`
+   (2s) `WaitDelay` before Go force-kills, so git cleans up after itself.
+4. **P1 — no test proved `git add`'s own timeout binding, at either call
+   site.** Only the `commit` half of each independent-timeout pair had a
+   wedged-subprocess regression test; rebinding `add` to an unbounded context
+   (silently reverting half of correction pass 2) left the entire suite
+   green. Fixed with `TestGitAutoCommit_TimeoutBoundsWedgedAdd`,
+   `TestIngestGitCommit_TimeoutBoundsWedgedAdd`, and
+   `TestCommitTimeoutLeavesNoStaleIndexLock`; all three were confirmed to
+   fail against a mutant that drops add's bounded context.
+5. **P1 — `auto_commit` makes deleted content permanently recoverable, and
+   no document said so.** Both 0024 and `remote-mcp.md` §7 framed committed
+   history purely as a recovery benefit against an attacker. The inverse was
+   never stated: once a page is auto-committed, a later `wiki_delete` removes
+   only the working-tree copy, and content that turns out to be sensitive (a
+   leaked secret, personal data) stays recoverable from history for as long
+   as the repository exists — materially different from the pre-0024 default,
+   where deleting an untracked page left no trace. Documented in
+   `remote-mcp.md` §7 and `SPEC.md` §8.8 as a tradeoff of enabling the mode.
+
+**Correction to this document's own rationale.** The paragraph above claiming
+the commit logic must be duplicated because "`cmd` depends on `mcp`/`ingest`
+per DESIGN.md's dependency graph, not the reverse" was a non-sequitur: sharing
+requires a *third leaf* package, not an edge between those two.
+`internal/config` and `internal/errors` are already exactly that — imported by
+both `cmd/cogvault` and `internal/mcp` — and `cmd` already imports
+`internal/mcp` directly. The duplication that rationale produced had already
+drifted (`context.Background()` on one side, `cmd.Context()` on the other) and
+would have needed all four fixes above applied twice. The mechanism now lives
+in `internal/gitutil` (`Commit`, `CommitTimeout`, `TerminateGrace`), a leaf
+package importing nothing from cogvault, and both call sites are thin wrappers
+that only choose the pathspec and the log wording.
+
+**Worst-case latency, now explicit.** One successful `Commit` is bounded by
+3 × `CommitTimeout` (lock wait, then `add`, then `commit` — each independently
+bounded), plus `TerminateGrace` per subprocess that must be force-killed.
+SPEC.md previously described a single "10s subprocess timeout" in three
+places, which understated the total; those now state the actual bound.

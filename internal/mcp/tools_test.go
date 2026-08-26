@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,10 +18,28 @@ import (
 	"github.com/teslamint/cogvault/internal/adapter"
 	"github.com/teslamint/cogvault/internal/config"
 	cverr "github.com/teslamint/cogvault/internal/errors"
+	"github.com/teslamint/cogvault/internal/gitutil"
 	"github.com/teslamint/cogvault/internal/index"
 	"github.com/teslamint/cogvault/internal/schema"
 	"github.com/teslamint/cogvault/internal/storage"
 )
+
+// shrinkGitCommitTimeout shortens the shared git subprocess budget for one
+// test, so a timeout path can be exercised without a multi-second sleep.
+// It also shrinks the SIGTERM grace period: the fake git binary is a shell
+// script that ignores nothing and exits promptly, so the full production
+// grace period would only pad the test's wall time.
+func shrinkGitCommitTimeout(t *testing.T, d time.Duration) {
+	t.Helper()
+	originalTimeout := gitutil.CommitTimeout
+	originalGrace := gitutil.TerminateGrace
+	gitutil.CommitTimeout = d
+	gitutil.TerminateGrace = 200 * time.Millisecond
+	t.Cleanup(func() {
+		gitutil.CommitTimeout = originalTimeout
+		gitutil.TerminateGrace = originalGrace
+	})
+}
 
 type mockStorage struct {
 	readFn   func(path string) ([]byte, error)
@@ -1004,9 +1023,7 @@ func TestGitAutoCommit_TimeoutBoundsWedgedCommit(t *testing.T) {
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("GIT_FAKE_COMMIT_SLEEP", "10")
 
-	original := gitCommitTimeout
-	gitCommitTimeout = 50 * time.Millisecond
-	t.Cleanup(func() { gitCommitTimeout = original })
+	shrinkGitCommitTimeout(t, 50*time.Millisecond)
 
 	started := time.Now()
 	gitAutoCommit(t.TempDir(), "path.md", "wiki: write path.md")
@@ -1055,9 +1072,7 @@ func TestGitAutoCommit_SlowAddDoesNotStarveCommitTimeout(t *testing.T) {
 	t.Setenv("GIT_FAKE_ADD_SLEEP", "0.9")
 	t.Setenv("GIT_FAKE_COMMIT_SLEEP", "0.9")
 
-	original := gitCommitTimeout
-	gitCommitTimeout = 1500 * time.Millisecond
-	t.Cleanup(func() { gitCommitTimeout = original })
+	shrinkGitCommitTimeout(t, 1500*time.Millisecond)
 
 	var buf strings.Builder
 	prevLogger := slog.Default()
@@ -1083,5 +1098,139 @@ func TestGitAutoCommit_SlowAddDoesNotStarveCommitTimeout(t *testing.T) {
 	}
 	if strings.Contains(logs, "git add failed") {
 		t.Fatalf("add must succeed within its own budget; logs: %s", logs)
+	}
+}
+
+// TestGitAutoCommit_TimeoutBoundsWedgedAdd is the add-side counterpart to
+// TestGitAutoCommit_TimeoutBoundsWedgedCommit. Both git subprocesses get
+// their own bounded context, but only the commit half had a regression
+// test: rebinding add's context to context.Background() (silently dropping
+// half the timeout fix) left the whole suite green. A wedged `git add`
+// holds .git/index.lock exactly like a wedged commit, so an unbounded add
+// blocks the tool call indefinitely — the failure 0024's timeout exists to
+// prevent.
+func TestGitAutoCommit_TimeoutBoundsWedgedAdd(t *testing.T) {
+	binDir, err := filepath.Abs("testdata/bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GIT_FAKE_ADD_SLEEP", "10")
+
+	shrinkGitCommitTimeout(t, 50*time.Millisecond)
+
+	var buf strings.Builder
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	started := time.Now()
+	gitAutoCommit(t.TempDir(), "path.md", "wiki: write path.md")
+	elapsed := time.Since(started)
+
+	if elapsed >= 5*time.Second {
+		t.Fatalf("gitAutoCommit took %s, want bounded by the shrunk timeout (fake git add sleeps 10s unbounded)", elapsed)
+	}
+	// Positive proof the add actually timed out rather than the fake binary
+	// exiting early and making the elapsed-time assertion vacuous.
+	if logs := buf.String(); !strings.Contains(logs, "git add failed") {
+		t.Fatalf("expected a logged add failure from the killed subprocess; logs: %s", logs)
+	}
+}
+
+// TestGitAutoCommit_ConcurrentWritesAllCommit pins that concurrent
+// wiki_write handlers do not silently drop commits. git refuses concurrent
+// index operations on one repository, so unsynchronized handlers lose
+// commits while still reporting tool success — the write lands on disk but
+// the safety net's history entry never exists.
+func TestGitAutoCommit_ConcurrentWritesAllCommit(t *testing.T) {
+	root := t.TempDir()
+	initTestGitRepo(t, root)
+	cfg := realFSCfg("write")
+	os.MkdirAll(filepath.Join(root, cfg.WikiDir), 0o755)
+	store := storage.NewFSStorage(root, cfg)
+	idx := &mockIndex{addFn: func(string, string, map[string]string) error { return nil }}
+	adpt := &mockAdapter{parseFn: func(string, string, bool) (*adapter.Source, error) {
+		return &adapter.Source{Frontmatter: map[string]any{}}, nil
+	}}
+	handler := handleWikiWrite(root, cfg, store, idx, adpt)
+
+	const writers = 6
+	var wg sync.WaitGroup
+	for i := range writers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			result, err := handler(context.Background(), makeReq(map[string]any{
+				"path":    fmt.Sprintf("_wiki/concurrent%d.md", i),
+				"content": "# Concurrent",
+			}))
+			if err != nil {
+				t.Errorf("writer %d: unexpected error: %v", i, err)
+			}
+			if result != nil && result.IsError {
+				t.Errorf("writer %d: unexpected tool error: %v", i, result.Content)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if subjects := gitLogSubjects(t, root); len(subjects) != writers {
+		t.Fatalf("git recorded %d commits for %d successful writes (subjects: %v); every write that reports success under git.auto_commit must leave a commit behind", len(subjects), writers, subjects)
+	}
+}
+
+// TestWikiWriteRejectsGitControlledPaths is the end-to-end regression test
+// for the auto-commit RCE: `git add` runs the clean filter named by
+// .gitattributes, whose command line lives in .git/config. If wiki_write can
+// create both, the next ordinary write executes an attacker's shell command
+// as the server process. The storage layer refuses these paths; this pins
+// the tool surface that reaches it.
+func TestWikiWriteRejectsGitControlledPaths(t *testing.T) {
+	const payload = "*.md filter=evil\n"
+	for _, path := range []string{".gitattributes", ".git/config", "notes/.gitattributes"} {
+		t.Run(path, func(t *testing.T) {
+			root := t.TempDir()
+			initTestGitRepo(t, root)
+			cfg := realFSCfg("write")
+			os.MkdirAll(filepath.Join(root, cfg.WikiDir), 0o755)
+			store := storage.NewFSStorage(root, cfg)
+			idx := &mockIndex{addFn: func(string, string, map[string]string) error { return nil }}
+			adpt := &mockAdapter{parseFn: func(string, string, bool) (*adapter.Source, error) {
+				return &adapter.Source{Frontmatter: map[string]any{}}, nil
+			}}
+
+			// .git/config already exists in a real repository; the others
+			// do not. Capture whatever is there so the assertion below is
+			// "unchanged", which covers both creation and overwrite.
+			abs := filepath.Join(root, path)
+			before, beforeErr := os.ReadFile(abs)
+
+			handler := handleWikiWrite(root, cfg, store, idx, adpt)
+			result, err := handler(context.Background(), makeReq(map[string]any{
+				"path":    path,
+				"content": payload,
+			}))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result == nil || !result.IsError {
+				t.Fatalf("wiki_write(%q) must be refused; result = %v", path, result)
+			}
+
+			after, afterErr := os.ReadFile(abs)
+			if beforeErr != nil {
+				if !errors.Is(afterErr, os.ErrNotExist) {
+					t.Fatalf("wiki_write(%q) must not create the file; read = %q, %v", path, after, afterErr)
+				}
+				return
+			}
+			if afterErr != nil {
+				t.Fatalf("wiki_write(%q) must leave the existing file intact; read = %v", path, afterErr)
+			}
+			if string(after) != string(before) {
+				t.Fatalf("wiki_write(%q) overwrote git-controlled content; before = %q, after = %q", path, before, after)
+			}
+		})
 	}
 }

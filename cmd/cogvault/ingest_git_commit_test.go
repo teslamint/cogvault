@@ -8,7 +8,25 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/teslamint/cogvault/internal/gitutil"
 )
+
+// shrinkIngestGitCommitTimeout shortens the shared git subprocess budget for
+// one test, so a timeout path can be exercised without a multi-second sleep.
+// The SIGTERM grace period shrinks too: the fake git binary exits promptly
+// on the signal, so the production grace period would only pad wall time.
+func shrinkIngestGitCommitTimeout(t *testing.T, d time.Duration) {
+	t.Helper()
+	originalTimeout := gitutil.CommitTimeout
+	originalGrace := gitutil.TerminateGrace
+	gitutil.CommitTimeout = d
+	gitutil.TerminateGrace = 200 * time.Millisecond
+	t.Cleanup(func() {
+		gitutil.CommitTimeout = originalTimeout
+		gitutil.TerminateGrace = originalGrace
+	})
+}
 
 // initTestGitRepo creates a git repository at dir with a local (not global)
 // identity, so the test never depends on the host's ~/.gitconfig having
@@ -233,9 +251,7 @@ func TestIngestGitCommit_TimeoutBoundsWedgedCommit(t *testing.T) {
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("GIT_FAKE_COMMIT_SLEEP", "10")
 
-	original := ingestGitCommitTimeout
-	ingestGitCommitTimeout = 50 * time.Millisecond
-	t.Cleanup(func() { ingestGitCommitTimeout = original })
+	shrinkIngestGitCommitTimeout(t, 50*time.Millisecond)
 
 	started := time.Now()
 	stdout, _, err := executeCommand("ingest", "--config", configPath)
@@ -303,9 +319,7 @@ func TestIngestGitCommit_SlowAddDoesNotStarveCommitTimeout(t *testing.T) {
 	t.Setenv("GIT_FAKE_ADD_SLEEP", "0.9")
 	t.Setenv("GIT_FAKE_COMMIT_SLEEP", "0.9")
 
-	original := ingestGitCommitTimeout
-	ingestGitCommitTimeout = 1500 * time.Millisecond
-	t.Cleanup(func() { ingestGitCommitTimeout = original })
+	shrinkIngestGitCommitTimeout(t, 1500*time.Millisecond)
 
 	var buf strings.Builder
 	prevLogger := slog.Default()
@@ -337,5 +351,53 @@ func TestIngestGitCommit_SlowAddDoesNotStarveCommitTimeout(t *testing.T) {
 	}
 	if strings.Contains(logs, "post-ingest git add failed") {
 		t.Fatalf("add must succeed within its own budget; logs: %s", logs)
+	}
+}
+
+// TestIngestGitCommit_TimeoutBoundsWedgedAdd is the add-side counterpart to
+// TestIngestGitCommit_TimeoutBoundsWedgedCommit. Only the commit half had a
+// regression test: rebinding add's context to cmd.Context() (silently
+// dropping half the timeout fix) left the whole suite green. The
+// whole-tree `git add -A -- .` is the slower of the pair — its cost scales
+// with tracked file count — so an unbounded add is the likelier wedge, and
+// it holds .git/index.lock the entire time.
+func TestIngestGitCommit_TimeoutBoundsWedgedAdd(t *testing.T) {
+	fakeClaudeOnPath(t)
+	t.Setenv("CLAUDE_FAKE_MODE", "ok")
+	configPath, srcDir, wikiDir, _ := setupIngestVault(t)
+	initTestGitRepo(t, wikiDir)
+	appendConfig(t, configPath, "git:\n  auto_commit: write+ingest\n")
+	writeAgedSource(t, srcDir, "one.pdf", "wedged add fixture")
+
+	binDir, err := filepath.Abs("../../internal/mcp/testdata/bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GIT_FAKE_ADD_SLEEP", "10")
+
+	shrinkIngestGitCommitTimeout(t, 50*time.Millisecond)
+
+	var buf strings.Builder
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	started := time.Now()
+	stdout, _, err := executeCommand("ingest", "--config", configPath)
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	if !strings.Contains(stdout, "digested=1") {
+		t.Fatalf("expected digested=1, got: %q", stdout)
+	}
+	if elapsed >= 5*time.Second {
+		t.Fatalf("ingest took %s, want bounded by the shrunk timeout (fake git add sleeps 10s unbounded)", elapsed)
+	}
+	// Positive proof the add actually timed out, rather than the fake
+	// binary exiting early and making the elapsed assertion vacuous.
+	if logs := buf.String(); !strings.Contains(logs, "post-ingest git add failed") {
+		t.Fatalf("expected a logged add failure from the killed subprocess; logs: %s", logs)
 	}
 }

@@ -26,11 +26,21 @@ cmd/cogvault/main.go
    (plain os calls, NOT through storage) ◀───────────────┘
 
 all packages ──▶ errors/, config/
+mcp/, cmd/     ──▶ gitutil/
 ```
 
 Unidirectional, no cycles. Two new packages in v2: `internal/llm` and
 `internal/ingest`. `ingest` composes `storage` (wiki writes), `index` (Add),
 `llm` (Digest), and `config`, and additionally reads source files directly.
+
+`internal/gitutil` (0024) is a third leaf package alongside `errors/` and
+`config/`: it imports nothing from cogvault, so both `internal/mcp`
+(per-file auto-commits) and `cmd/cogvault` (the post-ingest whole-tree
+snapshot) depend on it without any edge between them. Sharing here needs a
+leaf, not a direction change — an earlier reading treated "cmd depends on
+mcp, not the reverse" as a reason to duplicate the commit logic, which
+instead produced two copies that drifted apart and would have needed every
+concurrency and signal fix applied twice.
 
 ---
 
@@ -318,15 +328,13 @@ five are read-only, non-destructive. `IdempotentHint`/`OpenWorldHint` stay at
 `tools.go`: `wiki_search` drops the `scope` parameter; tool descriptions say
 "wiki root" instead of "vault". `handleWikiSearch` calls `idx.Search(query,
 limit)`. `handleWikiDelete` calls `store.Delete`, removes the path from the
-index if it was indexed, then unconditionally calls `gitAutoCommit` (0024:
-takes a commit message parameter; `add` and `commit` each get their own
-independent `context.WithTimeout(..., gitCommitTimeout)`, 10s — a shared
-context would let a slow add starve commit's own budget), best-effort
-`git add`s and `git commit`s the deletion when `wiki_dir` is a git
-repository — failures are logged, not returned as a tool error (§2.10
-covers the authorization layer that gates this over the network).
-"Unconditional" means the call always happens, not that it always commits:
-`git add` on a path git never tracked (e.g. under the default
+index if it was indexed, then unconditionally calls `gitAutoCommit`, a thin
+wrapper over `gitutil.Commit` (§2.11) that only chooses the pathspec and the
+log wording; it best-effort `git add`s and `git commit`s the deletion when
+`wiki_dir` is a git repository — failures are logged, not returned as a tool
+error (§2.10 covers the authorization layer that gates this over the
+network). "Unconditional" means the call always happens, not that it always
+commits: `git add` on a path git never tracked (e.g. under the default
 `git.auto_commit: off`, where `wiki_write` never committed it) fails with
 no matching pathspec, so that delete produces no commit either.
 `handleWikiWrite` calls the same `gitAutoCommit` after a successful write
@@ -343,21 +351,21 @@ vault flag is deleted. `wire.go`: `resolveConfigPath(cmd)` + `bootstrap(configPa
 flow (SPEC §9.1). `ingest.go` (new): flags → `ingest.RunOptions`, `exec.LookPath`
 for `claude` → `llm.NewClaudeCode`, prints `report.String()`, nonzero exit only on
 run-level failure. When `cfg.Git.CommitsOnIngest()` (0024) and the run digested
-at least one file, `postIngestGitCommit` runs after `postIngestEmbed`: a
-context-bounded (`ingestGitCommitTimeout`, 10s) `git add -A -- .` + one
-`git commit -m "wiki: ingest snapshot"` over the whole `cfg.WikiDir` tree,
-best-effort — failures (including "nothing to commit", the expected outcome
-when a digest reproduces identical content) log and never fail the command.
+at least one file, `postIngestGitCommit` runs after `postIngestEmbed`: one
+`gitutil.Commit` (§2.11) doing `git add -A -- .` + `git commit -m "wiki:
+ingest snapshot"` over the whole `cfg.WikiDir` tree, best-effort — failures
+(including "nothing to commit", the expected outcome when a digest
+reproduces identical content) log and never fail the command.
 The `-- .` pathspec is load-bearing, not cosmetic: `git -C wikiDir add -A`
 resolves against the enclosing repository's root, not `wikiDir`, whenever
 `wikiDir` is a plain subdirectory of a larger repo rather than its own git
 root — a bare `-A` would stage and commit dirty files anywhere in that
 outer repo. `TestIngestGitCommit_NestedWikiDirDoesNotStageOutsideFiles`
 (`cmd/cogvault/ingest_git_commit_test.go`) pins this: it fails against a
-`-A`-without-pathspec regression. This constant/helper is independent of
-`internal/mcp`'s `gitAutoCommit`; cmd depends on mcp per the dependency
-graph (§1), not the reverse, so the 10s-timeout git-commit logic is
-duplicated rather than shared.
+`-A`-without-pathspec regression. The lock, timeouts, and signal handling
+are `gitutil`'s, shared with `internal/mcp`: a scheduled ingest and a live
+`serve` commit into the same repository, so they must contend on one lock
+rather than race.
 
 `status.go` loads the config and calls `ingest.AttentionRows` directly. It does
 not bootstrap storage, the index, or the ingest runner. Human output uses local
@@ -494,6 +502,52 @@ forever on a channel that never closes.
 
 No rejection path in this package logs a credential, a bearer token, or a raw
 JWT — `logRejection` records only a reason class and remote address.
+
+
+### 2.11 gitutil (new, 0024)
+
+```go
+var CommitTimeout = 10 * time.Second
+var TerminateGrace = 2 * time.Second
+
+func Commit(ctx context.Context, repoDir string, pathspecs []string, message string) (Stage, error)
+```
+
+A leaf package (§1): imports nothing from cogvault, so `internal/mcp` and
+`cmd/cogvault` share one commit mechanism without an edge between them. Both
+callers keep their own wording; `Commit` reports the failing `Stage`
+(`StageLock`/`StageAdd`/`StageCommit`) so the log line stays caller-specific,
+and never logs or fails the caller itself — the best-effort contract is
+unchanged.
+
+Three properties are load-bearing, each with a mutation-verified regression
+test in `internal/gitutil/commit_test.go`:
+
+- **One advisory `flock` per repository.** Git refuses concurrent index
+  operations, so unsynchronized callers lose commits: measured, 8 concurrent
+  commits produced 1 commit and 7 exit-128 failures, each of which the
+  best-effort contract would have swallowed as a warning. `flock` excludes
+  per *open file description*, so two goroutines in one process contend
+  exactly as two processes do — verified by probe, not assumed; a first
+  implementation carried a redundant in-process semaphore on the opposite
+  belief. The lock file lives in the OS temp dir keyed by a hash of the
+  resolved repo path, never inside `wiki_dir`, so the whole-tree ingest
+  snapshot cannot commit it as wiki content.
+- **Bounded, non-blocking lock acquisition.** `flock`'s blocking mode ignores
+  context, so a caller queued behind a wedged commit would hang forever —
+  precisely the failure the timeout exists to prevent. The wait is a retry
+  loop bounded by `CommitTimeout`.
+- **`SIGTERM` with grace, never bare `SIGKILL`.** `git add`/`git commit` hold
+  `.git/index.lock` while running and release it from their own signal
+  handler. Go's `CommandContext` default is `SIGKILL`, which git cannot trap:
+  a timeout would strand the lock with no cleanup path in cogvault, breaking
+  every later commit until an operator deleted it by hand. `cmd.Cancel` sends
+  `SIGTERM` and `cmd.WaitDelay = TerminateGrace` bounds the wait before Go
+  force-kills.
+
+`add` and `commit` are bounded independently by `CommitTimeout` rather than
+sharing one budget, so a slow (not wedged) add cannot starve commit. With the
+lock wait, worst case for one `Commit` is ~3 × `CommitTimeout` (SPEC §8.8.1).
 
 ---
 
