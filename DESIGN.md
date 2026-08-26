@@ -559,6 +559,7 @@ test in `internal/gitutil/commit_test.go`:
   bounds the wait before Go force-kills. This applies to the two git
   subprocesses and nothing else: the lock wait is an in-process retry loop
   with no process to signal, so it simply ends at its context deadline.
+
 `add` and `commit` are bounded independently by `CommitTimeout` rather than
 sharing one budget, so a slow (not wedged) add cannot starve commit. The three
 10s deadline budgets bound one `Commit` to ~30s before subprocess grace;
