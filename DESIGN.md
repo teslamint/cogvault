@@ -36,10 +36,12 @@ Unidirectional, no cycles. Two new packages in v2: `internal/llm` and
 `internal/gitutil` (0024) is a third leaf package alongside `errors/` and
 `config/`: it imports nothing from cogvault, so both `internal/mcp`
 (per-file auto-commits) and `cmd/cogvault` (the post-ingest whole-tree
-snapshot) depend on it without any edge between them. Sharing here needs a
-leaf, not a direction change — an earlier reading treated "cmd depends on
-mcp, not the reverse" as a reason to duplicate the commit logic, which
-instead produced two copies that drifted apart and would have needed every
+snapshot) both depend on it without either depending on the other for it.
+`cmd/cogvault` does import `internal/mcp` — the point is that sharing a
+mechanism needs a common leaf, not a direction change. An earlier reading
+treated "cmd depends on mcp, not the reverse" as a reason to duplicate the
+commit logic, which instead produced two copies that drifted apart and would
+have needed every
 concurrency and signal fix applied twice.
 
 ---
@@ -530,20 +532,24 @@ test in `internal/gitutil/commit_test.go`:
   per *open file description*, so two goroutines in one process contend
   exactly as two processes do — verified by probe, not assumed; a first
   implementation carried a redundant in-process semaphore on the opposite
-  belief. The lock file lives in the OS temp dir keyed by a hash of the
-  resolved repo path, never inside `wiki_dir`, so the whole-tree ingest
-  snapshot cannot commit it as wiki content.
+  belief. The lock file lives in an owner-only directory under
+  `os.UserCacheDir()` keyed by a hash of the resolved repo path — never in a
+  shared temp dir, where a deterministic name is squattable by another local
+  user, and never inside `wiki_dir`, where the whole-tree ingest snapshot
+  would commit it as wiki content.
 - **Bounded, non-blocking lock acquisition.** `flock`'s blocking mode ignores
   context, so a caller queued behind a wedged commit would hang forever —
   precisely the failure the timeout exists to prevent. The wait is a retry
   loop bounded by `CommitTimeout`.
-- **`SIGTERM` with grace, never bare `SIGKILL`.** `git add`/`git commit` hold
-  `.git/index.lock` while running and release it from their own signal
-  handler. Go's `CommandContext` default is `SIGKILL`, which git cannot trap:
-  a timeout would strand the lock with no cleanup path in cogvault, breaking
-  every later commit until an operator deleted it by hand. `cmd.Cancel` sends
-  `SIGTERM` and `cmd.WaitDelay = TerminateGrace` bounds the wait before Go
-  force-kills.
+- **`SIGTERM` with grace, never bare `SIGKILL` — for the subprocesses only.**
+  `git add`/`git commit` hold `.git/index.lock` while running and release it
+  from their own signal handler. Go's `CommandContext` default is `SIGKILL`,
+  which git cannot trap: a timeout would strand the lock with no cleanup path
+  in cogvault, breaking every later commit until an operator deleted it by
+  hand. `cmd.Cancel` sends `SIGTERM` and `cmd.WaitDelay = TerminateGrace`
+  bounds the wait before Go force-kills. This applies to the two git
+  subprocesses and nothing else: the lock wait is an in-process retry loop
+  with no process to signal, so it simply ends at its context deadline.
 
 `add` and `commit` are bounded independently by `CommitTimeout` rather than
 sharing one budget, so a slow (not wedged) add cannot starve commit. With the

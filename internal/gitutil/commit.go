@@ -26,6 +26,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -171,9 +172,9 @@ func lockRepo(ctx context.Context, repoDir string) (func(), error) {
 		return nil, err
 	}
 
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	f, err := openLockFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("gitutil: open commit lock %s: %w", path, err)
+		return nil, err
 	}
 
 	deadlineCtx, cancel := context.WithTimeout(ctx, CommitTimeout)
@@ -188,17 +189,58 @@ func lockRepo(ctx context.Context, repoDir string) (func(), error) {
 			}, nil
 		}
 		if !errors.Is(err, unix.EWOULDBLOCK) {
-			f.Close()
+			_ = f.Close()
 			return nil, fmt.Errorf("gitutil: flock %s: %w", path, err)
 		}
 
 		select {
 		case <-deadlineCtx.Done():
-			f.Close()
+			_ = f.Close()
 			return nil, fmt.Errorf("gitutil: commit lock %s busy: %w", path, deadlineCtx.Err())
 		case <-time.After(lockRetryInterval):
 		}
 	}
+}
+
+// openLockFile opens the commit lock, refusing anything that is not a plain
+// owner-owned regular file.
+//
+// The containing directory is already owner-only and validated, but that
+// only excludes *other* users. It does not exclude a symlink planted at this
+// exact path by a compromised process running as the same user, and a
+// followed symlink would make cogvault flock — and create — a file somewhere
+// else entirely.
+//
+// O_NOFOLLOW refuses the symlink at open time; O_CLOEXEC keeps the
+// descriptor out of the `git` children this package forks while holding the
+// lock. The post-open Fstat closes the gap O_NOFOLLOW alone leaves: it
+// verifies what the descriptor actually refers to rather than what the path
+// looked like, so a swap racing the open is caught too.
+func openLockFile(path string) (*os.File, error) {
+	fd, err := unix.Open(path, unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("gitutil: open commit lock %s: %w", path, err)
+	}
+	f := os.NewFile(uintptr(fd), path)
+
+	var st syscall.Stat_t
+	if err := syscall.Fstat(fd, &st); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("gitutil: stat commit lock %s: %w", path, err)
+	}
+	if st.Mode&syscall.S_IFMT != syscall.S_IFREG {
+		_ = f.Close()
+		return nil, fmt.Errorf("gitutil: commit lock %s is not a regular file", path)
+	}
+	if int(st.Uid) != os.Geteuid() {
+		_ = f.Close()
+		return nil, fmt.Errorf("gitutil: commit lock %s is owned by uid %d, not %d", path, st.Uid, os.Geteuid())
+	}
+	if perm := st.Mode & 0o777; perm&0o077 != 0 {
+		_ = f.Close()
+		return nil, fmt.Errorf("gitutil: commit lock %s is group- or world-accessible (mode %o)", path, perm)
+	}
+	return f, nil
 }
 
 func lockPath(repoDir string) (string, error) {
@@ -212,6 +254,66 @@ func lockPath(repoDir string) (string, error) {
 	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
 		abs = resolved
 	}
+
+	dir, err := lockDir()
+	if err != nil {
+		return "", err
+	}
+
 	sum := sha256.Sum256([]byte(abs))
-	return filepath.Join(os.TempDir(), "cogvault-git-"+hex.EncodeToString(sum[:8])+".lock"), nil
+	return filepath.Join(dir, "git-"+hex.EncodeToString(sum[:8])+".lock"), nil
+}
+
+// userCacheDir is a seam so tests can redirect the lock directory into a
+// temp dir. Tests that exercise the directory guards must never mutate the
+// real one: a concurrent `cogvault serve` or `ingest` on the same machine
+// shares it, and renaming or symlinking it out from under a live process
+// would break its commit lock mid-run.
+var userCacheDir = os.UserCacheDir
+
+// lockDir returns the directory holding commit locks, creating it if needed.
+//
+// It deliberately does not live under os.TempDir(). A deterministic name in a
+// world-writable directory is squattable: another local user can pre-create
+// that exact path with permissions cogvault cannot open, and because both
+// call sites treat a commit failure as best-effort and only log a warning,
+// the auto-commit safety net would then be silently and permanently disabled.
+// os.UserCacheDir() is per-user and not world-writable on either supported
+// platform.
+//
+// The directory is validated with Lstat rather than repaired with Chmod.
+// Chmod follows symlinks, so "create then chmod 0700" on an attacker-planted
+// symlink re-modes whatever it points at — verified: it silently narrowed an
+// unrelated 0755 directory to 0700. A wrong owner, a symlink, or permissive
+// bits are therefore reported, never corrected.
+func lockDir() (string, error) {
+	cache, err := userCacheDir()
+	if err != nil {
+		return "", fmt.Errorf("gitutil: locate user cache dir: %w", err)
+	}
+	dir := filepath.Join(cache, "cogvault", "locks")
+
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("gitutil: create lock dir %s: %w", dir, err)
+	}
+
+	// Lstat, not Stat: a symlink must be seen as a symlink rather than
+	// followed to whatever it targets. With Lstat a symlink reports
+	// IsDir() == false, so the directory check below rejects it — there is
+	// deliberately no separate ModeSymlink branch, because mutation testing
+	// showed it could be deleted with every test still passing.
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return "", fmt.Errorf("gitutil: stat lock dir %s: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("gitutil: lock dir %s is not a directory (mode %v); refusing to use it", dir, info.Mode().Type())
+	}
+	if st, ok := info.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
+		return "", fmt.Errorf("gitutil: lock dir %s is owned by uid %d, not %d", dir, st.Uid, os.Getuid())
+	}
+	if mode := info.Mode().Perm(); mode&0o077 != 0 {
+		return "", fmt.Errorf("gitutil: lock dir %s is group- or world-accessible (mode %o)", dir, mode)
+	}
+	return dir, nil
 }

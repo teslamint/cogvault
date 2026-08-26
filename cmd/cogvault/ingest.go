@@ -134,12 +134,6 @@ func postIngestEmbed(cmd *cobra.Command, idx *index.SQLiteIndex, store *storage.
 	}
 }
 
-// ingestGitCommitTimeout is the CLI-facing name for the shared git
-// subprocess budget. The mechanism itself lives in internal/gitutil so this
-// command and the MCP server agree on one bound and one lock when they
-// target the same repository; assigning through gitutil.CommitTimeout keeps
-// a test's shrunk budget effective for the subprocesses it actually runs.
-
 // postIngestGitCommit commits the whole wiki tree once after a successful
 // ingest run that digested at least one file (git.auto_commit: write+ingest,
 // 0024). Best-effort: failures log, never fail the ingest command — same

@@ -343,3 +343,133 @@ func TestCommitGivesEachStageAnIndependentDeadline(t *testing.T) {
 		t.Fatalf("add budget = %s, want the full CommitTimeout %s", addBudget, CommitTimeout)
 	}
 }
+
+// TestLockDirIsPrivateToTheUser pins the lock outside any world-writable
+// directory.
+//
+// The original implementation put a deterministic name straight in
+// os.TempDir(). Verified before the fix: pre-creating that exact path mode
+// 0o400 made Commit return `stage=lock ... permission denied` on every call,
+// and because both call sites treat commit failure as best-effort and only
+// log a warning, the auto-commit safety net was silently and permanently
+// disabled by an unprivileged local user.
+func TestLockDirIsPrivateToTheUser(t *testing.T) {
+	dir := initRepo(t)
+
+	path, err := lockPath(dir)
+	if err != nil {
+		t.Fatalf("lockPath: %v", err)
+	}
+
+	parent := filepath.Dir(path)
+	if parent == os.TempDir() {
+		t.Fatalf("lock %q sits directly in the shared temp dir; a deterministic name there is squattable", path)
+	}
+
+	info, err := os.Lstat(parent)
+	if err != nil {
+		t.Fatalf("lstat lock dir: %v", err)
+	}
+	if mode := info.Mode().Perm(); mode&0o077 != 0 {
+		t.Fatalf("lock dir %q mode = %o, want no group/world bits", parent, mode)
+	}
+}
+
+// TestLockDirRejectsASymlink covers the reason the directory is validated
+// rather than repaired. An earlier fix did MkdirAll followed by Chmod 0700;
+// because Chmod follows symlinks, pointing the lock dir at an unrelated
+// directory silently re-moded that directory instead of failing. Measured:
+// an unrelated 0755 directory became 0700.
+func TestLockDirRejectsASymlink(t *testing.T) {
+	// Redirect the cache base into a temp dir. This test plants a symlink
+	// where the lock directory belongs, and doing that to the real
+	// per-user cache would break the commit lock of any cogvault process
+	// running concurrently on this machine.
+	base := fakeCacheDir(t)
+
+	victim := t.TempDir()
+	if err := os.Chmod(victim, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := filepath.Join(base, "cogvault", "locks")
+	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, dir); err != nil {
+		t.Fatalf("planting symlink: %v", err)
+	}
+
+	if _, err := lockDir(); err == nil {
+		t.Fatal("lockDir accepted a symlinked lock dir; it must refuse rather than follow it")
+	}
+	if mode := mustMode(t, victim); mode != 0o755 {
+		t.Fatalf("symlink target mode = %o, want 0755 unchanged; lockDir must never chmod through a symlink", mode)
+	}
+}
+
+// TestLockDirRejectsAPermissiveDirectory pins the mode check. MkdirAll
+// returns nil for an existing directory without narrowing its bits, so a
+// pre-existing group- or world-accessible lock dir must be reported rather
+// than silently used.
+func TestLockDirRejectsAPermissiveDirectory(t *testing.T) {
+	base := fakeCacheDir(t)
+
+	dir := filepath.Join(base, "cogvault", "locks")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := lockDir(); err == nil {
+		t.Fatal("lockDir accepted a world-accessible lock dir; permissive bits must be reported, not used")
+	}
+}
+
+// fakeCacheDir points the lock directory at a temp dir for the duration of
+// one test, so guard tests never mutate the shared per-user cache.
+func fakeCacheDir(t *testing.T) string {
+	t.Helper()
+	base := t.TempDir()
+	orig := userCacheDir
+	userCacheDir = func() (string, error) { return base, nil }
+	t.Cleanup(func() { userCacheDir = orig })
+	return base
+}
+
+// TestOpenLockFileRejectsASymlink pins the file-level guard. The validated
+// owner-only directory excludes other users, but not a symlink planted at
+// this exact path by a compromised process running as the same user; a
+// followed symlink would have cogvault create and flock a file elsewhere.
+func TestOpenLockFileRejectsASymlink(t *testing.T) {
+	dir := initRepo(t)
+	path, err := lockPath(dir)
+	if err != nil {
+		t.Fatalf("lockPath: %v", err)
+	}
+	_ = os.Remove(path)
+
+	target := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatalf("planting symlink: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(path) })
+
+	if _, err := openLockFile(path); err == nil {
+		t.Fatal("openLockFile followed a symlink; O_NOFOLLOW must refuse it")
+	}
+	if _, err := os.Stat(target); err == nil {
+		t.Fatalf("symlink target %s was created; the open must not reach through the link", target)
+	}
+}
+
+func mustMode(t *testing.T, path string) os.FileMode {
+	t.Helper()
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.Mode().Perm()
+}

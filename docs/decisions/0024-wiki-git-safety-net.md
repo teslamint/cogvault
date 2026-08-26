@@ -27,8 +27,9 @@ behavior and the documented operator responsibility:
      `gitAutoCommit` path (`git add <path>` + `git commit -m "wiki: write
      <path>"`). Failures log, never tool errors (same contract as §8.8).
    - `write+ingest`: additionally commit the whole tree once after a
-     successful ingest run (`git add -A` + one commit), so digested pages are
-     captured too.
+     successful ingest run (`git add -A -- .` + one commit — the `-- .`
+     pathspec is load-bearing, see the correction below), so digested pages
+     are captured too.
 2. The commit subprocess gains a context timeout (e.g. 10s) so a wedged
    `index.lock` cannot block a tool call indefinitely — this part is a plain
    robustness fix and may land independently of the opt-in.
@@ -176,9 +177,10 @@ validated against the code before fixing.
    contend exactly as two processes do — verified by direct probe rather than
    assumed, since a first implementation carried a redundant in-process
    semaphore on the belief that `flock` was per-process. The lock file lives
-   in the OS temp directory keyed by a hash of the resolved repository path,
-   not in the working tree, so the whole-tree `git add -A -- .` cannot commit
-   it as wiki content.
+   in an owner-only directory under `os.UserCacheDir()` keyed by a hash of
+   the resolved repository path, not in the working tree, so the whole-tree
+   `git add -A -- .` cannot commit it as wiki content. (It was originally
+   placed directly in the OS temp directory; see the fifth correction pass.)
 3. **P1 — the timeout could manufacture the wedged `index.lock` it defends
    against.** Neither call site set `Cancel`/`WaitDelay`, so Go's default for
    a cancelled `CommandContext` is `SIGKILL`. Both `git add` and `git commit`
@@ -266,3 +268,72 @@ add duration to zero makes that same mutant pass, confirming the advanced
 timestamp is what does the discriminating rather than incidental ordering.
 8 consecutive full `-race` runs of `gitutil`, `mcp`, and `cmd/cogvault` are
 clean.
+
+**Fifth correction pass** (2026-08-26, CodeRabbit review of PR #38): six
+findings, all reproduced against the code before fixing.
+
+1. **P1 — the commit lock was squattable, and squatting it silently disabled
+   the safety net permanently.** `lockPath` returned a deterministic name
+   directly under `os.TempDir()`. On a multi-user host any local user can
+   pre-create that exact path with permissions cogvault cannot open;
+   `os.OpenFile` then fails, `Commit` returns `StageLock` on every call, and
+   because both call sites treat commit failure as best-effort and only log a
+   warning, auto-commit stops happening with no visible error. Reproduced:
+   pre-creating the path mode `0o400` produced
+   `stage=lock ... permission denied` indefinitely.
+   Fixed: the lock lives in an owner-only directory under
+   `os.UserCacheDir()`, validated with `Lstat` (directory, owned by the
+   current uid, no group/world bits) and never repaired.
+
+   The first attempt at this fix was worse than the bug. It did `MkdirAll`
+   followed by `Chmod(dir, 0o700)` — and `Chmod` follows symlinks, so an
+   attacker-planted symlink at the lock directory would have had cogvault
+   re-mode whatever it pointed at. Measured: an unrelated `0755` directory
+   was silently narrowed to `0700`. Validation replaced repair for exactly
+   this reason.
+
+   The lock *file* open is hardened separately, because an owner-only
+   directory excludes other users but not a compromised process running as
+   the same user: `unix.Open` with `O_NOFOLLOW|O_CLOEXEC`, then `Fstat` on
+   the resulting descriptor to confirm it is a regular file owned by the
+   current euid with no group/world bits. `Fstat` rather than a path check
+   because it describes what the descriptor actually refers to, so a swap
+   racing the open is caught too.
+
+   A symlink branch in the directory validation was written, then deleted:
+   mutation testing showed removing it left every test passing, because with
+   `Lstat` a symlink reports `IsDir() == false` and the directory check
+   already rejects it. A guard no test can distinguish is not a guard.
+2. **Orphaned comment.** `ingestGitCommitTimeout` was removed when the
+   mechanism moved to `internal/gitutil`, but its doc comment survived,
+   describing an identifier that no longer exists. Deleted.
+3. **DESIGN.md misdescribed the dependency graph.** It claimed `internal/mcp`
+   and `cmd/cogvault` depend on `gitutil` "without any edge between them",
+   while the same document's graph shows `cmd/cogvault` importing
+   `internal/mcp`. The leaf argument never needed that claim — sharing needs
+   a common leaf, not the absence of an edge. Reworded.
+4. **0024 contradicted itself on the ingest pathspec.** The Decision section
+   still described bare `git add -A`, which resolves against an enclosing
+   repository's root rather than `wiki_dir`; the correction to `-- .` was
+   recorded 50 lines later. The earlier mention now carries the pathspec and
+   points at the correction.
+5. **DESIGN.md overstated the signal contract.** It read as though every
+   stage exceeding its budget gets `SIGTERM` plus a grace period. The lock
+   wait is an in-process retry loop with no process to signal; only the two
+   git subprocesses are signalled. Scoped explicitly.
+6. **Unchecked `f.Close()` in two error paths** where the same function
+   already used `_ =` elsewhere. Made consistent.
+
+Verified: `TestLockDirIsPrivateToTheUser`, `TestLockDirRejectsASymlink`,
+`TestLockDirRejectsAPermissiveDirectory`, and
+`TestOpenLockFileRejectsASymlink` each fail against a mutant that removes the
+guard they cover. The lock-directory guard tests run against a `userCacheDir`
+seam pointed at a temp dir — mutating the real per-user cache directory would
+break the commit lock of any cogvault process running concurrently on the
+same machine.
+
+Not covered by a test: the directory's uid check. Neutering it leaves the
+suite green, because a unit test cannot create a directory owned by a
+different user. It is kept as the real defense on a multi-user host and
+recorded here as an accepted coverage gap rather than removed to satisfy
+mutation testing.
