@@ -503,8 +503,23 @@ best-effort index reflection. When `git.auto_commit` is `write` or
 `write+ingest` (§3.1, default `off`), also auto-commits the write
 (`git add` + `git commit -m "wiki: write <path>"`) when `wiki_dir` is a git
 repository; a failed `git add`/`git commit` is logged, not returned as a
-tool error, and is bounded by a 10s subprocess timeout (0024). Errors:
-`ErrPermission`, `ErrTraversal`, `ErrSymlink`.
+tool error, and is bounded as described in §8.8.1 (0024).
+
+Paths git reads as configuration are rejected with `ErrPermission`,
+independently of `exclude`/`exclude_read`: any path containing a `.git`,
+`.gitattributes`, or `.gitmodules` component, at any depth, compared
+case-insensitively. This is not a tidiness rule — `git add` executes the
+clean filter that `.gitattributes` names, using the command line
+`.git/config` defines, so a writable `.gitattributes` plus a writable
+`.git/config` turns the auto-commit path into arbitrary command execution as
+the server process on the *next* ordinary write. The comparison is
+case-insensitive because on a case-insensitive filesystem (APFS, NTFS) a
+write to `.GIT/config` lands in the real `.git/config`; the rule is applied
+uniformly so the boundary does not vary by host. `.gitignore` remains
+writable: it selects paths, it never names a command. `wiki_delete` and
+internal moves apply the same rule.
+
+Errors: `ErrPermission`, `ErrTraversal`, `ErrSymlink`.
 
 ### 8.4 wiki_list
 

@@ -58,6 +58,10 @@ func (fs *FSStorage) Write(path string, data []byte) error {
 		return fmt.Errorf("storage.Write %s: %w", path, cverr.ErrPermission)
 	}
 
+	if isGitControlled(cleaned) {
+		return fmt.Errorf("storage.Write %s: %w", path, cverr.ErrPermission)
+	}
+
 	if cleaned == filepath.Clean(fs.cfg.SchemaPath()) {
 		return fmt.Errorf("storage.Write %s: %w", path, cverr.ErrPermission)
 	}
@@ -86,6 +90,10 @@ func (fs *FSStorage) Delete(path string) error {
 	}
 
 	if fs.isExcludeRead(cleaned) {
+		return fmt.Errorf("storage.Delete %s: %w", path, cverr.ErrPermission)
+	}
+
+	if isGitControlled(cleaned) {
 		return fmt.Errorf("storage.Delete %s: %w", path, cverr.ErrPermission)
 	}
 
@@ -141,7 +149,7 @@ func (fs *FSStorage) Move(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	if fs.isExcludeRead(cleanedSrc) || cleanedSrc == filepath.Clean(fs.cfg.SchemaPath()) {
+	if fs.isExcludeRead(cleanedSrc) || cleanedSrc == filepath.Clean(fs.cfg.SchemaPath()) || isGitControlled(cleanedSrc) {
 		return fmt.Errorf("storage.Move %s: %w", src, cverr.ErrPermission)
 	}
 
@@ -149,7 +157,7 @@ func (fs *FSStorage) Move(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	if fs.isExcludeRead(cleanedDst) || cleanedDst == filepath.Clean(fs.cfg.SchemaPath()) {
+	if fs.isExcludeRead(cleanedDst) || cleanedDst == filepath.Clean(fs.cfg.SchemaPath()) || isGitControlled(cleanedDst) {
 		return fmt.Errorf("storage.Move %s: %w", dst, cverr.ErrPermission)
 	}
 
@@ -305,6 +313,50 @@ func (fs *FSStorage) isAllExcluded(path string) bool {
 	for _, entry := range fs.cfg.AllExcluded() {
 		if adapter.HasPathPrefix(cleanedPath, filepath.Clean(entry)) {
 			return true
+		}
+	}
+	return false
+}
+
+// isGitControlled reports whether path targets git's own control directory
+// or a file git reads as configuration when it walks the working tree.
+//
+// This is a hard, non-configurable boundary rather than a default entry in
+// cfg.Exclude, because it is load-bearing against remote code execution
+// rather than for tidiness: the wiki auto-commit safety net (0024) runs
+// `git add` over operator-owned content, and `git add` executes the clean
+// filter named by a `.gitattributes` entry, with the filter's command line
+// defined in `.git/config`. Letting a caller write both files turns "an
+// attacker with a valid credential can overwrite wiki pages" — 0024's
+// documented threat ceiling — into arbitrary command execution as the
+// cogvault server process, triggered by the *next* ordinary write from
+// anyone. Making it configurable would let an operator re-open that hole by
+// editing a list that otherwise only controls which pages show up in search.
+//
+// Matching is per path component, at any depth: `.gitattributes` applies to
+// the directory it sits in, so a nested one is as exploitable as one at the
+// wiki root. `.gitignore` is deliberately not matched — it selects paths,
+// it never names a command to run.
+//
+// Comparison is case-insensitive because the guard's job is to protect the
+// files git will actually open, and on a case-insensitive filesystem (APFS
+// by default on macOS, this project's primary platform; NTFS likewise) a
+// write to `.GIT/config` or `.GitAttributes` lands in the real `.git/config`
+// and `.gitattributes`. A case-sensitive comparison here is a complete
+// bypass of the boundary, verified end-to-end before this was fixed.
+// Rejecting `.GIT` on a case-sensitive filesystem too is intentional and
+// free: no legitimate wiki page is named that, and the guard must not
+// depend on the filesystem semantics of the host it happens to run on.
+//
+// The check covers every mutating entry point, not only the ones that
+// currently auto-commit: the post-ingest `git add -A -- .` snapshot stages
+// whatever is on disk regardless of which call put it there.
+func isGitControlled(path string) bool {
+	for _, part := range strings.Split(filepath.Clean(path), string(os.PathSeparator)) {
+		for _, reserved := range [...]string{".git", ".gitattributes", ".gitmodules"} {
+			if strings.EqualFold(part, reserved) {
+				return true
+			}
 		}
 	}
 	return false

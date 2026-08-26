@@ -101,6 +101,24 @@ source and destination. For allowed paths, missing source returns `ErrNotFound`
 before destination occupancy is checked, and an occupied destination returns an
 error that wraps `os.ErrExist`. Single global write mutex retained (0006).
 
+`isGitControlled` (0024, third correction pass) hard-rejects every mutating
+method — `Write`, `Delete`, and both ends of `Move` — for any path with a
+`.git`, `.gitattributes`, or `.gitmodules` component at any depth, compared
+with `strings.EqualFold`. This sits *outside* the configurable exclude lists
+on purpose. It is not a visibility rule: `git add` executes the clean filter
+`.gitattributes` names, with the command line taken from `.git/config`, so a
+writable pair of those files turned the auto-commit path (§2.11) into
+arbitrary command execution as the server process on the next ordinary
+write. Reproduced end-to-end before the fix. An operator editing
+`exclude`/`exclude_read` — which otherwise only affect search and listing —
+must not be able to reopen that. The case-insensitive comparison is equally
+load-bearing: APFS (macOS default, the primary platform here) resolves
+`.GIT/config` to the real `.git/config`, so a case-sensitive check was a
+complete bypass — also reproduced end-to-end, marker file and all. Matching
+is uniform rather than filesystem-dependent so the boundary cannot vary by
+host. `.gitignore` stays writable: it selects paths, it never names a
+command to run.
+
 ### 2.4 adapter/obsidian
 
 Unchanged from v1 (`scanner.go` + `parser.go`; frontmatter, wikilink, tag,
