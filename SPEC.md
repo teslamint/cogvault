@@ -595,16 +595,17 @@ pre-creating it. Commits against *different* repositories do not block each
 other.
 
 **Timeouts.** The lock wait, `git add`, and `git commit` are each bounded
-independently by the same 10s budget, so one slow step cannot consume
-another's. Worst case for a single auto-commit is therefore ~30s, not 10s.
-The two `git` steps differ from the lock wait when their budget runs out: a
-`git` subprocess is signalled with `SIGTERM` and given a 2s grace period
+independently by the same 10s deadline budget, so one slow step cannot consume
+another's. The deadline budget for a single auto-commit is therefore ~30s, not
+10s. The two `git` steps differ from the lock wait when their budget runs out:
+a `git` subprocess is signalled with `SIGTERM` and given a 2s grace period
 before being force-killed, because `git` removes `.git/index.lock` from its
-own signal handler and an untrappable `SIGKILL` would instead strand that
-lock on disk, breaking every later commit until an operator removed it by
-hand — manufacturing the wedged lock this timeout exists to prevent. The
-lock wait has no subprocess to signal; it simply gives up at its deadline
-and the commit is reported as a lock failure.
+own signal handler and an untrappable `SIGKILL` would instead strand that lock
+on disk, breaking every later commit until an operator removed it by hand —
+manufacturing the wedged lock this timeout exists to prevent. Including up to
+two 2s grace periods, the wall-clock upper bound is ~34s. The lock wait has no
+subprocess to signal; it simply gives up at its deadline and the commit is
+reported as a lock failure.
 
 **History is permanent.** Enabling `write` or `write+ingest` is a durability
 tradeoff in both directions. Once a page is committed, a later `wiki_delete`

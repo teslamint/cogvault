@@ -516,11 +516,12 @@ func Commit(ctx context.Context, repoDir string, pathspecs []string, message str
 ```
 
 A leaf package (§1): imports nothing from cogvault, so `internal/mcp` and
-`cmd/cogvault` share one commit mechanism without an edge between them. Both
-callers keep their own wording; `Commit` reports the failing `Stage`
-(`StageLock`/`StageAdd`/`StageCommit`) so the log line stays caller-specific,
-and never logs or fails the caller itself — the best-effort contract is
-unchanged.
+`cmd/cogvault` share one commit mechanism without adding a reverse dependency
+or a cycle. `cmd/cogvault` continues to depend on `internal/mcp`; both callers
+also depend on `internal/gitutil`. They keep their own wording; `Commit`
+reports the failing `Stage` (`StageLock`/`StageAdd`/`StageCommit`) so the log
+line stays caller-specific, and never logs or fails the caller itself — the
+best-effort contract is unchanged.
 
 Three properties are load-bearing, each with a mutation-verified regression
 test in `internal/gitutil/commit_test.go`:
@@ -558,10 +559,12 @@ test in `internal/gitutil/commit_test.go`:
   bounds the wait before Go force-kills. This applies to the two git
   subprocesses and nothing else: the lock wait is an in-process retry loop
   with no process to signal, so it simply ends at its context deadline.
-
 `add` and `commit` are bounded independently by `CommitTimeout` rather than
-sharing one budget, so a slow (not wedged) add cannot starve commit. With the
-lock wait, worst case for one `Commit` is ~3 × `CommitTimeout` (SPEC §8.8.1).
+sharing one budget, so a slow (not wedged) add cannot starve commit. The three
+10s deadline budgets bound one `Commit` to ~30s before subprocess grace;
+including up to `TerminateGrace` for each of `add` and `commit`, the wall-clock
+upper bound is ~34s (SPEC §8.8.1).
+
 Each stage's deadline is derived through a `withTimeout` seam and dispatched
 through a `runGit` seam, so `TestCommitGivesEachStageAnIndependentDeadline`
 can substitute both, derive deadlines from a bookkeeping timestamp it
