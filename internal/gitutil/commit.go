@@ -213,9 +213,12 @@ func lockRepo(ctx context.Context, repoDir string) (func(), error) {
 //
 // O_NOFOLLOW refuses the symlink at open time; O_CLOEXEC keeps the
 // descriptor out of the `git` children this package forks while holding the
-// lock. The post-open Fstat closes the gap O_NOFOLLOW alone leaves: it
-// verifies what the descriptor actually refers to rather than what the path
-// looked like, so a swap racing the open is caught too.
+// lock. The Fstat then inspects the descriptor itself, not the path, so
+// nothing can be substituted between the check and the use — a path-based
+// stat would be exactly that TOCTOU. It cannot detect a swap that happened
+// before the open won: what it guarantees is that the descriptor cogvault
+// is about to flock refers to a plain regular file owned by this euid, with
+// no group or world access.
 func openLockFile(path string) (*os.File, error) {
 	fd, err := unix.Open(path, unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
 	if err != nil {

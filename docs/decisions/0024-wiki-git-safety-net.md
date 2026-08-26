@@ -297,8 +297,10 @@ findings, all reproduced against the code before fixing.
    the same user: `unix.Open` with `O_NOFOLLOW|O_CLOEXEC`, then `Fstat` on
    the resulting descriptor to confirm it is a regular file owned by the
    current euid with no group/world bits. `Fstat` rather than a path check
-   because it describes what the descriptor actually refers to, so a swap
-   racing the open is caught too.
+   because it inspects the descriptor itself, so nothing can be substituted
+   between the check and the use — a path-based stat would be exactly that
+   TOCTOU. It does not detect a swap that happened before the open won; the
+   guarantee is about what the descriptor being flocked actually refers to.
 
    A symlink branch in the directory validation was written, then deleted:
    mutation testing showed removing it left every test passing, because with
