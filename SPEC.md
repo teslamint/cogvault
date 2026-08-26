@@ -589,17 +589,22 @@ advisory lock, covering both concurrent MCP tool calls and a scheduled
 concurrent index operations, so without this an interleaved commit fails and
 is only logged — the write lands on disk while its history entry silently
 never exists. The lock lives outside `wiki_dir`, so the whole-tree ingest
-snapshot never commits it as wiki content. Commits against *different*
-repositories do not block each other.
+snapshot never commits it as wiki content, and inside a directory only the
+running user can open, so another local user cannot disable auto-commit by
+pre-creating it. Commits against *different* repositories do not block each
+other.
 
 **Timeouts.** The lock wait, `git add`, and `git commit` are each bounded
 independently by the same 10s budget, so one slow step cannot consume
-another's. Worst case for a single auto-commit is therefore ~30s, not 10s. A
-step that exceeds its budget is signalled with `SIGTERM` and given a 2s grace
-period before being force-killed: `git` removes `.git/index.lock` from its
-own signal handler, and an untrappable `SIGKILL` would instead strand that
+another's. Worst case for a single auto-commit is therefore ~30s, not 10s.
+The two `git` steps differ from the lock wait when their budget runs out: a
+`git` subprocess is signalled with `SIGTERM` and given a 2s grace period
+before being force-killed, because `git` removes `.git/index.lock` from its
+own signal handler and an untrappable `SIGKILL` would instead strand that
 lock on disk, breaking every later commit until an operator removed it by
-hand — manufacturing the wedged lock this timeout exists to prevent.
+hand — manufacturing the wedged lock this timeout exists to prevent. The
+lock wait has no subprocess to signal; it simply gives up at its deadline
+and the commit is reported as a lock failure.
 
 **History is permanent.** Enabling `write` or `write+ingest` is a durability
 tradeoff in both directions. Once a page is committed, a later `wiki_delete`

@@ -309,8 +309,11 @@ func lockDir() (string, error) {
 	if !info.IsDir() {
 		return "", fmt.Errorf("gitutil: lock dir %s is not a directory (mode %v); refusing to use it", dir, info.Mode().Type())
 	}
-	if st, ok := info.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
-		return "", fmt.Errorf("gitutil: lock dir %s is owned by uid %d, not %d", dir, st.Uid, os.Getuid())
+	// Geteuid, not Getuid: the effective uid is what the kernel checks on
+	// open, and it is what openLockFile compares against — the two must
+	// agree or a setuid context would pass one guard and fail the other.
+	if st, ok := info.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Geteuid() {
+		return "", fmt.Errorf("gitutil: lock dir %s is owned by uid %d, not %d", dir, st.Uid, os.Geteuid())
 	}
 	if mode := info.Mode().Perm(); mode&0o077 != 0 {
 		return "", fmt.Errorf("gitutil: lock dir %s is group- or world-accessible (mode %o)", dir, mode)
