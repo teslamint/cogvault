@@ -101,24 +101,45 @@ func Commit(ctx context.Context, repoDir string, pathspecs []string, message str
 	defer release()
 
 	addArgs := append([]string{"-C", repoDir, "add"}, pathspecs...)
-	if err := runGit(ctx, addArgs); err != nil {
+	if err := runStage(ctx, addArgs); err != nil {
 		return StageAdd, err
 	}
 
-	if err := runGit(ctx, []string{"-C", repoDir, "commit", "-m", message}); err != nil {
+	if err := runStage(ctx, []string{"-C", repoDir, "commit", "-m", message}); err != nil {
 		return StageCommit, err
 	}
 	return StageNone, nil
 }
 
-// runGit executes one git subprocess under its own CommitTimeout-bounded
-// context derived from ctx, terminating it with SIGTERM (not SIGKILL) so git
-// can remove .git/index.lock on its way out.
-func runGit(ctx context.Context, args []string) error {
-	cmdCtx, cancel := context.WithTimeout(ctx, CommitTimeout)
+// runStage derives the per-command timeout context and hands it to the
+// command runner.
+//
+// The derivation lives here, not inside runGit, so a substituted runner
+// receives exactly the bounded context the subprocess would have run under.
+// That is the seam the independent-deadline test uses: add and commit must
+// each get their own full CommitTimeout budget rather than sharing one, and
+// that property is otherwise only observable as elapsed wall-clock time.
+// Three successive revisions of a timing-based test for it flaked under
+// load — such a test cannot be made safe against unbounded scheduler delay,
+// while reading the two deadlines is exact.
+func runStage(ctx context.Context, args []string) error {
+	cmdCtx, cancel := withTimeout(ctx, CommitTimeout)
 	defer cancel()
+	return runGit(cmdCtx, args)
+}
 
-	cmd := exec.CommandContext(cmdCtx, "git", args...)
+// withTimeout is context.WithTimeout behind a seam, so a test can advance a
+// fake clock between stages and observe that the second stage's budget is
+// measured from when that stage starts rather than inherited from the first.
+// Without it, "independent deadlines" is only observable by making a real
+// subprocess sleep, which is what made the three prior tests flaky.
+var withTimeout = context.WithTimeout
+
+// runGit executes one git subprocess under the already-bounded ctx,
+// terminating it with SIGTERM (not SIGKILL) so git can remove
+// .git/index.lock on its way out. A var only so tests can substitute it.
+var runGit = func(ctx context.Context, args []string) error {
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Cancel = func() error { return cmd.Process.Signal(unix.SIGTERM) }
 	cmd.WaitDelay = TerminateGrace
 	return cmd.Run()

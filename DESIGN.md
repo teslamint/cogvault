@@ -548,6 +548,16 @@ test in `internal/gitutil/commit_test.go`:
 `add` and `commit` are bounded independently by `CommitTimeout` rather than
 sharing one budget, so a slow (not wedged) add cannot starve commit. With the
 lock wait, worst case for one `Commit` is ~3 × `CommitTimeout` (SPEC §8.8.1).
+Each stage's deadline is derived through a `withTimeout` seam and dispatched
+through a `runGit` seam, so `TestCommitGivesEachStageAnIndependentDeadline`
+can substitute both, derive deadlines from a bookkeeping timestamp it
+advances by 9s between stages, and read the budget `commit` actually
+receives. Nothing intercepts time — the deadlines are still real, they simply
+never fire, because the substituted runner returns immediately — so the
+assertion is arithmetic on derived deadlines rather than elapsed measurement.
+Those seams exist because the property is otherwise observable only as
+elapsed wall-clock time, and the timing-based tests that measured it flaked
+under load until they were replaced (0024, fourth correction pass).
 
 ---
 

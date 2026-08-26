@@ -251,3 +251,95 @@ func TestCommitLockFileLivesOutsideTheWorkingTree(t *testing.T) {
 		t.Fatalf("lock path %q is inside the wiki working tree %q; the post-ingest whole-tree add would commit it", path, resolvedDir)
 	}
 }
+
+// TestCommitGivesEachStageAnIndependentDeadline is the regression test for
+// the pre-0024-correction implementation sharing one context.WithTimeout
+// across both the add and commit subprocesses: a slow-but-not-wedged
+// `git add` (a large working-tree scan) consumed most of the shared budget,
+// leaving `git commit` too little time and turning a merely slow add into a
+// spurious commit failure — the write lands on disk while the safety net's
+// history entry silently never appears.
+//
+// It substitutes the command runner and reads the deadline each stage
+// actually receives. Three earlier revisions of this test discriminated on
+// elapsed wall-clock time and each flaked under load, because the observable
+// failure mode is a stage exceeding its own budget, which no margin can rule
+// out on a contended machine. Deadlines are exact and need no sleeps at all.
+func TestCommitGivesEachStageAnIndependentDeadline(t *testing.T) {
+	dir := initRepo(t)
+	abs := writePage(t, dir, "page.md", "# Page")
+	shrink(t, 10*time.Second, 2*time.Second)
+
+	// `simulatedNow` is a bookkeeping timestamp, not a clock: nothing here
+	// intercepts time. It is the origin each stage's deadline is computed
+	// from, and advancing it between stages models the elapsed time a slow
+	// `git add` would have consumed. The deadlines below are still armed on
+	// real timers by context.WithDeadline, but none of them can fire —
+	// the substituted runner returns immediately — so the assertions read
+	// pure arithmetic rather than anything the scheduler influences.
+	simulatedNow := time.Now()
+	elapsedDuringAdd := 9 * time.Second
+
+	origTimeout := withTimeout
+	// Each stage's deadline is derived from simulatedNow rather than the
+	// wall clock, so the simulated elapsed time is visible in the deadline
+	// arithmetic. Real context.WithTimeout would read the wall clock and
+	// see ~0 elapsed between the two stages.
+	withTimeout = func(parent context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+		return context.WithDeadline(parent, simulatedNow.Add(d))
+	}
+	t.Cleanup(func() { withTimeout = origTimeout })
+
+	type observation struct {
+		stage     string
+		deadline  time.Time
+		startedAt time.Time
+	}
+	var seen []observation
+
+	origRun := runGit
+	runGit = func(ctx context.Context, args []string) error {
+		stage := "other"
+		for _, a := range args {
+			if a == "add" || a == "commit" {
+				stage = a
+				break
+			}
+		}
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Errorf("%s ran with no deadline; every git subprocess must be bounded", stage)
+			return nil
+		}
+		seen = append(seen, observation{stage: stage, deadline: deadline, startedAt: simulatedNow})
+		// The slow-add scenario: add burns most of a budget before commit
+		// even starts. Under a shared context this is exactly what starved
+		// commit; under independent budgets it must not matter.
+		if stage == "add" {
+			simulatedNow = simulatedNow.Add(elapsedDuringAdd)
+		}
+		return nil
+	}
+	t.Cleanup(func() { runGit = origRun })
+
+	if stage, err := Commit(context.Background(), dir, []string{abs}, "wiki: write page.md"); err != nil {
+		t.Fatalf("Commit failed at stage %v: %v", stage, err)
+	}
+
+	if len(seen) != 2 || seen[0].stage != "add" || seen[1].stage != "commit" {
+		t.Fatalf("observed stages = %+v, want add then commit", seen)
+	}
+
+	// The property under test, stated as the thing that actually broke:
+	// after add consumed elapsedDuringAdd, commit must still receive a
+	// full CommitTimeout measured from its own start. A shared context
+	// would leave it CommitTimeout-elapsedDuringAdd (here 1s of 10s).
+	commitBudget := seen[1].deadline.Sub(seen[1].startedAt)
+	if commitBudget != CommitTimeout {
+		t.Fatalf("commit budget = %s, want the full CommitTimeout %s; a slow add (%s) must not eat into commit's own budget",
+			commitBudget, CommitTimeout, elapsedDuringAdd)
+	}
+	if addBudget := seen[0].deadline.Sub(seen[0].startedAt); addBudget != CommitTimeout {
+		t.Fatalf("add budget = %s, want the full CommitTimeout %s", addBudget, CommitTimeout)
+	}
+}

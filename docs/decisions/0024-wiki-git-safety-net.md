@@ -95,19 +95,17 @@ Accepted and implemented (2026-08-25):
   invalid rejection); `internal/mcp/tools_test.go` (`write` commits,
   `off` does not, `wiki_delete` calls the commit path regardless of mode
   when the deleted file was already git-tracked, a non-git `wiki_dir` logs
-  and does not error, the timeout bounds a wedged commit, a slow-but-not-
-  wedged add does not starve commit's own timeout budget
-  (`TestGitAutoCommit_SlowAddDoesNotStarveCommitTimeout`) via a fake `git`
-  binary at `internal/mcp/testdata/bin/git`); `cmd/cogvault/ingest_git_commit_test.go`
+  and does not error, the timeout bounds a wedged commit and a wedged add,
+  via a fake `git` binary at `internal/mcp/testdata/bin/git`);
+  `cmd/cogvault/ingest_git_commit_test.go`
   (`write+ingest` commits after a digesting run, `off` and `write`-alone do
   not, `--dry-run` does not, a zero-digest run does not, a `wikiDir` nested
   inside a larger repo does not stage or commit files outside `wikiDir`
   (`TestIngestGitCommit_NestedWikiDirDoesNotStageOutsideFiles`, confirmed
-  to fail against the pre-fix `-A`-without-pathspec code), a slow-but-not-
-  wedged add does not starve commit's own budget
-  (`TestIngestGitCommit_SlowAddDoesNotStarveCommitTimeout`, confirmed to
-  fail against the pre-fix shared-context code), the timeout bounds a
-  wedged commit reusing the same fake `git` binary).
+  to fail against the pre-fix `-A`-without-pathspec code), the timeout
+  bounds a wedged commit and a wedged add reusing the same fake `git`
+  binary). The independent-budget property itself is covered once, in
+  `internal/gitutil` where it now lives — see the fourth correction pass.
 
 **Second correction pass** (same day, via `coderabbit review --committed
 --base main` after the webhook-triggered PR review stalled for several
@@ -227,3 +225,44 @@ that only choose the pathspec and the log wording.
 bounded), plus `TerminateGrace` per subprocess that must be force-killed.
 SPEC.md previously described a single "10s subprocess timeout" in three
 places, which understated the total; those now state the actual bound.
+
+**Fourth correction pass** (2026-08-26, triggered by a real flake). Verifying
+that the P0 commit built and tested standalone surfaced a failure in a test
+the commit does not touch:
+`TestGitAutoCommit_SlowAddDoesNotStarveCommitTimeout` failed with
+`elapsed = 1.5005s` — exactly the shrunk 1500ms budget, meaning `git add` was
+killed at its own deadline and `commit` never ran. Not reproducible in
+isolation (10 runs, two revisions, with and without `-race`); it needed the
+cold-build-cache contention of a fresh worktree running the full `-race` suite.
+
+That test and its `cmd/cogvault` twin discriminated on elapsed wall-clock
+time, and their own comments recorded three prior margin widenings plus an
+explicit instruction not to widen a fourth time. The instruction was right:
+the failure mode is a stage exceeding its *own* budget, which no margin can
+rule out, because scheduler delay is unbounded.
+
+Both tests are deleted, and the property they were reaching for is now tested
+once, deterministically, in the package that owns it. `Commit` derives each
+stage's deadline through a `withTimeout` seam and dispatches through a
+`runGit` seam; `TestCommitGivesEachStageAnIndependentDeadline` substitutes
+both, derives deadlines from a bookkeeping timestamp rather than the wall
+clock, advances that timestamp by 9s between `add` and `commit`, and asserts
+`commit` still receives a full 10s budget measured from its own start. To be
+precise about the mechanism: nothing intercepts time. `context.WithDeadline`
+still arms real timers; they are simply unreachable, because the substituted
+runner returns immediately and no deadline is ever waited on. The elapsed
+time is modelled arithmetically in the deadline origin, not simulated in a
+clock. No sleeps, no subprocesses, no margins.
+
+A first attempt — having the fake `git` write completion markers — was
+abandoned before landing: markers prove a stage *finished*, not that a
+shortfall was caused by a shared budget, and the design still depended on a
+real sleep finishing inside a real timeout. It reproduced the same class of
+flake with a smaller margin.
+
+Verified: the shared-budget mutant fails with
+`commit budget = 1s, want the full CommitTimeout 10s`; setting the simulated
+add duration to zero makes that same mutant pass, confirming the advanced
+timestamp is what does the discriminating rather than incidental ordering.
+8 consecutive full `-race` runs of `gitutil`, `mcp`, and `cmd/cogvault` are
+clean.
