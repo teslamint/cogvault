@@ -339,3 +339,41 @@ suite green, because a unit test cannot create a directory owned by a
 different user. It is kept as the real defense on a multi-user host and
 recorded here as an accepted coverage gap rather than removed to satisfy
 mutation testing.
+
+**Sixth correction pass** (2026-08-26, CodeRabbit re-review of the corrected
+HEAD): one P1, plus two comments that had drifted from the code.
+
+1. **P1 — the lock directory's validation was not bound to the lock file's
+   open.** `O_NOFOLLOW` refuses a symlink only at the *final* path
+   component. The fifth pass validated `.../cogvault/locks` by path with
+   `Lstat`, then opened `.../cogvault/locks/<hash>.lock` by path — leaving
+   the intermediate component unguarded. A process with the same euid could
+   rename `locks` and leave a symlink behind between those two steps; the
+   kernel follows an intermediate symlink regardless of `O_NOFOLLOW`, so the
+   lock would be taken inside an unvalidated directory while another caller
+   still locked the original. Commit serialization then silently breaks,
+   which is precisely what the lock exists to prevent.
+
+   This is the same validate-by-path/use-by-path mistake the fifth pass
+   called out for the lock *file* and then reproduced one level up. Fixed by
+   making the whole path fd-relative: `openLockDir` opens the directory with
+   `O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC` and validates *that descriptor* with
+   `Fstat`; `openLockFileAt` then opens the lock with `Openat` against it.
+   Validation and use now refer to one inode, and a rename or symlink swap
+   afterwards cannot redirect the open.
+
+   Verified: `TestLockSurvivesLockDirSwap` swaps the directory for a symlink
+   after validation and asserts the lock still lands in the real directory.
+   Against a mutant that reverts to the path-based open, it fails with the
+   lock file created in the attacker's decoy instead.
+2. **Two comments contradicted the code.** `Commit`'s doc described a
+   "process-wide mutex" that does not exist — one flock covers both cases,
+   because it excludes per open file description. `lockRepo`'s doc still
+   placed the lock file in the OS temp directory, which the fifth pass had
+   already changed. Both corrected.
+
+One test was also found to pass for the wrong reason. `TestLockDirRejectsA
+Symlink` pointed its symlink at a `0755` directory, so the permission check
+rejected it even with `O_NOFOLLOW` removed — confirmed by mutation. The
+victim is now `0700`, leaving the refusal to follow the link as the only
+thing that can reject it, and the mutant now fails.

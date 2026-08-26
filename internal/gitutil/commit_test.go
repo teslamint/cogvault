@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func initRepo(t *testing.T) string {
@@ -239,10 +241,11 @@ func TestCommitLockIsPerRepository(t *testing.T) {
 func TestCommitLockFileLivesOutsideTheWorkingTree(t *testing.T) {
 	dir := initRepo(t)
 
-	path, err := lockPath(dir)
+	dirfd, _, path, err := lockTarget(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() { _ = unix.Close(dirfd) }()
 	resolvedDir, err := filepath.EvalSymlinks(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -356,10 +359,11 @@ func TestCommitGivesEachStageAnIndependentDeadline(t *testing.T) {
 func TestLockDirIsPrivateToTheUser(t *testing.T) {
 	dir := initRepo(t)
 
-	path, err := lockPath(dir)
+	dirfd, _, path, err := lockTarget(dir)
 	if err != nil {
-		t.Fatalf("lockPath: %v", err)
+		t.Fatalf("lockTarget: %v", err)
 	}
+	defer func() { _ = unix.Close(dirfd) }()
 
 	parent := filepath.Dir(path)
 	if parent == os.TempDir() {
@@ -375,11 +379,13 @@ func TestLockDirIsPrivateToTheUser(t *testing.T) {
 	}
 }
 
-// TestLockDirRejectsASymlink covers the reason the directory is validated
-// rather than repaired. An earlier fix did MkdirAll followed by Chmod 0700;
-// because Chmod follows symlinks, pointing the lock dir at an unrelated
-// directory silently re-moded that directory instead of failing. Measured:
-// an unrelated 0755 directory became 0700.
+// TestLockDirRejectsASymlink pins O_NOFOLLOW on the directory open.
+//
+// The victim directory is deliberately 0700 and owned by this user: a
+// permissive victim would be rejected by the mode check even if the symlink
+// were followed, making the test pass for the wrong reason (verified — with
+// a 0755 victim, removing O_NOFOLLOW left the test green). At 0700 the only
+// thing that can refuse is the refusal to follow the link itself.
 func TestLockDirRejectsASymlink(t *testing.T) {
 	// Redirect the cache base into a temp dir. This test plants a symlink
 	// where the lock directory belongs, and doing that to the real
@@ -388,7 +394,7 @@ func TestLockDirRejectsASymlink(t *testing.T) {
 	base := fakeCacheDir(t)
 
 	victim := t.TempDir()
-	if err := os.Chmod(victim, 0o755); err != nil {
+	if err := os.Chmod(victim, 0o700); err != nil {
 		t.Fatal(err)
 	}
 
@@ -400,11 +406,8 @@ func TestLockDirRejectsASymlink(t *testing.T) {
 		t.Fatalf("planting symlink: %v", err)
 	}
 
-	if _, err := lockDir(); err == nil {
-		t.Fatal("lockDir accepted a symlinked lock dir; it must refuse rather than follow it")
-	}
-	if mode := mustMode(t, victim); mode != 0o755 {
-		t.Fatalf("symlink target mode = %o, want 0755 unchanged; lockDir must never chmod through a symlink", mode)
+	if _, _, err := openLockDir(); err == nil {
+		t.Fatal("openLockDir accepted a symlinked lock dir; it must refuse rather than follow it")
 	}
 }
 
@@ -423,8 +426,8 @@ func TestLockDirRejectsAPermissiveDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := lockDir(); err == nil {
-		t.Fatal("lockDir accepted a world-accessible lock dir; permissive bits must be reported, not used")
+	if _, _, err := openLockDir(); err == nil {
+		t.Fatal("openLockDir accepted a world-accessible lock dir; permissive bits must be reported, not used")
 	}
 }
 
@@ -444,24 +447,78 @@ func fakeCacheDir(t *testing.T) string {
 // this exact path by a compromised process running as the same user; a
 // followed symlink would have cogvault create and flock a file elsewhere.
 func TestOpenLockFileRejectsASymlink(t *testing.T) {
+	fakeCacheDir(t)
 	dir := initRepo(t)
-	path, err := lockPath(dir)
+
+	dirfd, name, path, err := lockTarget(dir)
 	if err != nil {
-		t.Fatalf("lockPath: %v", err)
+		t.Fatalf("lockTarget: %v", err)
 	}
+	defer func() { _ = unix.Close(dirfd) }()
 	_ = os.Remove(path)
 
 	target := filepath.Join(t.TempDir(), "elsewhere")
 	if err := os.Symlink(target, path); err != nil {
 		t.Fatalf("planting symlink: %v", err)
 	}
-	t.Cleanup(func() { _ = os.Remove(path) })
 
-	if _, err := openLockFile(path); err == nil {
-		t.Fatal("openLockFile followed a symlink; O_NOFOLLOW must refuse it")
+	if _, err := openLockFileAt(dirfd, name, path); err == nil {
+		t.Fatal("openLockFileAt followed a symlink; O_NOFOLLOW must refuse it")
 	}
 	if _, err := os.Stat(target); err == nil {
 		t.Fatalf("symlink target %s was created; the open must not reach through the link", target)
+	}
+}
+
+// TestLockSurvivesLockDirSwap is the regression test for the finding that
+// O_NOFOLLOW alone left an intermediate-component race open.
+//
+// The old code validated `.../cogvault/locks` by path and then opened
+// `.../cogvault/locks/<hash>.lock` by path. Between those two steps a
+// process with the same euid could rename the directory and leave a symlink
+// in its place; the kernel follows an intermediate symlink regardless of
+// O_NOFOLLOW, so the lock would be taken in an unvalidated location while
+// another caller still locked the original — commit serialization silently
+// broken, which is exactly what the lock exists to prevent.
+//
+// Opening the lock file with openat against the already-validated directory
+// descriptor binds validation and use to one inode: the swap below happens
+// after the descriptor exists, and the open must still land in the real
+// directory.
+func TestLockSurvivesLockDirSwap(t *testing.T) {
+	base := fakeCacheDir(t)
+	dir := initRepo(t)
+
+	dirfd, name, _, err := lockTarget(dir)
+	if err != nil {
+		t.Fatalf("lockTarget: %v", err)
+	}
+	defer func() { _ = unix.Close(dirfd) }()
+
+	// Swap the lock directory for a symlink to an attacker-controlled one,
+	// after validation, before the file open.
+	real := filepath.Join(base, "cogvault", "locks")
+	decoy := t.TempDir()
+	if err := os.Rename(real, real+".moved"); err != nil {
+		t.Fatalf("renaming lock dir: %v", err)
+	}
+	if err := os.Symlink(decoy, real); err != nil {
+		t.Fatalf("planting symlink: %v", err)
+	}
+
+	f, err := openLockFileAt(dirfd, name, name)
+	if err != nil {
+		t.Fatalf("openLockFileAt after a directory swap: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	// The lock file must exist in the renamed-aside real directory, not in
+	// the decoy the symlink points at.
+	if _, err := os.Stat(filepath.Join(real+".moved", name)); err != nil {
+		t.Fatalf("lock file missing from the validated directory: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(decoy, name)); err == nil {
+		t.Fatalf("lock file landed in the swapped-in decoy %s; openat must resolve against the validated inode", decoy)
 	}
 }
 
