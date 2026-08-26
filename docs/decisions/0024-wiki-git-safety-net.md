@@ -411,14 +411,20 @@ the same defect one component higher, plus hardening of the trust anchor.
    whole sequence exists to fix. Secrecy is enforced from `cogvault` down,
    which cogvault creates and owns.
 
-Verified: `TestLockDirRejectsIntermediateComponentSwap` fails against a
-mutant reverting to the joined path; `TestLockDirRejectsASymlinkedCacheDir`
-fails against a mutant dropping `O_NOFOLLOW` from the anchor open; and
+Verified: `TestLockDirRejectsIntermediateSymlink` fails against a mutant
+reverting to the joined path; `TestLockDirRejectsASymlinkedCacheDir` fails
+against a mutant dropping `O_NOFOLLOW` from the anchor open; and
 `TestLockDirCacheDirModePolicy` fails in both directions — against a mutant
 removing the write-bit check (`0775`, `0777`, `0722` admitted) and against
 one tightening it to `0700` (the macOS default rejected). The decoys are
 constructed to be valid in every other respect, so only the intended guard
 can distinguish them.
+
+The two symlink tests cover different moments and are named for it:
+`TestLockDirRejectsIntermediateSymlink` plants the link *before* the walk and
+requires refusal to traverse it, while `TestLockSurvivesLockDirSwap` swaps the
+final directory *after* validation and requires the already-open descriptor to
+stay authoritative.
 
 Not covered by a test: the anchor's owner check, for the same reason as the
 directory uid check above — a unit test cannot produce a directory owned by

@@ -647,7 +647,7 @@ func TestLockSurvivesLockDirSwap(t *testing.T) {
 	}
 }
 
-// TestLockDirRejectsIntermediateComponentSwap is the regression test for the
+// TestLockDirRejectsIntermediateSymlink is the regression test for the
 // same mistake one level up the path.
 //
 // Binding the lock *file* to a validated `locks` descriptor still left
@@ -659,9 +659,11 @@ func TestLockSurvivesLockDirSwap(t *testing.T) {
 // serialization would break without any error.
 //
 // Walking from the cache directory one component at a time with mkdirat and
-// openat closes it — the swap below happens before openLockDir runs, so the
-// walk must refuse the symlink rather than land in the decoy.
-func TestLockDirRejectsIntermediateComponentSwap(t *testing.T) {
+// openat closes it. The symlink is planted before the walk begins, so this
+// pins refusal to traverse an intermediate symlink at all — distinct from
+// TestLockSurvivesLockDirSwap, which swaps the final directory *after*
+// validation and requires the already-open descriptor to stay authoritative.
+func TestLockDirRejectsIntermediateSymlink(t *testing.T) {
 	base := fakeCacheDir(t)
 	repo := initRepo(t)
 
