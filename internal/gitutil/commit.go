@@ -228,10 +228,9 @@ func lockRepo(ctx context.Context, repoDir string) (func(), error) {
 // so a rename or symlink swap afterwards cannot redirect it.
 //
 // O_CLOEXEC keeps the descriptor out of the `git` children this package
-// forks while holding the lock. The Fstat inspects the descriptor rather
-// than re-stat'ing a path, so nothing can be substituted between the check
-// and the use; it does not detect a swap that won before the open, it
-// guarantees what the descriptor being flocked refers to.
+// forks while holding the lock. The Fstat inspects the open descriptor
+// rather than a path, so the guarantee is about the inode actually being
+// flocked: a regular file owned by this euid with no group or world access.
 func openLockFileAt(dirfd int, name, display string) (*os.File, error) {
 	fd, err := createLockFileAt(dirfd, name)
 	if err != nil {

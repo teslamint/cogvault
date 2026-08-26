@@ -299,8 +299,10 @@ findings, all reproduced against the code before fixing.
    current euid with no group/world bits. `Fstat` rather than a path check
    because it inspects the descriptor itself, so nothing can be substituted
    between the check and the use — a path-based stat would be exactly that
-   TOCTOU. It does not detect a swap that happened before the open won; the
-   guarantee is about what the descriptor being flocked actually refers to.
+   TOCTOU. (This describes the fifth pass's `unix.Open`-by-path design; the
+   seventh pass replaced it with `Openat` against a validated directory
+   descriptor, which additionally makes a path swap unable to redirect the
+   open at all.)
 
    A symlink branch in the directory validation was written, then deleted:
    mutation testing showed removing it left every test passing, because with
