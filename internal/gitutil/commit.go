@@ -233,7 +233,7 @@ func lockRepo(ctx context.Context, repoDir string) (func(), error) {
 // and the use; it does not detect a swap that won before the open, it
 // guarantees what the descriptor being flocked refers to.
 func openLockFileAt(dirfd int, name, display string) (*os.File, error) {
-	fd, err := unix.Openat(dirfd, name, unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+	fd, err := createLockFileAt(dirfd, name)
 	if err != nil {
 		return nil, fmt.Errorf("gitutil: open commit lock %s: %w", display, err)
 	}
@@ -257,6 +257,61 @@ func openLockFileAt(dirfd int, name, display string) (*os.File, error) {
 		return nil, fmt.Errorf("gitutil: commit lock %s is group- or world-accessible (mode %o)", display, perm)
 	}
 	return f, nil
+}
+
+// createLockFileAt is openat(O_CREAT) with a bounded retry on ENOENT.
+//
+// On APFS, concurrent openat(O_CREAT) calls for the *same* name against the
+// same directory descriptor intermittently fail with ENOENT even though the
+// directory is live — Fstat on the descriptor at the moment of failure
+// reports a healthy directory. The kernel-level cause is not established
+// here; what is measured is that the error is transient and the create
+// succeeds on a retry. Observed directly on macOS: 64 goroutines creating
+// one shared name saw 1-10 spurious ENOENTs per run, with and without
+// O_NOFOLLOW, so it is not a consequence of refusing symlinks.
+//
+// This is exactly the situation cogvault creates: several MCP tool handlers
+// committing to one repository resolve to one lock file. Left unhandled it
+// surfaced as a caller failing at StageLock — which callers only log, so an
+// auto-commit would have been dropped silently on a busy wiki.
+//
+// Retrying is safe because ENOENT here is spurious rather than a statement
+// about the directory: the descriptor is already validated and cannot be
+// redirected, so a retry re-attempts the same create in the same inode. A
+// genuine ENOENT — the directory really was removed, verified to report the
+// same errno through a held descriptor — still surfaces once the attempts
+// run out.
+//
+// lockCreateAttempts is set well above the worst contention observed (10
+// spurious ENOENTs across 64 goroutines racing one name) so that a burst
+// larger than anything cogvault generates still resolves. The bound exists
+// so a removed directory cannot spin forever: exhausting it costs ~53ms of
+// sleep, negligible against CommitTimeout and paid only on a path that is
+// already failing.
+const lockCreateAttempts = 32
+
+// openatFunc is a seam: the retry loop's two interesting paths — recovering
+// after N spurious ENOENTs, and giving up after exactly lockCreateAttempts —
+// cannot be driven portably through the real syscall, because they depend on
+// a kernel race that only some filesystems exhibit.
+var openatFunc = unix.Openat
+
+func createLockFileAt(dirfd int, name string) (int, error) {
+	var err error
+	for i := range lockCreateAttempts {
+		var fd int
+		fd, err = openatFunc(dirfd, name, unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+		if err == nil {
+			return fd, nil
+		}
+		if !errors.Is(err, unix.ENOENT) {
+			return -1, err
+		}
+		// Brief, growing pause so a burst of callers does not simply
+		// re-collide. Exhausting every attempt totals ~53ms.
+		time.Sleep(time.Duration(i+1) * 100 * time.Microsecond)
+	}
+	return -1, fmt.Errorf("gitutil: create lock file %s: %w after %d attempts", name, err, lockCreateAttempts)
 }
 
 // lockTarget returns a validated directory descriptor for the lock

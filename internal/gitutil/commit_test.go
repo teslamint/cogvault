@@ -2,6 +2,7 @@ package gitutil
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -134,6 +135,130 @@ func TestCommitSerializesConcurrentCallers(t *testing.T) {
 	}
 	if succeeded != callers {
 		t.Fatalf("%d/%d callers succeeded; serialized commits must all land", succeeded, callers)
+	}
+}
+
+// TestCreateLockFileAtSurvivesConcurrentCreates pins the ENOENT retry.
+//
+// On APFS, concurrent openat(O_CREAT) for the same name against one
+// directory descriptor intermittently returns ENOENT even though the
+// directory is live — Fstat on the descriptor reports a healthy directory at
+// the moment of failure. Observed with and without O_NOFOLLOW, so it is not
+// caused by refusing symlinks. Several MCP handlers committing to one
+// repository hit exactly this, and an unhandled ENOENT surfaced as a
+// StageLock failure — which callers only log, so the auto-commit would be
+// dropped silently.
+//
+// This drives far more contention than the eight-caller test above so the
+// race is hit reliably rather than once in several runs.
+func TestCreateLockFileAtSurvivesConcurrentCreates(t *testing.T) {
+	dir := t.TempDir()
+	dirfd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = unix.Close(dirfd) }()
+
+	const callers = 64
+	var wg sync.WaitGroup
+	errs := make([]error, callers)
+	for i := range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			fd, err := createLockFileAt(dirfd, "shared.lock")
+			errs[i] = err
+			if err == nil {
+				_ = unix.Close(fd)
+			}
+		}()
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("caller %d failed to create the shared lock file: %v; a spurious ENOENT must be retried, not reported as a lock failure", i, err)
+		}
+	}
+}
+
+// TestCreateLockFileAtRetriesThenSucceeds and its sibling below drive the
+// retry loop through a substituted openat, because the real behavior depends
+// on a kernel race that only some filesystems exhibit — the stress test
+// above reproduces it on APFS but would prove nothing on a machine that
+// never races.
+func TestCreateLockFileAtRetriesThenSucceeds(t *testing.T) {
+	dir := t.TempDir()
+	dirfd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = unix.Close(dirfd) }()
+
+	const spurious = lockCreateAttempts - 1
+	calls := 0
+	orig := openatFunc
+	openatFunc = func(fd int, name string, flags int, mode uint32) (int, error) {
+		calls++
+		if calls <= spurious {
+			return -1, unix.ENOENT
+		}
+		return orig(fd, name, flags, mode)
+	}
+	t.Cleanup(func() { openatFunc = orig })
+
+	fd, err := createLockFileAt(dirfd, "retry.lock")
+	if err != nil {
+		t.Fatalf("createLockFileAt gave up after %d spurious ENOENTs, but %d attempts are allowed: %v", spurious, lockCreateAttempts, err)
+	}
+	_ = unix.Close(fd)
+
+	if calls != spurious+1 {
+		t.Fatalf("openat called %d times, want %d; the loop must retry exactly until it succeeds", calls, spurious+1)
+	}
+}
+
+// TestCreateLockFileAtStopsAtTheAttemptBound pins the other end: a directory
+// that really was removed must produce a bounded error rather than spin
+// forever. Verified separately that a removed directory does report ENOENT
+// through a held descriptor, so this path is reachable in practice.
+func TestCreateLockFileAtStopsAtTheAttemptBound(t *testing.T) {
+	calls := 0
+	orig := openatFunc
+	openatFunc = func(int, string, int, uint32) (int, error) {
+		calls++
+		return -1, unix.ENOENT
+	}
+	t.Cleanup(func() { openatFunc = orig })
+
+	if _, err := createLockFileAt(0, "never.lock"); err == nil {
+		t.Fatal("createLockFileAt succeeded against an always-ENOENT openat")
+	} else if !errors.Is(err, unix.ENOENT) {
+		t.Fatalf("error = %v, want it to wrap ENOENT so callers can tell why the lock failed", err)
+	}
+
+	if calls != lockCreateAttempts {
+		t.Fatalf("openat called %d times, want exactly %d; an unbounded retry would hang a commit on a removed directory", calls, lockCreateAttempts)
+	}
+}
+
+// TestCreateLockFileAtDoesNotRetryOtherErrors keeps the retry narrow: only
+// the spurious-ENOENT case is worth re-attempting. Retrying a permission or
+// symlink refusal would turn a clear rejection into a delayed one.
+func TestCreateLockFileAtDoesNotRetryOtherErrors(t *testing.T) {
+	calls := 0
+	orig := openatFunc
+	openatFunc = func(int, string, int, uint32) (int, error) {
+		calls++
+		return -1, unix.EACCES
+	}
+	t.Cleanup(func() { openatFunc = orig })
+
+	if _, err := createLockFileAt(0, "denied.lock"); !errors.Is(err, unix.EACCES) {
+		t.Fatalf("error = %v, want EACCES surfaced unchanged", err)
+	}
+	if calls != 1 {
+		t.Fatalf("openat called %d times for a non-ENOENT error, want 1", calls)
 	}
 }
 

@@ -372,11 +372,11 @@ HEAD): one P1, plus two comments that had drifted from the code.
    placed the lock file in the OS temp directory, which the fifth pass had
    already changed. Both corrected.
 
-One test was also found to pass for the wrong reason. `TestLockDirRejectsA
-Symlink` pointed its symlink at a `0755` directory, so the permission check
-rejected it even with `O_NOFOLLOW` removed — confirmed by mutation. The
-victim is now `0700`, leaving the refusal to follow the link as the only
-thing that can reject it, and the mutant now fails.
+One test was also found to pass for the wrong reason.
+`TestLockDirRejectsASymlink` pointed its symlink at a `0755` directory, so
+the permission check rejected it even with `O_NOFOLLOW` removed — confirmed
+by mutation. The victim is now `0700`, leaving the refusal to follow the link
+as the only thing that can reject it, and the mutant now fails.
 
 **Seventh correction pass** (2026-08-26, CodeRabbit re-review of `a8c432f`):
 the same defect one component higher, plus hardening of the trust anchor.
@@ -430,3 +430,49 @@ at three levels: validate by path, then use by path. Each fix described the
 error correctly while leaving the next component up unguarded. A path string
 cannot carry a validation result — only a descriptor can — and the rule has
 to be applied to the whole path, not to whichever component was under review.
+
+**Eighth correction pass** (2026-08-26): a flake introduced by the seventh
+pass, caught by running the gate without masking its exit status.
+
+`TestCommitSerializesConcurrentCallers` began failing roughly one run in
+five with `open commit lock ...: no such file or directory`. The gate command
+had piped `go test` into `tail`, so the pipeline's exit status came from
+`tail` and the failure was invisible; the commit went out on a red suite and
+CI happened to pass, which a flake makes meaningless either way.
+
+Root cause, isolated by probe rather than inspection: on APFS, concurrent
+`openat(O_CREAT)` for the *same* name against one directory descriptor
+intermittently returns `ENOENT` although the directory is live — `Fstat` on
+the descriptor at the moment of failure reported a healthy directory with
+`nlink=2`. The kernel-level mechanism was not established; what is measured
+is that the error is transient and the same create succeeds on a retry. A
+first hypothesis blamed `O_NOFOLLOW`; a controlled comparison disproved it —
+64 goroutines racing one name produced 1–10 spurious `ENOENT`s per run both
+with and without that flag.
+
+This is precisely cogvault's shape: several MCP handlers committing to one
+repository all resolve to one lock file. Unhandled, it surfaced as a caller
+failing at `StageLock`, which callers only log — so on a busy wiki an
+auto-commit would have been dropped silently. The same class of failure this
+decision exists to prevent, reached by a different route.
+
+Fixed with a bounded retry (`lockCreateAttempts = 32`, well above the worst
+contention observed) on `ENOENT` only. Retrying is sound here because the
+directory descriptor is already validated and cannot be redirected: a retry
+re-attempts the same create in the same inode. Exhausting every attempt costs
+~53ms of backoff, negligible against `CommitTimeout` and paid only on a path
+that is already failing; a directory that really was removed reports `ENOENT`
+through a held descriptor too (verified), so that error still surfaces.
+
+Verified in two independent ways, because neither suffices alone. The stress
+test reproduces the real race — 15/15 clean afterwards, against 4/12 before —
+but proves nothing on a filesystem that never races. So an `openatFunc` seam
+drives the loop deterministically: recovery after `lockCreateAttempts-1`
+spurious errors, giving up after exactly `lockCreateAttempts`, and no retry
+at all for a non-`ENOENT` error. Each fails against a matching mutant
+(`attempts = 1`; retry-every-error; a loop running past its declared bound).
+
+**Process note.** The masking was self-inflicted: `go test ... | tail` with
+`&&`-chained `git commit` let a red suite reach the remote. Gate commands
+need `set -o pipefail` or an unpiped status check — a filter that hides the
+thing being gated on is worse than no gate.
