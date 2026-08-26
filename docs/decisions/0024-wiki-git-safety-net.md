@@ -377,3 +377,56 @@ Symlink` pointed its symlink at a `0755` directory, so the permission check
 rejected it even with `O_NOFOLLOW` removed — confirmed by mutation. The
 victim is now `0700`, leaving the refusal to follow the link as the only
 thing that can reject it, and the mutant now fails.
+
+**Seventh correction pass** (2026-08-26, CodeRabbit re-review of `a8c432f`):
+the same defect one component higher, plus hardening of the trust anchor.
+
+1. **P1 — the intermediate `cogvault` component was still resolved by
+   path.** The sixth pass bound the lock *file* to a validated `locks`
+   descriptor, but `<cache>/cogvault/locks` was still built as a joined
+   string, and `O_NOFOLLOW` guards only the final component. A same-euid
+   process could rename `cogvault`, leave a symlink pointing at a directory
+   it controls, and place an owner-only `locks` inside it: every owner and
+   mode check would pass while the lock silently moved to a different inode,
+   so a second caller would lock elsewhere and serialization would break.
+   Fixed by walking from the cache directory one component at a time with
+   `Mkdirat`/`Openat`, validating each descriptor before opening the next.
+2. **The anchor open did not refuse a symlink.** `os.UserCacheDir()` is the
+   boundary of what this function can verify, but a symlink standing in its
+   place would still have been traversed, contradicting the trust boundary
+   the comment claimed. Now opened with `O_NOFOLLOW` and checked.
+3. **The anchor accepted a group- or world-writable directory.** The first
+   version of this pass skipped the anchor's permission check entirely,
+   reasoning that the per-user cache is conventionally world-*readable*.
+   That conflated readable with writable: a writable anchor lets another
+   local user create or replace the `cogvault` entry inside it — exactly the
+   squatting the descriptor walk defends against, reachable without winning
+   any race. Write bits are now rejected; read bits are not.
+
+   The asymmetry is deliberate and load-bearing in both directions.
+   Requiring `0700` at the anchor would reject a normal install
+   (`~/Library/Caches` is `0755` on macOS, verified on this host, the
+   primary platform) and — since callers only log commit failures — silently
+   disable the auto-commit safety net, which is the same class of bug this
+   whole sequence exists to fix. Secrecy is enforced from `cogvault` down,
+   which cogvault creates and owns.
+
+Verified: `TestLockDirRejectsIntermediateComponentSwap` fails against a
+mutant reverting to the joined path; `TestLockDirRejectsASymlinkedCacheDir`
+fails against a mutant dropping `O_NOFOLLOW` from the anchor open; and
+`TestLockDirCacheDirModePolicy` fails in both directions — against a mutant
+removing the write-bit check (`0775`, `0777`, `0722` admitted) and against
+one tightening it to `0700` (the macOS default rejected). The decoys are
+constructed to be valid in every other respect, so only the intended guard
+can distinguish them.
+
+Not covered by a test: the anchor's owner check, for the same reason as the
+directory uid check above — a unit test cannot produce a directory owned by
+another user. Both are kept as the real multi-user defense and recorded here
+rather than deleted to satisfy mutation testing.
+
+**A pattern worth naming.** Three consecutive passes fixed the same mistake
+at three levels: validate by path, then use by path. Each fix described the
+error correctly while leaving the next component up unguarded. A path string
+cannot carry a validation result — only a descriptor can — and the rule has
+to be applied to the whole path, not to whichever component was under review.

@@ -536,12 +536,15 @@ test in `internal/gitutil/commit_test.go`:
   `os.UserCacheDir()` keyed by a hash of the resolved repo path — never in a
   shared temp dir, where a deterministic name is squattable by another local
   user, and never inside `wiki_dir`, where the whole-tree ingest snapshot
-  would commit it as wiki content. The directory is opened with
-  `O_DIRECTORY|O_NOFOLLOW`, validated through that descriptor with `Fstat`,
-  and the lock file is opened with `Openat` against it: `O_NOFOLLOW` guards
-  only the final component, so validating the directory by path and then
-  opening the file by path would let a same-euid process swap the directory
-  for a symlink in between and redirect the lock out of the validated tree.
+  would commit it as wiki content. The path is walked from
+  `os.UserCacheDir()` one component at a time with `Mkdirat`/`Openat`, each
+  descriptor validated before the next is opened, and the lock file is opened
+  with `Openat` against the final one: `O_NOFOLLOW` guards only the final
+  component, so resolving the joined path would let a same-euid process swap
+  an intermediate directory for a symlink and redirect the lock out of the
+  validated tree. The anchor rejects group/world-*write* bits but tolerates
+  read bits — `~/Library/Caches` is `0755` on macOS, and rejecting it would
+  disable auto-commit on a normal install.
 - **Bounded, non-blocking lock acquisition.** `flock`'s blocking mode ignores
   context, so a caller queued behind a wedged commit would hang forever —
   precisely the failure the timeout exists to prevent. The wait is a retry

@@ -293,8 +293,8 @@ func lockTarget(repoDir string) (dirfd int, name, display string, err error) {
 // would break its commit lock mid-run.
 var userCacheDir = os.UserCacheDir
 
-// openLockDir creates the lock directory if needed and returns it together
-// with an open descriptor for it.
+// openLockDir creates the lock directory if needed and returns its path
+// together with an open, validated descriptor for it.
 //
 // It deliberately does not live under os.TempDir(). A deterministic name in a
 // world-writable directory is squattable: another local user can pre-create
@@ -302,15 +302,18 @@ var userCacheDir = os.UserCacheDir
 // call sites treat a commit failure as best-effort and only log a warning,
 // the auto-commit safety net would then be silently and permanently disabled.
 // os.UserCacheDir() is per-user and not world-writable on either supported
-// platform.
+// platform, so it is the trust anchor.
 //
-// The directory is opened with O_DIRECTORY|O_NOFOLLOW and then validated
-// through that descriptor with Fstat, rather than checked by path. A path
-// check would leave the result unbound from the eventual lock-file open: a
-// same-euid process could rename this directory and leave a symlink behind
-// in between, and every later path-based resolution would follow it. Callers
-// open the lock file with openat against this descriptor, so validation and
-// use refer to one inode.
+// From that anchor the path is walked one component at a time with mkdirat
+// and openat, never as a joined string. O_NOFOLLOW only refuses a symlink at
+// the *final* component, so resolving `<cache>/cogvault/locks` by path would
+// leave `cogvault` unguarded: a same-euid process could rename it, drop a
+// symlink in its place pointing at a directory it controls, and put an
+// owner-only `locks` inside. The final directory would then pass every owner
+// and mode check while being an entirely different inode, so a second caller
+// would take its lock somewhere else and commit serialization would break —
+// exactly what the lock exists to prevent. Walking descriptors makes each
+// component's validation bind to the next one's open.
 //
 // Nothing is repaired, only rejected. An earlier version did MkdirAll
 // followed by Chmod(0700); Chmod follows symlinks, so a planted symlink made
@@ -321,34 +324,88 @@ func openLockDir() (string, int, error) {
 	if err != nil {
 		return "", -1, fmt.Errorf("gitutil: locate user cache dir: %w", err)
 	}
-	dir := filepath.Join(cache, "cogvault", "locks")
+	// The anchor is created by path — it is the boundary of what this
+	// function can verify — but it is still opened with O_NOFOLLOW and
+	// checked, so a symlink standing where the cache directory belongs is
+	// refused rather than traversed.
+	//
+	// The anchor's permission check is narrower than the components below,
+	// and the distinction is between readable and writable. Requiring 0700
+	// here would reject a normal install: the per-user cache directory is
+	// conventionally group- and world-*readable* (macOS ships
+	// `~/Library/Caches` as 0755, verified on the primary platform), and
+	// because callers only log commit failures, rejecting it would silently
+	// disable the auto-commit safety net — the same class of bug this change
+	// exists to fix. Group- or world-*writable* is a different matter: it
+	// lets another local user create or replace the `cogvault` entry inside
+	// it, which is precisely the squatting this walk defends against. So
+	// read bits are tolerated at the anchor and write bits are not. Secrecy
+	// is enforced from `cogvault` down, which cogvault creates and owns.
+	if err := os.MkdirAll(cache, 0o700); err != nil {
+		return "", -1, fmt.Errorf("gitutil: create cache dir %s: %w", cache, err)
+	}
+	fd, err := unix.Open(cache, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return "", -1, fmt.Errorf("gitutil: open cache dir %s: %w", cache, err)
+	}
+	var anchor syscall.Stat_t
+	if err := syscall.Fstat(fd, &anchor); err != nil {
+		_ = unix.Close(fd)
+		return "", -1, fmt.Errorf("gitutil: stat cache dir %s: %w", cache, err)
+	}
+	if int(anchor.Uid) != os.Geteuid() {
+		_ = unix.Close(fd)
+		return "", -1, fmt.Errorf("gitutil: cache dir %s is owned by uid %d, not %d", cache, anchor.Uid, os.Geteuid())
+	}
+	if perm := anchor.Mode & 0o777; perm&0o022 != 0 {
+		_ = unix.Close(fd)
+		return "", -1, fmt.Errorf("gitutil: cache dir %s is group- or world-writable (mode %o); another user could squat the lock directory", cache, perm)
+	}
 
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", -1, fmt.Errorf("gitutil: create lock dir %s: %w", dir, err)
+	dir := cache
+	for _, component := range []string{"cogvault", "locks"} {
+		dir = filepath.Join(dir, component)
+
+		next, err := openDirAt(fd, component, dir)
+		_ = unix.Close(fd)
+		if err != nil {
+			return "", -1, err
+		}
+		fd = next
+	}
+	return dir, fd, nil
+}
+
+// openDirAt creates and opens one path component relative to parent,
+// refusing a symlink, a non-directory, a foreign owner, or permissive bits.
+// display is the full path, used only for error messages.
+func openDirAt(parent int, name, display string) (int, error) {
+	if err := unix.Mkdirat(parent, name, 0o700); err != nil && !errors.Is(err, unix.EEXIST) {
+		return -1, fmt.Errorf("gitutil: create lock dir %s: %w", display, err)
 	}
 
 	// O_NOFOLLOW rejects a symlink standing where the directory belongs;
 	// O_DIRECTORY rejects anything that is not a directory.
-	fd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	fd, err := unix.Openat(parent, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return "", -1, fmt.Errorf("gitutil: open lock dir %s: %w", dir, err)
+		return -1, fmt.Errorf("gitutil: open lock dir %s: %w", display, err)
 	}
 
 	var st syscall.Stat_t
 	if err := syscall.Fstat(fd, &st); err != nil {
 		_ = unix.Close(fd)
-		return "", -1, fmt.Errorf("gitutil: stat lock dir %s: %w", dir, err)
+		return -1, fmt.Errorf("gitutil: stat lock dir %s: %w", display, err)
 	}
 	// Geteuid, not Getuid: the effective uid is what the kernel checks on
 	// open, and it is what openLockFileAt compares against — the two must
 	// agree or a setuid context would pass one guard and fail the other.
 	if int(st.Uid) != os.Geteuid() {
 		_ = unix.Close(fd)
-		return "", -1, fmt.Errorf("gitutil: lock dir %s is owned by uid %d, not %d", dir, st.Uid, os.Geteuid())
+		return -1, fmt.Errorf("gitutil: lock dir %s is owned by uid %d, not %d", display, st.Uid, os.Geteuid())
 	}
 	if perm := st.Mode & 0o777; perm&0o077 != 0 {
 		_ = unix.Close(fd)
-		return "", -1, fmt.Errorf("gitutil: lock dir %s is group- or world-accessible (mode %o)", dir, perm)
+		return -1, fmt.Errorf("gitutil: lock dir %s is group- or world-accessible (mode %o)", display, perm)
 	}
-	return dir, fd, nil
+	return fd, nil
 }

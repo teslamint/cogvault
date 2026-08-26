@@ -522,6 +522,146 @@ func TestLockSurvivesLockDirSwap(t *testing.T) {
 	}
 }
 
+// TestLockDirRejectsIntermediateComponentSwap is the regression test for the
+// same mistake one level up the path.
+//
+// Binding the lock *file* to a validated `locks` descriptor still left
+// `cogvault` resolved as a string component, and O_NOFOLLOW only guards the
+// final one. A same-euid process could rename `cogvault`, drop a symlink in
+// its place pointing at a directory it controls, and put an owner-only
+// `locks` inside: every owner and mode check would pass while the lock moved
+// to a different inode, so a second caller would lock somewhere else and
+// serialization would break without any error.
+//
+// Walking from the cache directory one component at a time with mkdirat and
+// openat closes it — the swap below happens before openLockDir runs, so the
+// walk must refuse the symlink rather than land in the decoy.
+func TestLockDirRejectsIntermediateComponentSwap(t *testing.T) {
+	base := fakeCacheDir(t)
+	repo := initRepo(t)
+
+	// Materialize the real tree, then stand it aside.
+	if _, fd, err := openLockDir(); err != nil {
+		t.Fatalf("openLockDir: %v", err)
+	} else {
+		_ = unix.Close(fd)
+	}
+
+	real := filepath.Join(base, "cogvault")
+	if err := os.Rename(real, real+".moved"); err != nil {
+		t.Fatalf("renaming intermediate dir: %v", err)
+	}
+
+	// The decoy mimics a fully valid tree: an owner-only `locks` inside an
+	// owner-only directory. Only the refusal to traverse the symlink can
+	// tell it apart from the real one.
+	decoy := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(decoy, "locks"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(decoy, real); err != nil {
+		t.Fatalf("planting symlink: %v", err)
+	}
+
+	dirfd, name, _, err := lockTarget(repo)
+	if err == nil {
+		_ = unix.Close(dirfd)
+		t.Fatalf("lockTarget traversed a symlinked intermediate component; it must refuse")
+	}
+
+	// Whatever the outcome, nothing may have been created in the decoy.
+	entries, readErr := os.ReadDir(filepath.Join(decoy, "locks"))
+	if readErr != nil {
+		t.Fatalf("reading decoy: %v", readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("decoy reached through the swapped `cogvault` symlink received %d entr(ies) (name %q); the walk must not traverse it", len(entries), name)
+	}
+}
+
+// TestLockDirRejectsASymlinkedCacheDir pins O_NOFOLLOW on the anchor open.
+//
+// The cache directory is where verification starts, so it is the one
+// component this package cannot validate against a parent descriptor. It can
+// still refuse to traverse a symlink standing in its place, which is what
+// keeps the documented trust boundary honest: without this, a symlinked
+// cache directory would silently relocate every lock.
+func TestLockDirRejectsASymlinkedCacheDir(t *testing.T) {
+	orig := userCacheDir
+	t.Cleanup(func() { userCacheDir = orig })
+
+	// A fully valid decoy: owner-only, correct owner. Only the refusal to
+	// follow the link can distinguish it.
+	decoy := t.TempDir()
+	if err := os.Chmod(decoy, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "cache-link")
+	if err := os.Symlink(decoy, link); err != nil {
+		t.Fatalf("planting symlink: %v", err)
+	}
+	userCacheDir = func() (string, error) { return link, nil }
+
+	if _, fd, err := openLockDir(); err == nil {
+		_ = unix.Close(fd)
+		t.Fatal("openLockDir traversed a symlinked cache dir; the anchor open must refuse it")
+	}
+	if entries, err := os.ReadDir(decoy); err != nil {
+		t.Fatalf("reading decoy: %v", err)
+	} else if len(entries) != 0 {
+		t.Fatalf("decoy received %d entr(ies) through the symlinked cache dir", len(entries))
+	}
+}
+
+// TestLockDirCacheDirModePolicy pins the anchor's permission boundary in
+// both directions: readable is tolerated, writable is not.
+//
+// Requiring 0700 would reject a normal install — the per-user cache
+// directory is conventionally group- and world-readable, and macOS ships
+// `~/Library/Caches` as 0755 (verified on the primary platform). Because
+// callers only log commit failures, that rejection would silently disable
+// the auto-commit safety net: the same class of bug this change exists to
+// fix. But a group- or world-*writable* anchor lets another local user
+// create or replace the `cogvault` entry inside it, which is exactly the
+// squatting the descriptor walk defends against.
+func TestLockDirCacheDirModePolicy(t *testing.T) {
+	for _, tc := range []struct {
+		mode   os.FileMode
+		accept bool
+	}{
+		{0o700, true},
+		{0o755, true}, // the macOS default
+		{0o775, false},
+		{0o777, false},
+		{0o722, false},
+	} {
+		t.Run(fmt.Sprintf("%o", tc.mode), func(t *testing.T) {
+			base := fakeCacheDir(t)
+			if err := os.Chmod(base, tc.mode); err != nil {
+				t.Fatal(err)
+			}
+
+			dir, fd, err := openLockDir()
+			if !tc.accept {
+				if err == nil {
+					_ = unix.Close(fd)
+					t.Fatalf("openLockDir accepted a %o cache dir; another local user could squat the lock directory inside it", tc.mode)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("openLockDir rejected a conventional %o cache dir: %v", tc.mode, err)
+			}
+			defer func() { _ = unix.Close(fd) }()
+
+			// The directories cogvault creates must still be owner-only.
+			if mode := mustMode(t, dir); mode != 0o700 {
+				t.Fatalf("lock dir mode = %o, want 0700", mode)
+			}
+		})
+	}
+}
+
 func mustMode(t *testing.T, path string) os.FileMode {
 	t.Helper()
 	info, err := os.Lstat(path)
