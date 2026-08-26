@@ -503,8 +503,23 @@ best-effort index reflection. When `git.auto_commit` is `write` or
 `write+ingest` (§3.1, default `off`), also auto-commits the write
 (`git add` + `git commit -m "wiki: write <path>"`) when `wiki_dir` is a git
 repository; a failed `git add`/`git commit` is logged, not returned as a
-tool error, and is bounded by a 10s subprocess timeout (0024). Errors:
-`ErrPermission`, `ErrTraversal`, `ErrSymlink`.
+tool error, and is bounded as described in §8.8.1 (0024).
+
+Paths git reads as configuration are rejected with `ErrPermission`,
+independently of `exclude`/`exclude_read`: any path containing a `.git`,
+`.gitattributes`, or `.gitmodules` component, at any depth, compared
+case-insensitively. This is not a tidiness rule — `git add` executes the
+clean filter that `.gitattributes` names, using the command line
+`.git/config` defines, so a writable `.gitattributes` plus a writable
+`.git/config` turns the auto-commit path into arbitrary command execution as
+the server process on the *next* ordinary write. The comparison is
+case-insensitive because on a case-insensitive filesystem (APFS, NTFS) a
+write to `.GIT/config` lands in the real `.git/config`; the rule is applied
+uniformly so the boundary does not vary by host. `.gitignore` remains
+writable: it selects paths, it never names a command. `wiki_delete` and
+internal moves apply the same rule.
+
+Errors: `ErrPermission`, `ErrTraversal`, `ErrSymlink`.
 
 ### 8.4 wiki_list
 
@@ -552,14 +567,54 @@ page `wiki_write` wrote under the default `git.auto_commit: off`, which
 never commits) fails with no matching pathspec, so the delete produces no
 commit either — deleting an untracked page leaves no git record of the
 deletion at all. A failed `git add`/`git commit` is logged, not returned as
-a tool error, and is bounded by a 10s subprocess timeout (0024). With
+a tool error, and is bounded as described in §8.8.1 (0024). With
 `git.auto_commit: off` (the default), a delete commit that does land records
 only the deletion — `wiki_write` overwrites without committing, and nothing
 commits on ingest, so it does **not** make the wiki recoverable (see
 `docs/deployment/remote-mcp.md` "Security posture"). Setting `git.auto_commit`
 to `write` or `write+ingest` narrows, but does not eliminate, that gap — see
-§3.1 and the deployment guide. Errors: `ErrNotFound`,
-`ErrPermission`, `ErrTraversal`, `ErrSymlink`.
+§3.1 and the deployment guide.
+
+Git-controlled paths (§8.3) are rejected with `ErrPermission` here too.
+Errors: `ErrNotFound`, `ErrPermission`, `ErrTraversal`, `ErrSymlink`.
+
+#### 8.8.1 Auto-commit bounds and consequences
+
+Applies to every auto-commit path: `wiki_write` (§8.3), `wiki_delete` (§8.8),
+and the post-ingest snapshot (§9.4).
+
+**Serialization.** Commits against one repository are serialized by an
+advisory lock, covering both concurrent MCP tool calls and a scheduled
+`cogvault ingest` running against a live `cogvault serve`. Git refuses
+concurrent index operations, so without this an interleaved commit fails and
+is only logged — the write lands on disk while its history entry silently
+never exists. The lock lives outside `wiki_dir`, so the whole-tree ingest
+snapshot never commits it as wiki content, and inside a directory only the
+running user can open, so another local user cannot disable auto-commit by
+pre-creating it. Commits against *different* repositories do not block each
+other.
+
+**Timeouts.** The lock wait, `git add`, and `git commit` are each bounded
+independently by the same 10s deadline budget, so one slow step cannot consume
+another's. The deadline budget for a single auto-commit is therefore ~30s, not
+10s. The two `git` steps differ from the lock wait when their budget runs out:
+a `git` subprocess is signalled with `SIGTERM` and given a 2s grace period
+before being force-killed, because `git` removes `.git/index.lock` from its
+own signal handler and an untrappable `SIGKILL` would instead strand that lock
+on disk, breaking every later commit until an operator removed it by hand —
+manufacturing the wedged lock this timeout exists to prevent. Including up to
+two 2s grace periods, the wall-clock upper bound is ~34s. The lock wait has no
+subprocess to signal; it simply gives up at its deadline and the commit is
+reported as a lock failure.
+
+**History is permanent.** Enabling `write` or `write+ingest` is a durability
+tradeoff in both directions. Once a page is committed, a later `wiki_delete`
+removes only the working-tree copy: the prior content stays recoverable from
+git history for as long as the repository exists, and propagates to any
+backup taken afterwards. If a page held a secret or personal data, deleting
+it through the tool surface does **not** erase it — that requires history
+rewriting outside cogvault. Under the default `off`, deleting an untracked
+page leaves no trace at all.
 
 ---
 
@@ -662,7 +717,7 @@ cogvault ingest [--config <path>] [--dry-run] [--limit N] [--scheduled]
   repository, not only `wiki_dir`'s contents. A failed `git add`/`git
   commit` (including "nothing to commit", which is the expected outcome
   when a digest reproduced identical content) is logged, not returned as a
-  command error, and is bounded by a 10s subprocess timeout (0024).
+  command error, and is bounded as described in §8.8.1 (0024).
 - **Exit codes**: nonzero only on a run-level failure (e.g. lock contention:
   `ingest already running (lock held)`, or a ctx-cancelled run). Per-file
   failures inside a completed run do **not** fail the run (exit 0).

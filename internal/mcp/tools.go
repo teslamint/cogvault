@@ -8,10 +8,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/adrg/frontmatter"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -19,15 +17,10 @@ import (
 	"github.com/teslamint/cogvault/internal/adapter"
 	"github.com/teslamint/cogvault/internal/config"
 	cverr "github.com/teslamint/cogvault/internal/errors"
+	"github.com/teslamint/cogvault/internal/gitutil"
 	"github.com/teslamint/cogvault/internal/index"
 	"github.com/teslamint/cogvault/internal/storage"
 )
-
-// gitCommitTimeout bounds each git add/commit subprocess so a wedged
-// index.lock cannot block a tool call indefinitely (0024). A var, not a
-// const, so tests can shrink it to exercise the timeout path without a
-// multi-second sleep.
-var gitCommitTimeout = 10 * time.Second
 
 func mapError(err error, path string) *mcp.CallToolResult {
 	switch {
@@ -142,30 +135,30 @@ func handleWikiDelete(root string, store storage.Storage, idx index.Index) serve
 	}
 }
 
-// gitAutoCommit best-effort `git add`s and `git commit`s a single path
-// against root when root is inside a git repository. wiki_delete calls this
+// gitAutoCommit best-effort stages and commits a single path against root
+// when root is inside a git repository. wiki_delete calls this
 // unconditionally (its own delete-commit, unchanged since before 0024);
 // wiki_write calls it only when cfg.Git.CommitsOnWrite() (0024, opt-in, off
-// by default). `add` and `commit` each get their own independent
-// gitCommitTimeout-bounded context — sharing one context across both would
-// let a slow (not necessarily wedged) `git add` starve `git commit` of its
-// own timeout budget, turning a merely slow add into a spurious commit
-// failure. Failures log, never return a tool error — same contract as the
+// by default).
+//
+// The subprocess mechanics — per-command timeouts, SIGTERM-with-grace so
+// git can clean up .git/index.lock, and serialization against both
+// concurrent tool handlers and a concurrently running `cogvault ingest` —
+// live in internal/gitutil, shared with the CLI's post-ingest commit.
+// Failures log, never return a tool error: same contract as the
 // pre-existing delete path.
 func gitAutoCommit(root, path, message string) {
-	addCtx, addCancel := context.WithTimeout(context.Background(), gitCommitTimeout)
-	defer addCancel()
 	absPath := filepath.Join(root, path)
-	cmd := exec.CommandContext(addCtx, "git", "-C", root, "add", absPath)
-	if err := cmd.Run(); err != nil {
-		slog.Warn("git add failed", "path", path, "error", err)
+	stage, err := gitutil.Commit(context.Background(), root, []string{absPath}, message)
+	if err == nil {
 		return
 	}
-
-	commitCtx, commitCancel := context.WithTimeout(context.Background(), gitCommitTimeout)
-	defer commitCancel()
-	commitCmd := exec.CommandContext(commitCtx, "git", "-C", root, "commit", "-m", message)
-	if err := commitCmd.Run(); err != nil {
+	switch stage {
+	case gitutil.StageLock:
+		slog.Warn("git commit lock unavailable", "path", path, "error", err)
+	case gitutil.StageAdd:
+		slog.Warn("git add failed", "path", path, "error", err)
+	default:
 		slog.Warn("git commit failed", "path", path, "error", err)
 	}
 }

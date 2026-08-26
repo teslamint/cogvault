@@ -8,7 +8,25 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/teslamint/cogvault/internal/gitutil"
 )
+
+// shrinkIngestGitCommitTimeout shortens the shared git subprocess budget for
+// one test, so a timeout path can be exercised without a multi-second sleep.
+// The SIGTERM grace period shrinks too: the fake git binary exits promptly
+// on the signal, so the production grace period would only pad wall time.
+func shrinkIngestGitCommitTimeout(t *testing.T, d time.Duration) {
+	t.Helper()
+	originalTimeout := gitutil.CommitTimeout
+	originalGrace := gitutil.TerminateGrace
+	gitutil.CommitTimeout = d
+	gitutil.TerminateGrace = 200 * time.Millisecond
+	t.Cleanup(func() {
+		gitutil.CommitTimeout = originalTimeout
+		gitutil.TerminateGrace = originalGrace
+	})
+}
 
 // initTestGitRepo creates a git repository at dir with a local (not global)
 // identity, so the test never depends on the host's ~/.gitconfig having
@@ -233,9 +251,7 @@ func TestIngestGitCommit_TimeoutBoundsWedgedCommit(t *testing.T) {
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("GIT_FAKE_COMMIT_SLEEP", "10")
 
-	original := ingestGitCommitTimeout
-	ingestGitCommitTimeout = 50 * time.Millisecond
-	t.Cleanup(func() { ingestGitCommitTimeout = original })
+	shrinkIngestGitCommitTimeout(t, 50*time.Millisecond)
 
 	started := time.Now()
 	stdout, _, err := executeCommand("ingest", "--config", configPath)
@@ -250,62 +266,29 @@ func TestIngestGitCommit_TimeoutBoundsWedgedCommit(t *testing.T) {
 	}
 }
 
-// TestIngestGitCommit_SlowAddDoesNotStarveCommitTimeout is the regression
-// test for the initial implementation sharing one context.WithTimeout
-// across both the add and commit subprocesses: a slow-but-not-wedged
-// `git add -A -- .` (e.g. a large working tree scan) would consume most of
-// the shared budget, leaving `git commit` too little time and turning a
-// merely slow add into a spurious commit failure — silently dropping the
-// ingest snapshot commit. With independent per-command timeouts, an add
-// that takes most of ingestGitCommitTimeout must not prevent the commit
-// from landing.
-func TestIngestGitCommit_SlowAddDoesNotStarveCommitTimeout(t *testing.T) {
+// TestIngestGitCommit_TimeoutBoundsWedgedAdd is the add-side counterpart to
+// TestIngestGitCommit_TimeoutBoundsWedgedCommit. Only the commit half had a
+// regression test: rebinding add's context to cmd.Context() (silently
+// dropping half the timeout fix) left the whole suite green. The
+// whole-tree `git add -A -- .` is the slower of the pair — its cost scales
+// with tracked file count — so an unbounded add is the likelier wedge, and
+// it holds .git/index.lock the entire time.
+func TestIngestGitCommit_TimeoutBoundsWedgedAdd(t *testing.T) {
 	fakeClaudeOnPath(t)
 	t.Setenv("CLAUDE_FAKE_MODE", "ok")
 	configPath, srcDir, wikiDir, _ := setupIngestVault(t)
 	initTestGitRepo(t, wikiDir)
 	appendConfig(t, configPath, "git:\n  auto_commit: write+ingest\n")
-	writeAgedSource(t, srcDir, "one.pdf", "slow add fixture")
+	writeAgedSource(t, srcDir, "one.pdf", "wedged add fixture")
 
 	binDir, err := filepath.Abs("../../internal/mcp/testdata/bin")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The fake git binary on PATH shadows real git for every subprocess
-	// call this test's own process makes too (e.g. a gitLogSubjects
-	// helper), not only postIngestGitCommit's — so completion is asserted
-	// via captured log output plus elapsed time, not by re-invoking `git
-	// log`.
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	// add (900ms) + commit (900ms) = 1800ms, which exceeds a 1500ms budget
-	// by 300ms: a shared context lets add consume ~900ms+overhead, leaving
-	// at most ~600ms for commit's 900ms+overhead sleep — commit gets
-	// killed. Each individually fits under 1500ms with a ~600ms margin.
-	// Margin sizing (third revision — do not widen a fourth time; see the
-	// note below): measured fake-git-binary fork/exec overhead directly
-	// under synthetic 16-core CPU-spin contention (the worst case observed,
-	// well beyond real `go test -race ./...` contention) topped out at
-	// ~210ms; ~600ms margin is ~3x that worst case. Prior revisions: a
-	// 250ms budget / 200ms sleep pairing (50ms margin) flaked once under
-	// real full-suite `-race` contention — add's own wall-clock time
-	// (sleep + overhead) crept past its own 250ms individual timeout,
-	// killing add itself, not commit; a 500ms/300ms pairing (200ms margin,
-	// still within noise of the measured 210ms worst case) was the second
-	// revision. The failure mode this margin must absorb is add exceeding
-	// its own budget, not only the shared-context starvation scenario.
-	// If this margin ever flakes again, do not widen it a fourth time —
-	// redesign away from wall-clock discrimination entirely (e.g. have the
-	// fake git write a marker file after add completes and after commit
-	// completes, and assert on marker presence/order instead of elapsed
-	// duration). A timing-based test cannot be made unconditionally safe
-	// against unbounded scheduler contention; a fourth widening would only
-	// repeat this same investigation with a bigger number.
-	t.Setenv("GIT_FAKE_ADD_SLEEP", "0.9")
-	t.Setenv("GIT_FAKE_COMMIT_SLEEP", "0.9")
+	t.Setenv("GIT_FAKE_ADD_SLEEP", "10")
 
-	original := ingestGitCommitTimeout
-	ingestGitCommitTimeout = 1500 * time.Millisecond
-	t.Cleanup(func() { ingestGitCommitTimeout = original })
+	shrinkIngestGitCommitTimeout(t, 50*time.Millisecond)
 
 	var buf strings.Builder
 	prevLogger := slog.Default()
@@ -321,21 +304,12 @@ func TestIngestGitCommit_SlowAddDoesNotStarveCommitTimeout(t *testing.T) {
 	if !strings.Contains(stdout, "digested=1") {
 		t.Fatalf("expected digested=1, got: %q", stdout)
 	}
-
-	// Positive proof postIngestGitCommit actually ran both subprocesses
-	// sequentially (not skipped by a CommitsOnIngest() wiring bug): if both
-	// the 900ms fake add and the 900ms fake commit executed, elapsed must
-	// be at least their sum. A near-zero elapsed here would mean the
-	// negative log assertions below are vacuously passing.
-	if elapsed < 1800*time.Millisecond {
-		t.Fatalf("elapsed = %s, want >= 1800ms; postIngestGitCommit's add+commit may not have run at all", elapsed)
+	if elapsed >= 5*time.Second {
+		t.Fatalf("ingest took %s, want bounded by the shrunk timeout (fake git add sleeps 10s unbounded)", elapsed)
 	}
-
-	logs := buf.String()
-	if strings.Contains(logs, "post-ingest git commit failed") {
-		t.Fatalf("commit must get its own full timeout budget, not the remainder after a slow add; logs: %s", logs)
-	}
-	if strings.Contains(logs, "post-ingest git add failed") {
-		t.Fatalf("add must succeed within its own budget; logs: %s", logs)
+	// Positive proof the add actually timed out, rather than the fake
+	// binary exiting early and making the elapsed assertion vacuous.
+	if logs := buf.String(); !strings.Contains(logs, "post-ingest git add failed") {
+		t.Fatalf("expected a logged add failure from the killed subprocess; logs: %s", logs)
 	}
 }
