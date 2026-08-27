@@ -191,15 +191,23 @@ Steps:
        that directory, then `os.Chmod(dir, 0)` and run again. Assert exactly
        two `source-error` lines for that path and `report.SourceErrors == 2`,
        and assert over **every** `source-error` line rather than the first.
+     - Case `dir-unswept`: on a fresh harness, `os.Chmod(dir, 0)` before any
+       run and run once. Assert exactly **one** `source-error` line for that
+       path and `report.SourceErrors == 1`. This is the discriminating case
+       for the two-line claim in case `dir`: `sweepOrphans` groups ledger rows
+       by directory and skips a directory whose group is empty
+       (`ingest.go:436-438`, `if len(dirRows) == 0 { continue }`), so with no
+       ledger row only `scan` reports. Without this case the test suite cannot
+       distinguish "the sweep runs first" from "every denial reports twice".
      - Case `file`: `os.Chmod(file, 0)` and run once. Assert one `skipped`
        line for that path whose error starts with `read: `.
-     - Both cases: register `t.Cleanup(func() { os.Chmod(path, 0o755) })`
+     - Every case: register `t.Cleanup(func() { os.Chmod(path, 0o755) })`
        after the `t.TempDir` call that created the path. Go runs cleanups in
        LIFO order, so the later-registered chmod restore executes before the
        temp-dir removal and the removal succeeds.
-     - Both cases: `if os.Geteuid() == 0 { t.Skip("root bypasses mode bits") }`.
-     - Both cases assert the substring `permission denied: cannot read source`
-       unconditionally, and assert the `; macOS consent required` suffix only
+     - Every case: `if os.Geteuid() == 0 { t.Skip("root bypasses mode bits") }`.
+     - Every case asserts the substring `permission denied: cannot read source`
+       unconditionally, and asserts the `; macOS consent required` suffix only
        inside `if runtime.GOOS == "darwin"`.
   2. Run `go test ./internal/ingest -run TestRunSourcePermissionDenied`;
      confirm it fails because the report still carries the raw OS string.
@@ -569,11 +577,6 @@ where an operator will actually read it.
 ## Carry-forward trigger audit
 
 Audited `docs/research/v2-follow-ups.md` at `4c5c623`: 0 open rows, 0 fired, 0 unobservable.
-
-The tracker holds 18 rows (F1–F18), all with status Done, so no row is open and
-no trigger can fire. No edit-based trigger matches any file in this plan's File
-structure, and no drift-based or event-based trigger is relevant to this
-feature.
 
 ## Deferred to Follow-Up Work
 
