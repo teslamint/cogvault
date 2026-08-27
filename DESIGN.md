@@ -661,7 +661,7 @@ resolveConfigPath → Load → bootstrap(store/index/adapter) → CheckConsisten
 | `httpauth/oauth.go` | OAuthValidator (JWT validation via golang-jwt/jwt/v5) |
 | `httpauth/jwks.go` | JWKSCache (OIDC discovery + JWKS fetch, key decode) |
 | `cmd/cogvault/*` | cobra CLI: `--config`, init/search/serve/ingest/status |
-| `Makefile` | build/install (with adhoc codesign at destination), test, clean |
+| `Makefile` | build/install with `CODESIGN_IDENTITY` (default `-`, ad-hoc) and `CODESIGN_IDENTIFIER` (default `dev.tmint.cogvault`) applied to the build artifact and install destination; test, clean |
 | `schema/schema.go` + `default_schema.md` | `go:embed` default schema |
 
 ---
