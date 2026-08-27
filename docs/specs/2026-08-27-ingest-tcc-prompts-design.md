@@ -160,7 +160,7 @@ Environment invariants that still apply:
   accesses to cogvault.
 - On the maintainer's machine the same binary path also backs a second launchd job
   running `cogvault serve` (`launchctl list | rg cogvault`, observed
-  `2026-08-27T14:41:00+09:00`: `dev.tmint.cogvault` running,
+  `2026-08-27T14:41:00+09:00`: `com.teslamint.cogvault` running,
   `com.teslamint.cogvault.ingest` scheduled). Both jobs share one code identity.
 
 ## Architecture
