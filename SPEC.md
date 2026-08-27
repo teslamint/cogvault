@@ -1005,6 +1005,13 @@ confirms that its wiki page still exists. `ErrNotFound` falls through to
 re-digest the present source. Other stat errors report `failed` with
 `stat wiki page: <error>` and leave the ledger row unchanged.
 
+A source directory or file whose read fails with a permission error reports
+`permission denied: cannot read source`; on macOS it adds
+`; macOS consent required, see README "Schedule zero-touch ingest"`. A source
+directory emits `source-error` once during the orphan sweep and once during the
+scan because `Run` sweeps before scanning. A source file emits `skipped` with
+the `read: ` prefix.
+
 For actionable transient failures, the report error and, when ledger
 persistence succeeds, `last_error` contain the same canonicalized, bounded
 diagnostic. A structured final result is rejected when it is empty, contains
