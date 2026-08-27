@@ -1,6 +1,6 @@
 ---
 title: Stable code identity for scheduled ingest
-status: draft
+status: approved
 date: 2026-08-27
 schema: spec/v1
 ---
@@ -158,7 +158,7 @@ Environment invariants that still apply:
   accesses to cogvault.
 - On the maintainer's machine the same binary path also backs a second launchd job
   running `cogvault serve` (`launchctl list | rg cogvault`, observed
-  `2026-08-27T14:41:00+09:00`: `com.teslamint.cogvault` running,
+  `2026-08-27T14:41:00+09:00`: `dev.tmint.cogvault` running,
   `com.teslamint.cogvault.ingest` scheduled). Both jobs share one code identity.
 
 ## Architecture
@@ -168,7 +168,7 @@ No package boundary changes. Two independent surfaces move:
 1. **Build identity (`Makefile`).** The `codesign` invocation gains two variables.
    `CODESIGN_IDENTITY` defaults to `-`, preserving today's ad-hoc behavior for
    anyone without a certificate. `CODESIGN_IDENTIFIER` defaults to
-   `com.teslamint.cogvault` and replaces the linker's `a.out`, so the recorded TCC
+   `dev.tmint.cogvault` and replaces the linker's `a.out`, so the recorded TCC
    identity is stable and specific rather than shared with every other Go binary.
    Both the build artifact and the install destination are signed, preserving the
    destination re-sign rule established by the earlier codesign work.
@@ -218,7 +218,7 @@ A denied read never reaches the LLM, so it cannot consume a permanent attempt.
 
 | Surface | Change |
 |---|---|
-| `make build` / `make install` | New variables `CODESIGN_IDENTITY` (default `-`) and `CODESIGN_IDENTIFIER` (default `com.teslamint.cogvault`); one echoed line naming the identity used |
+| `make build` / `make install` | New variables `CODESIGN_IDENTITY` (default `-`) and `CODESIGN_IDENTIFIER` (default `dev.tmint.cogvault`); one echoed line naming the identity used |
 | `cogvault ingest` report | `source-error` and `skipped` lines for denied reads carry a fixed permission diagnostic instead of a bare OS string |
 | Config file | No change |
 | MCP tools | No change |
@@ -280,7 +280,7 @@ string bare, as both emit `err.Error()` bare today. `scan`'s `hashFile` keeps th
    claim is scoped to rows whose `last_modified` is at or after the signed
    install; pre-existing `cdhash` rows are expected to remain until the
    documented stale-grant cleanup (S4) removes them.
-   - **Measured by**: record `INSTALL_EPOCH=$(date +%s)` immediately before the signed `make install`. After the re-grant round, for **every** row returned by `sqlite3 "$HOME/Library/Application Support/com.apple.TCC/TCC.db" "select service, hex(csreq) from access where client='$HOME/bin/cogvault' and last_modified >= $INSTALL_EPOCH;"`, decoding its `csreq` through `xxd -r -p` and `csreq -r- -t` prints a requirement containing `identifier "com.teslamint.cogvault"` and a `certificate leaf[subject.OU]` term, and containing no `cdhash` term. At least one row must be returned; zero rows fails the criterion rather than passing it vacuously.
+   - **Measured by**: record `INSTALL_EPOCH=$(date +%s)` immediately before the signed `make install`. After the re-grant round, for **every** row returned by `sqlite3 "$HOME/Library/Application Support/com.apple.TCC/TCC.db" "select service, hex(csreq) from access where client='$HOME/bin/cogvault' and last_modified >= $INSTALL_EPOCH;"`, decoding its `csreq` through `xxd -r -p` and `csreq -r- -t` prints a requirement containing `identifier "dev.tmint.cogvault"` and a `certificate leaf[subject.OU]` term, and containing no `cdhash` term. At least one row must be returned; zero rows fails the criterion rather than passing it vacuously.
 2. A rebuild after the grants are re-established does not invalidate them. The
    measurement runs in this exact order, because the first signed install still
    costs one final round of prompts:
@@ -305,4 +305,7 @@ string bare, as both emit `err.Error()` bare today. `scan`'s `hashFile` keeps th
 |---|---|
 | Which access raises `kTCCServiceSystemPolicyAppData` for cogvault — the spawned `claude` CLI reading another application's support directory, the `osascript` notification path, or `wiki_dir` under `~/Library/Mobile Documents` | `implementing`, as a bounded observation during manual verification; it does not gate the fix |
 | Whether a single Full Disk Access grant supersedes the individual folder prompts and the app-data prompt, allowing the README to document one grant instead of several | `implementing`, verified on the maintainer's machine before the README wording is finalized |
-| Whether the identifier should be `com.teslamint.cogvault` or a repository-neutral value for contributors who sign with their own certificate | User, at spec approval |
+
+Resolved at the approval gate on 2026-08-27: `CODESIGN_IDENTIFIER` defaults to
+`dev.tmint.cogvault`. The launchd job labels (`com.teslamint.cogvault`,
+`com.teslamint.cogvault.ingest`) are a separate namespace and stay unchanged.
