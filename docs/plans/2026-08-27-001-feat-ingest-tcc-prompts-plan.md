@@ -3,7 +3,7 @@ schema: plan/v1
 title: "Stable code identity for scheduled ingest"
 type: feat
 status: approved
-body_seal: ffc637e49f7e5732bb8291a044d8a459728df29468625f4ed7c3b1c4d6a775c4
+body_seal: 2f6ec926b69b73a500b3c0a4ce3d7af8cfbe8fdaa868e3f20cc7f08c3f4e5226
 date: 2026-08-27
 execution: code
 origin: docs/specs/2026-08-27-ingest-tcc-prompts-design.md
@@ -520,10 +520,11 @@ Steps:
      the criterion; it does not pass it vacuously.
   2. Prepare the SC2 packet as an ordered five-step sequence, using the same
      `TCC_DB` assignment as step 1: signed install → kickstart and answer the
-     prompts → record the installed `CDHash` from `codesign -dv` and
-     `REBUILD_EPOCH=$(date +%s)` → `make install` again and confirm the
-     `CDHash` changed → kickstart again. Pass requires that no prompt appears
-     at the second kickstart and that
+     prompts → record the installed `CDHash` from `codesign -dv` for
+     diagnostic context and set `REBUILD_EPOCH=$(date +%s)` → `make install`
+     again → kickstart again. An unchanged-source reproducible build can retain
+     its `CDHash`, so it is not a pass criterion. Pass requires that no prompt
+     appears at the second kickstart and that
      `sqlite3 "$TCC_DB" "select count(*) from access where client='$HOME/bin/cogvault' and last_modified >= $REBUILD_EPOCH;"`
      returns 0.
   3. Hand both packets to the maintainer with the note that step 1 costs one
