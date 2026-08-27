@@ -58,14 +58,21 @@ signing the build artifact alone is not enough because macOS TCC matches the
 code hash at the FDA-granted path, not the build path:
 
 ```makefile
+BINARY     = cogvault
+INSTALL_DIR = $(HOME)/bin
+CODESIGN_IDENTITY   ?= -
+CODESIGN_IDENTIFIER ?= dev.tmint.cogvault
+
 build:
-	go build -o cogvault ./cmd/cogvault/
-	codesign --force --sign - cogvault
+	go build -o $(BINARY) ./cmd/cogvault/
+	@echo "codesign: identity=$(CODESIGN_IDENTITY) identifier=$(CODESIGN_IDENTIFIER)"
+	codesign --force --sign "$(CODESIGN_IDENTITY)" --identifier "$(CODESIGN_IDENTIFIER)" $(BINARY)
 
 install: build
-	mkdir -p $(HOME)/bin
-	cp cogvault $(HOME)/bin/cogvault
-	codesign --force --sign - $(HOME)/bin/cogvault
+	mkdir -p $(INSTALL_DIR)
+	cp $(BINARY) $(INSTALL_DIR)/$(BINARY)
+	@echo "codesign: identity=$(CODESIGN_IDENTITY) identifier=$(CODESIGN_IDENTIFIER)"
+	codesign --force --sign "$(CODESIGN_IDENTITY)" --identifier "$(CODESIGN_IDENTIFIER)" $(INSTALL_DIR)/$(BINARY)
 ```
 
 ## Why This Works
@@ -84,10 +91,29 @@ grants or prompt for new ones.
 
 ## Prevention
 
-- Always run `codesign --force --sign -` after `go build` on macOS when the
-  binary accesses TCC-protected directories.
+- Set `CODESIGN_IDENTITY` and `CODESIGN_IDENTIFIER` in the Makefile. The
+  default identity `-` keeps ad-hoc signing available; use a stable certificate
+  identity with a fixed identifier when grants must survive rebuilds.
+- Always sign after `go build` on macOS when the binary accesses
+  TCC-protected directories, passing both variables with quoted arguments:
+  `codesign --force --sign "$(CODESIGN_IDENTITY)" --identifier "$(CODESIGN_IDENTIFIER)" $(BINARY)`.
 - When copying to a separate install path, re-sign at the destination — a
-  sign-then-copy without destination re-sign still triggers SIGKILL.
-- Add the codesign step to the project's build target (`make build` / `make
-  install` in cogvault's Makefile).
-- When granting FDA to a Go binary, expect to re-sign after every rebuild.
+  sign-then-copy without destination re-sign still triggers SIGKILL. Use the
+  same identity and identifier at both paths.
+- Keep both signing steps in the project's `make build` and `make install`
+  targets instead of relying on a manual command.
+- An ad-hoc identity creates a `cdhash`-only designated requirement, so every
+  rebuild invalidates every grant. A stable certificate identity with a fixed
+  identifier creates a certificate-based requirement with no `cdhash` term, so
+  existing grants can survive rebuilds only when every rebuild uses that same
+  identity. See the README's [Schedule zero-touch ingest](../../../README.md#5-schedule-zero-touch-ingest-launchd)
+  section for the one-time grant ceremony.
+
+## Certificate rotation
+
+Developer ID code signed while its certificate is valid can remain valid after
+that certificate expires when it has a secure timestamp. A valid identity is
+still required to sign future rebuilds. Moving to a new identity changes the
+code requirement, so repeat the one-time ceremony after the new install and
+use the README's stale-grant inspection procedure for earlier rows. The local
+effect of certificate revocation on TCC matching has not been verified.
