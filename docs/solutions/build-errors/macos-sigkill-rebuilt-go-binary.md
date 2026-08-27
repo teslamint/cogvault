@@ -43,19 +43,19 @@ at the same path worked fine. `go run` with the same source code works.
 
 ## Solution
 
-Re-sign the binary after every build:
+Use the project's install target with the same stable identity for every
+rebuild:
 
 ```bash
-go build -o ~/bin/cogvault ./cmd/cogvault/
-codesign --force --sign - ~/bin/cogvault
+make install CODESIGN_IDENTITY="Developer ID Application: <your name> (<team>)"
 ```
 
-The `--force` flag replaces the existing adhoc signature. The `-` identity creates
-a new adhoc signature with a fresh code directory hash that macOS accepts.
+The default `-` identity remains available for contributors without a
+certificate. Do not use it for a TCC-protected installed binary. An ad-hoc
+signature whose `cdhash` changes cannot match its prior grant.
 
-When building and installing to a separate path, re-sign at the destination —
-signing the build artifact alone is not enough because macOS TCC matches the
-code hash at the FDA-granted path, not the build path:
+The target signs both the build artifact and the installed copy with the same
+identity and identifier:
 
 ```makefile
 BINARY     = cogvault
@@ -77,17 +77,16 @@ install: build
 
 ## Why This Works
 
-Go binaries are adhoc-signed by the linker (`linker-signed` flag in
-`codesign -dv` output). macOS TCC (Transparency, Consent, and Control) grants
-like Full Disk Access are keyed to the binary's code directory hash. When `go
-build` produces a new binary, the hash changes, and the existing TCC grant
-no longer matches. macOS kills the binary on the first system call that touches
-a TCC-protected resource (iCloud Drive, Downloads, etc.) rather than showing a
-permission dialog.
+Go binaries are ad-hoc-signed by the linker (`linker-signed` in `codesign -dv`
+output). In the affected local TCC rows, the ad-hoc designated requirement was
+only a `cdhash`; a changed rebuild cannot satisfy it. A Developer ID signature
+with a fixed identifier has a certificate-based designated requirement without
+that `cdhash` term, so a changed binary signed with the same identity can
+satisfy the prior requirement.
 
-`codesign --force --sign -` generates a fresh adhoc signature that macOS
-recognizes, allowing the TCC subsystem to match the binary against existing
-grants or prompt for new ones.
+TCC storage is service-specific. The observed AppData row exists after Allow
+but stores a NULL `csreq`; that row does not itself prove the code requirement.
+Inspect the installed binary with `codesign -d -r-` when checking its signature.
 
 ## Prevention
 
@@ -102,11 +101,11 @@ grants or prompt for new ones.
   same identity and identifier at both paths.
 - Keep both signing steps in the project's `make build` and `make install`
   targets instead of relying on a manual command.
-- An ad-hoc identity creates a `cdhash`-only designated requirement, so every
-  rebuild invalidates every grant. A stable certificate identity with a fixed
-  identifier creates a certificate-based requirement with no `cdhash` term, so
-  existing grants can survive rebuilds only when every rebuild uses that same
-  identity. See the README's [Schedule zero-touch ingest](../../../README.md#5-schedule-zero-touch-ingest-launchd)
+- An ad-hoc identity creates a `cdhash`-only designated requirement. A rebuild
+  that changes its `cdhash` invalidates matching grants. A stable certificate
+  identity with a fixed identifier creates a certificate-based requirement with
+  no `cdhash` term. Existing grants can survive only when every rebuild uses
+  that same identity. See the README's [Schedule zero-touch ingest](../../../README.md#5-schedule-zero-touch-ingest-launchd)
   section for the one-time grant ceremony.
 
 ## Certificate rotation

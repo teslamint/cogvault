@@ -12,10 +12,9 @@ _Created 2026-08-27._
 ## Overview
 
 Scheduled `cogvault ingest` runs under launchd repeatedly raise macOS TCC consent
-prompts, including the "wants to access data from other apps" prompt. The cause is
-the ad-hoc code signature: macOS stores each TCC grant for the binary as a
-`cdhash` requirement, and every rebuild produces a new `cdhash`, so every grant
-stops matching. This spec makes the signing identity and the code-signing
+prompts, including the "wants to access data from other apps" prompt. Existing
+affected TCC rows use the ad-hoc binary's `cdhash` requirement. A rebuild that
+changes that `cdhash` stops matching. This spec makes the signing identity and the code-signing
 identifier configurable so a maintainer can sign with a stable identity, documents
 the one-time grant and the stale-grant cleanup, and makes a permission-denied
 source read visible in the ingest report instead of hiding it in `skipped`.
@@ -277,19 +276,22 @@ string bare, as both emit `err.Error()` bare today. `scan`'s `hashFile` keeps th
 
 ## Success Criteria
 
-1. Every TCC grant recorded after the signed install is identity-based, not
-   `cdhash`-based. Re-signing does not rewrite rows that already exist, so the
-   claim is scoped to rows whose `last_modified` is at or after the signed
-   install; pre-existing `cdhash` rows are expected to remain until the
-   documented stale-grant cleanup (S4) removes them.
-   - **Measured by**: record `INSTALL_EPOCH=$(date +%s)` immediately before the signed `make install`. After the re-grant round, for **every** row returned by `sqlite3 "$HOME/Library/Application Support/com.apple.TCC/TCC.db" "select service, hex(csreq) from access where client='$HOME/bin/cogvault' and last_modified >= $INSTALL_EPOCH;"`, decoding its `csreq` through `xxd -r -p` and `csreq -r- -t` prints a requirement containing `identifier "dev.tmint.cogvault"` and a `certificate leaf[subject.OU]` term, and containing no `cdhash` term. At least one row must be returned; zero rows fails the criterion rather than passing it vacuously.
+1. The first stable-identity launchd run completes its re-grant round for the
+   observed AppData service.
+   - **Measured by**:
+     1. The maintainer selects Allow.
+     2. Query the AppData row for `~/bin/cogvault`.
+     3. Require one returned row. A zero-row result fails.
+     4. Record `length(csreq)` as an observation only. The observed AppData row
+        has NULL `csreq`, so it cannot prove the code requirement.
 2. A rebuild after the grants are re-established does not invalidate them. The
    measurement runs in this exact order, because the first signed install still
    costs one final round of prompts:
    1. `make install CODESIGN_IDENTITY=<identity>` — signed install.
    2. `launchctl kickstart -k gui/$(id -u)/com.teslamint.cogvault.ingest`, then answer every prompt it raises. This is the one-time re-grant round.
-   3. Record `codesign -dv --verbose=4 ~/bin/cogvault` CDHash and `REBUILD_EPOCH=$(date +%s)`.
-   4. `make install CODESIGN_IDENTITY=<identity>` again; confirm the CDHash changed.
+   3. Record `codesign -dv --verbose=4 ~/bin/cogvault` CDHash for diagnostics and `REBUILD_EPOCH=$(date +%s)`.
+   4. `make install CODESIGN_IDENTITY=<identity>` again. An unchanged-source
+      reproducible build can retain the same CDHash.
    5. `launchctl kickstart -k gui/$(id -u)/com.teslamint.cogvault.ingest`.
    - **Measured by**: after step 5, no consent prompt appears, and `select count(*) from access where client='$HOME/bin/cogvault' and last_modified >= $REBUILD_EPOCH;` returns 0.
 3. A build without any signing certificate still succeeds.
@@ -305,8 +307,8 @@ string bare, as both emit `err.Error()` bare today. `scan`'s `hashFile` keeps th
 
 | Question | Owner |
 |---|---|
-| Which access raises `kTCCServiceSystemPolicyAppData` for cogvault — the spawned `claude` CLI reading another application's support directory, the `osascript` notification path, or `wiki_dir` under `~/Library/Mobile Documents` | `implementing`, as a bounded observation during manual verification; it does not gate the fix |
-| Whether a single Full Disk Access grant supersedes the individual folder prompts and the app-data prompt, allowing the README to document one grant instead of several | `implementing`, verified on the maintainer's machine before the README wording is finalized |
+| Which access raises `kTCCServiceSystemPolicyAppData` for cogvault — the spawned `claude` CLI reading another application's support directory, the `osascript` notification path, or `wiki_dir` under `~/Library/Mobile Documents` | Unmeasured in the ceremony: it observed the AppData row but did not isolate the access. It does not gate the fix. |
+| Whether a single Full Disk Access grant supersedes the individual folder prompts and the app-data prompt, allowing the README to document one grant instead of several | Unmeasured on the maintainer's machine. The README retains the unresolved marker. |
 
 Resolved at the approval gate on 2026-08-27: `CODESIGN_IDENTIFIER` defaults to
 `dev.tmint.cogvault`. The launchd job labels (`com.teslamint.cogvault`,
