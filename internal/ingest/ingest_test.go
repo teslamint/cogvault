@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1127,6 +1128,10 @@ func TestRunSourceDirReadError(t *testing.T) {
 	// Prepend a nonexistent source dir; the valid one must still process and the
 	// read failure must surface in the report while the run exits without error.
 	missing := filepath.Join(t.TempDir(), "does-not-exist")
+	_, wantReadErr := os.ReadDir(missing)
+	if wantReadErr == nil {
+		t.Fatal("ReadDir missing source: got nil error")
+	}
 	h.runner.cfg.Sources = append([]config.SourceDir{{Path: missing, Types: []string{"md"}}}, h.runner.cfg.Sources...)
 
 	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "scheduled"})
@@ -1141,12 +1146,114 @@ func TestRunSourceDirReadError(t *testing.T) {
 	}
 	var found bool
 	for _, f := range rep.PerFile {
-		if f.Action == actionSourceError && f.Path == missing && f.Error != "" {
+		if f.Action == actionSourceError && f.Path == missing {
+			if f.Error != wantReadErr.Error() {
+				t.Fatalf("source error = %q, want %q", f.Error, wantReadErr.Error())
+			}
 			found = true
 		}
 	}
 	if !found {
 		t.Fatalf("no source-error entry for %s in %+v", missing, rep.PerFile)
+	}
+}
+
+func TestRunSourcePermissionDenied(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses mode bits")
+	}
+
+	const permissionDiagnostic = "permission denied: cannot read source"
+	permissionError := permissionDiagnostic
+	if runtime.GOOS == "darwin" {
+		permissionError += `; macOS consent required, see README "Schedule zero-touch ingest"`
+	}
+
+	tests := []struct {
+		name             string
+		prepare          func(t *testing.T, h *harness) string
+		wantAction       string
+		wantSourceErrors int
+		wantEntries      int
+	}{
+		{
+			name: "dir",
+			prepare: func(t *testing.T, h *harness) string {
+				h.write(t, "note.md", "content")
+				if _, err := h.runner.Run(context.Background(), RunOptions{Origin: "scheduled"}); err != nil {
+					t.Fatalf("first Run: %v", err)
+				}
+				if err := os.Chmod(h.srcDir, 0); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(h.srcDir, 0o755) })
+				return h.srcDir
+			},
+			wantAction:       actionSourceError,
+			wantSourceErrors: 2,
+			wantEntries:      2,
+		},
+		{
+			name: "dir-unswept",
+			prepare: func(t *testing.T, h *harness) string {
+				if err := os.Chmod(h.srcDir, 0); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(h.srcDir, 0o755) })
+				return h.srcDir
+			},
+			wantAction:       actionSourceError,
+			wantSourceErrors: 1,
+			wantEntries:      1,
+		},
+		{
+			name: "file",
+			prepare: func(t *testing.T, h *harness) string {
+				path := h.write(t, "note.md", "content")
+				if err := os.Chmod(path, 0); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
+				return path
+			},
+			wantAction:       actionSkipped,
+			wantSourceErrors: 0,
+			wantEntries:      1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t, []string{"md"}, okLLM())
+			path := tt.prepare(t, h)
+
+			rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "scheduled"})
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if rep.SourceErrors != tt.wantSourceErrors {
+				t.Fatalf("SourceErrors = %d, want %d", rep.SourceErrors, tt.wantSourceErrors)
+			}
+
+			var entries []FileResult
+			for _, result := range rep.PerFile {
+				if result.Path == path && result.Action == tt.wantAction {
+					entries = append(entries, result)
+				}
+			}
+			if len(entries) != tt.wantEntries {
+				t.Fatalf("entries = %+v, want %d %s entries for %s", entries, tt.wantEntries, tt.wantAction, path)
+			}
+			wantError := permissionError
+			if tt.wantAction == actionSkipped {
+				wantError = "read: " + wantError
+			}
+			for _, entry := range entries {
+				if entry.Error != wantError {
+					t.Fatalf("error = %q, want %q", entry.Error, wantError)
+				}
+			}
+		})
 	}
 }
 
