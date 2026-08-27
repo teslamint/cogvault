@@ -271,7 +271,7 @@ string bare, as both emit `err.Error()` bare today. `scan`'s `hashFile` keeps th
 | Changing the code-signing identifier resets the binary's TCC identity once, producing one final round of prompts | Documented in README as an expected one-time cost of the switch; Success Criterion 2 measures recurrence after that point, not the first run |
 | A plain `go build` silently restores the linker ad-hoc signature and breaks the grants again | README states the caveat next to the build commands; `make install` remains the documented path |
 | The same binary path backs a second, long-running launchd job (`cogvault serve`), which keeps executing the pre-install image until it is restarted | README documents restarting the server job after `make install`, next to the grant procedure |
-| Certificate expiry or revocation invalidates the requirement later | Documented in the solutions doc as the known lifetime limit of this approach |
+| A future rebuild needs a valid signing identity, and switching identity changes the code requirement | Documented in the solutions doc; existing securely timestamped Developer ID code can remain valid after certificate expiry, while local TCC effects of revocation remain unverified |
 | `tccutil reset` affects far more than the stale rows | The cleanup procedure documents inspection first and warns about the blast radius; no command in the repository executes it |
 | The exact access that triggers the "data from other apps" prompt is unidentified | The fix is independent of which access triggers it, because a stable identity preserves every grant; the open question is tracked in Open Decisions rather than assumed away |
 
