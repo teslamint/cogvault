@@ -3,7 +3,7 @@ schema: plan/v1
 title: "Stable code identity for scheduled ingest"
 type: feat
 status: approved
-body_seal: c260de2f19f4bc874bd2d07f8b1e6bf304e697c108f391a4e9c409f5be17f9ab
+body_seal: eb6841c55ab68a69a8437ff3a85bcc89959756af3b5d628cfd98f9e385030fbc
 date: 2026-08-27
 execution: code
 origin: docs/specs/2026-08-27-ingest-tcc-prompts-design.md
@@ -417,15 +417,16 @@ Steps:
      fixed identifier produces a certificate-based requirement with no `cdhash`
      term, so grants survive rebuilds. Link `README.md`'s
      `Schedule zero-touch ingest` section for the ceremony.
-  3. Add a "Lifetime limit" paragraph, which the spec's Risks table assigns to
-     this document: a certificate-based designated requirement holds only while
-     the certificate does. Expiry or revocation invalidates it, and the grants
-     stop matching exactly as an ad-hoc rebuild would. Recovery is the same
-     one-time ceremony — install under the new identity, kickstart the launchd
-     job, answer the prompts once — and the stale rows from the old identity
-     are removed by the cleanup procedure the README documents. Name no
-     certificate, no team identifier, and no expiry date; state the mechanism
-     only.
+  3. Add a "Certificate rotation" paragraph, which the spec's Risks table
+     assigns to this document: securely timestamped Developer ID code signed
+     while the certificate is valid can remain valid after that certificate
+     expires. A valid identity is still required for future rebuilds. Moving to
+     a new identity changes the code requirement, so recovery is the one-time
+     ceremony — install under the new identity, kickstart the launchd job, and
+     answer the prompts once — followed by the README's stale-grant inspection
+     procedure. State that the local effect of certificate revocation on TCC
+     matching is unverified. Name no certificate, no team identifier, and no
+     expiry date.
   4. Update the embedded Makefile snippet in the Solution section so it matches
      the Makefile U2 actually produces, including the `?=` assignments; a stale
      snippet is what a reader will copy.
@@ -433,7 +434,7 @@ Steps:
      failure this document was written for, which is still accurate.
   6. Commit: `docs(solutions): correct the codesign prevention guidance for stable identities`
 
-Acceptance: `rg 'expect to re-sign after every rebuild' docs/solutions/build-errors/macos-sigkill-rebuilt-go-binary.md` returns nothing; the file references `CODESIGN_IDENTITY`; and `rg -in 'expir|revok' docs/solutions/build-errors/macos-sigkill-rebuilt-go-binary.md` matches the new lifetime paragraph.
+Acceptance: `rg 'expect to re-sign after every rebuild' docs/solutions/build-errors/macos-sigkill-rebuilt-go-binary.md` returns nothing; the file references `CODESIGN_IDENTITY`; and the Certificate rotation paragraph names future rebuilds and the unverified local TCC effect of revocation.
 
 ## U5: Canon updates
 
