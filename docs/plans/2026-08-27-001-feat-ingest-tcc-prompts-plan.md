@@ -3,7 +3,7 @@ schema: plan/v1
 title: "Stable code identity for scheduled ingest"
 type: feat
 status: approved
-body_seal: eb6841c55ab68a69a8437ff3a85bcc89959756af3b5d628cfd98f9e385030fbc
+body_seal: ffc637e49f7e5732bb8291a044d8a459728df29468625f4ed7c3b1c4d6a775c4
 date: 2026-08-27
 execution: code
 origin: docs/specs/2026-08-27-ingest-tcc-prompts-design.md
@@ -135,7 +135,7 @@ convention of keeping scan-path helpers (`hashFile`, `snapshotDir`) in
 | `internal/ingest/ingest_test.go` | add `TestRunSourcePermissionDenied` | U1 |
 | `Makefile` | add `CODESIGN_IDENTITY` / `CODESIGN_IDENTIFIER`, apply both to build artifact and install destination, echo the identity used | U2 |
 | `README.md` | build section: signing variables, the one-time switching cost, and the plain-`go build` caveat; `### 5. Schedule zero-touch ingest (launchd)`: grant ceremony, what each grant covers, stale-grant cleanup, `serve`-job restart note | U3 |
-| `docs/solutions/build-errors/macos-sigkill-rebuilt-go-binary.md` | correct the Prevention section; add the certificate-lifetime limit | U4 |
+| `docs/solutions/build-errors/macos-sigkill-rebuilt-go-binary.md` | correct the Prevention section; explain certificate rotation and future-signing requirements | U4 |
 | `SPEC.md` | §10.4 Report: document the permission-denied line class | U5 |
 | `DESIGN.md` | line 664: update the `Makefile` row | U5 |
 
@@ -370,8 +370,8 @@ Steps:
      before that.
   6. Keep the existing `claude` non-interactive auth bullet and the harmless
      `node: command not found` paragraph as they are.
-  7. Add a "Removing stale grants" subsection: the same binary path
-     accumulates one grant row per code identity it has ever had. Give the
+  7. Add a "Removing stale grants" subsection: the same binary path can
+     retain TCC grant rows bound to earlier code requirements. Give the
      inspection command and warn that `tccutil reset <service>` clears that
      service for **every** application on the machine, not only cogvault, so
      the System Settings per-application view is the narrower instrument.
@@ -396,7 +396,7 @@ Files:
 
 Interfaces:
   Consumes: U2's variable names
-  Produces: a Prevention section that no longer prescribes ad-hoc re-signing as the steady state, plus the certificate-lifetime limit of the approach
+  Produces: a Prevention section that no longer prescribes ad-hoc re-signing as the steady state, plus certificate rotation and future-signing requirements
 
 Test scenarios:
   happy: n/a — documentation unit with no executable success path
@@ -573,7 +573,7 @@ if it were: the headless outcome is impossible by the spec's own Scope Out
 for a SIP-protected machine-global TCC database, and no disposable fixture can
 exist for it. The operational content that would have lived in those rows —
 `serve`-job restart, the `go build` caveat, stale-grant persistence, and the
-certificate-lifetime limit — is delivered as U3 and U4 documentation instead,
+certificate rotation and future-signing requirements — is delivered as U3 and U4 documentation instead,
 where an operator will actually read it.
 
 ## Carry-forward trigger audit
