@@ -3,7 +3,7 @@ schema: plan/v1
 title: "Stable code identity for scheduled ingest"
 type: feat
 status: approved
-body_seal: 60ec93245fe176a23e31d5f2b1d863b40850dc2988a7f38ad4704036f233889c
+body_seal: c260de2f19f4bc874bd2d07f8b1e6bf304e697c108f391a4e9c409f5be17f9ab
 date: 2026-08-27
 execution: code
 origin: docs/specs/2026-08-27-ingest-tcc-prompts-design.md
@@ -282,10 +282,10 @@ Steps:
      line followed by the parameterized invocation:
      ```makefile
      	@echo "codesign: identity=$(CODESIGN_IDENTITY) identifier=$(CODESIGN_IDENTIFIER)"
-     	codesign --force --sign $(CODESIGN_IDENTITY) --identifier $(CODESIGN_IDENTIFIER) $(BINARY)
+    codesign --force --sign "$(CODESIGN_IDENTITY)" --identifier "$(CODESIGN_IDENTIFIER)" $(BINARY)
      ```
   3. In `install`, replace `codesign --force --sign - $(INSTALL_DIR)/$(BINARY)`
-     with the same flags applied to `$(INSTALL_DIR)/$(BINARY)`. Both artifacts
+     with the same quoted flags applied to `$(INSTALL_DIR)/$(BINARY)`. Both artifacts
      must carry the same identity and identifier: TCC matches the code at the
      granted path, not the build path.
   4. Verify the contributor default:
