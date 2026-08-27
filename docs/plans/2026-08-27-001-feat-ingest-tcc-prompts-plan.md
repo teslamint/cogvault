@@ -3,7 +3,7 @@ schema: plan/v1
 title: "Stable code identity for scheduled ingest"
 type: feat
 status: approved
-body_seal: 6d1057f3991b5fb851b36bad316b6d4ff91443750827ae52062a5a980592d21d
+body_seal: 7a262f9c748c876584ac4a80733dfd97d34ff320a6991b19dd50821a28af0e23
 date: 2026-08-27
 execution: code
 origin: docs/specs/2026-08-27-ingest-tcc-prompts-design.md
@@ -16,8 +16,8 @@ after a rebuild, and make a denied source directory visible in the ingest
 report instead of silently indistinguishable from an ordinary skip.
 
 The prompts recur because the installed binary carries an ad-hoc signature
-whose designated requirement is a bare `cdhash`. Every rebuild produces a new
-hash, so every previously granted TCC row stops matching and macOS asks again.
+whose designated requirement is a bare `cdhash`. A rebuild that changes that
+hash stops matching the prior requirement and macOS asks again.
 Signing with a stable identity under a fixed identifier makes the designated
 requirement certificate-based with no `cdhash` term, so a rebuilt binary
 satisfies the requirement recorded for its predecessor.
@@ -154,7 +154,7 @@ Success Criteria, which is the observable evidence those rows walk.
 |---|---|---|
 | S1 — maintainer rebuilds a signed binary and the schedule stays silent | U2 → U6 | SC2's five-step sequence: no prompt appears, and the `last_modified >= $REBUILD_EPOCH` row count is 0 |
 | S2 — contributor with no certificate still builds | U2 | SC3: `make clean && make build CODESIGN_IDENTITY=- && ./cogvault --help` exits 0 |
-| S3 — first-time operator performs the one-time grant | U3 → U6 | SC1's decoded-requirement check on rows newer than `$INSTALL_EPOCH`, driven by the README ceremony U3 writes |
+| S3 — first-time operator performs the one-time grant | U3 → U6 | SC1's Allow observation and AppData-row query, driven by the README ceremony U3 writes |
 | S4 — operator removes grants left by earlier binaries | U3 | SC6 reviewer rubric against the README cleanup subsection |
 | S5 — a denied source directory is visible in the ingest report | U1 | `TestRunSourcePermissionDenied` (Covers S5) |
 
@@ -217,14 +217,14 @@ Steps:
   4. Add the helper to `ingest.go`, next to `hashFile`:
      ```go
      func sourceErrorText(err error) string {
-     	if !errors.Is(err, fs.ErrPermission) {
-     		return err.Error()
-     	}
-     	msg := "permission denied: cannot read source"
-     	if runtime.GOOS == "darwin" {
-     		msg += `; macOS consent required, see README "Schedule zero-touch ingest"`
-     	}
-     	return msg
+         if !errors.Is(err, fs.ErrPermission) {
+             return err.Error()
+         }
+         msg := "permission denied: cannot read source"
+         if runtime.GOOS == "darwin" {
+             msg += `; macOS consent required, see README "Schedule zero-touch ingest"`
+         }
+         return msg
      }
      ```
   5. Route the three sites through it, changing only the `Error:` value:
@@ -281,8 +281,8 @@ Steps:
   2. In `build`, replace `codesign --force --sign - $(BINARY)` with an echo
      line followed by the parameterized invocation:
      ```makefile
-     	@echo "codesign: identity=$(CODESIGN_IDENTITY) identifier=$(CODESIGN_IDENTIFIER)"
-    codesign --force --sign "$(CODESIGN_IDENTITY)" --identifier "$(CODESIGN_IDENTIFIER)" $(BINARY)
+     <TAB>@echo "codesign: identity=$(CODESIGN_IDENTITY) identifier=$(CODESIGN_IDENTIFIER)"
+     <TAB>codesign --force --sign "$(CODESIGN_IDENTITY)" --identifier "$(CODESIGN_IDENTIFIER)" $(BINARY)
      ```
   3. In `install`, replace `codesign --force --sign - $(INSTALL_DIR)/$(BINARY)`
      with the same quoted flags applied to `$(INSTALL_DIR)/$(BINARY)`. Both artifacts
@@ -361,11 +361,11 @@ Steps:
      cogvault, and the scheduled job keeps prompting.
   5. Directly under the ceremony, state what each grant covers: a folder
      prompt covers reads of that one source directory, and the "data from
-     other apps" prompt covers cogvault's access to another application's
-     support directory. Write the current understanding plainly and mark the
+     other apps" prompt creates an AppData service row for cogvault. The exact
+     triggering access remains unmeasured. Write the observed scope plainly. Mark the
      Full Disk Access question as unresolved — whether one Full Disk Access
-     grant supersedes the individual prompts is Open Decision 2, which U6
-     resolves on the maintainer's machine. U6 step 6 reconciles this paragraph
+     grant supersedes the individual prompts is Open Decision 2. U6 records the
+     result when observed. U6 step 6 reconciles this paragraph
      with what the ceremony observes; do not assert a supersedes relationship
      before that.
   6. Keep the existing `claude` non-interactive auth bullet and the harmless
@@ -412,8 +412,8 @@ Steps:
   2. Replace the last bullet, "When granting FDA to a Go binary, expect to
      re-sign after every rebuild." Re-signing is still required after every
      rebuild; what is no longer required is re-granting. Say that an ad-hoc
-     identity produces a `cdhash`-only designated requirement, so every rebuild
-     invalidates every grant, and that signing with a stable identity under a
+     identity produces a `cdhash`-only designated requirement, so a rebuild
+     that changes the `cdhash` invalidates matching grants. Say that a stable identity under a
      fixed identifier produces a certificate-based requirement with no `cdhash`
      term, so grants survive rebuilds. Link `README.md`'s
      `Schedule zero-touch ingest` section for the ceremony.
@@ -594,13 +594,10 @@ Audited `docs/research/v2-follow-ups.md` at `4c5c623`: 0 open rows, 0 fired, 0 u
   so this is convenience, not capability. Not in the spec's Scope In; noted at
   the draft gate rather than folded into U2.
 - **Widening the README wording beyond Developer ID.** Any stable signing
-  identity (Developer ID, Apple Development, self-signed) fixes the recurring
-  prompt; only distribution and notarization require Developer ID. Deferred
-  because the designated-requirement shape differs by identity type — an
-  Apple Development or self-signed certificate does not produce SC1's exact
-  `subject.OU` plus `field.1.2.840.113635.100.6.1.13` requirement — so the
-  README cannot promise one requirement shape for all three without a
-  measurement pass this plan does not run.
+  identity (Developer ID, Apple Development, self-signed) may have a different
+  designated requirement. Distribution and notarization require Developer ID.
+  Deferred because this plan measures only the observed Developer ID ceremony
+  and does not generalize TCC row storage across identity types.
 - **Notarization, stapling, hardened runtime, signed release distribution.**
   Scoped Out in the origin spec.
 
@@ -614,8 +611,8 @@ before this plan was written; see the Assumption Recheck section.
 ### Implementation-time (deferred)
 
 - Which access raises `kTCCServiceSystemPolicyAppData` (the "data from other
-  apps" prompt). Owned by U6 and resolved by observing the ceremony; it does
-  not gate any unit.
+  apps" prompt). U6 observed the service row but did not isolate the access,
+  so it remains unmeasured and does not gate any unit.
 - Whether a single Full Disk Access grant supersedes the individual folder
-  prompts. Owned by U6 step 5, and U6 step 6 carries the answer back into the
-  README paragraph U3 step 5 writes.
+  prompts. U6 did not test this, so it remains unmeasured and the README
+  paragraph U3 step 5 writes retains its unresolved marker.

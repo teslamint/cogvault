@@ -3,6 +3,7 @@ package ingest
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1254,6 +1255,16 @@ func TestRunSourcePermissionDenied(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestSourceErrorTextPermissionDenied(t *testing.T) {
+	want := "permission denied: cannot read source"
+	if runtime.GOOS == "darwin" {
+		want += `; macOS consent required, see README "Schedule zero-touch ingest"`
+	}
+	if got := sourceErrorText(fs.ErrPermission); got != want {
+		t.Fatalf("sourceErrorText(fs.ErrPermission) = %q, want %q", got, want)
 	}
 }
 

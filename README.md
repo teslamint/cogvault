@@ -176,11 +176,11 @@ Step 3 must be a `kickstart`, not a manual `cogvault ingest` in a terminal:
 macOS attributes a terminal-spawned process to the terminal, so a manual run
 grants the terminal rather than cogvault and the scheduled job keeps prompting.
 
-A folder prompt covers reads of that one source directory. The "data from other
-apps" prompt covers cogvault's access to another application's support
-directory. **Unresolved (Open Decision 2):** whether one Full Disk Access grant
-supersedes these individual prompts must be verified on the maintainer's
-machine.
+A folder prompt covers reads of that one source directory. The observed "data
+from other apps" prompt creates a `kTCCServiceSystemPolicyAppData` row for
+cogvault. The exact access that triggers it remains unmeasured. **Unresolved
+(Open Decision 2):** whether one Full Disk Access grant supersedes these
+individual prompts must be verified on the maintainer's machine.
 
 - **Auth**: `claude` must resolve auth non-interactively under launchd (it does
   when subscription auth is in the login keychain and the GUI session is active).

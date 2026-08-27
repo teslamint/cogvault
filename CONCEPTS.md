@@ -66,11 +66,12 @@ process", "the app asking for permission".*
 
 ## Code identity
 
-The signing identity plus code-signing identifier that macOS records inside a TCC
-grant's requirement. An ad-hoc signature pins the grant to a `cdhash`, so every
-rebuild invalidates every grant; a Developer ID signature pins it to the
-identifier and the team certificate, which survives rebuilds. *Avoid: "the
-signature", "the binary hash".*
+The signing identity plus code-signing identifier in a binary's designated
+requirement. An ad-hoc requirement can be a `cdhash`, so a rebuild that changes
+it invalidates matching grants. A Developer ID requirement can use the
+identifier and team certificate instead. TCC row storage is service-specific:
+the observed AppData row has a NULL `csreq`, so that row does not expose the
+binary's code requirement. *Avoid: "the signature", "the binary hash".*
 
 ## Stale grant
 
