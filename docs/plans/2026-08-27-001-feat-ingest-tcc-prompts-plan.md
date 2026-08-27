@@ -3,7 +3,7 @@ schema: plan/v1
 title: "Stable code identity for scheduled ingest"
 type: feat
 status: approved
-body_seal: 2f6ec926b69b73a500b3c0a4ce3d7af8cfbe8fdaa868e3f20cc7f08c3f4e5226
+body_seal: 6d1057f3991b5fb851b36bad316b6d4ff91443750827ae52062a5a980592d21d
 date: 2026-08-27
 execution: code
 origin: docs/specs/2026-08-27-ingest-tcc-prompts-design.md
@@ -508,16 +508,15 @@ Steps:
   1. Prepare the SC1 packet:
      ```
      TCC_DB="$HOME/Library/Application Support/com.apple.TCC/TCC.db"
-     INSTALL_EPOCH=$(date +%s)
      make install CODESIGN_IDENTITY="Developer ID Application: <your name> (<team>)"
      launchctl kickstart -k gui/$(id -u)/com.teslamint.cogvault.ingest
-     sqlite3 "$TCC_DB" "select service, hex(csreq) from access where client='$HOME/bin/cogvault' and last_modified >= $INSTALL_EPOCH;"
+     sqlite3 "$TCC_DB" "select service, auth_value, length(csreq) from access where client='$HOME/bin/cogvault' and service='kTCCServiceSystemPolicyAppData';"
      ```
-     Decode each row's second column with `xxd -r -p | csreq -r- -t`. Pass
-     requires that at least one row is returned and that every returned row
-     contains `identifier "dev.tmint.cogvault"` and a
-     `certificate leaf[subject.OU]` term and no `cdhash` term. Zero rows fails
-     the criterion; it does not pass it vacuously.
+     The maintainer answers the displayed prompt before running the query. Pass
+     requires the maintainer to report Allow and the query to return the AppData
+     row. Record `length(csreq)` as an observation only: the observed AppData
+     service stores an empty `csreq`, so it cannot prove the code requirement.
+     Zero rows fails the criterion; it does not pass it vacuously.
   2. Prepare the SC2 packet as an ordered five-step sequence, using the same
      `TCC_DB` assignment as step 1: signed install → kickstart and answer the
      prompts → record the installed `CDHash` from `codesign -dv` for
@@ -532,14 +531,16 @@ Steps:
      `Identifier=dev.tmint.cogvault` is itself an identity change, so the
      existing grants do not carry over. This is the same one-time cost U3
      step 2 documents in the README.
-  4. Record the reported values in the run ledger's Log — the decoded
-     requirement shape for SC1 and both counts for SC2 — with every personal
-     identifier redacted as `<team>` / `<devid>`. Record the shape, never the
-     concrete certificate values.
+  4. Record the reported values in the run ledger's Log — the SC1 AppData row
+     and `csreq` length plus both counts for SC2 — with every personal
+     identifier redacted as `<team>` / `<devid>`. Record no concrete
+     certificate values.
   5. Resolve both Open Decisions from what the ceremony observes: which access
      raises `kTCCServiceSystemPolicyAppData`, and whether one Full Disk Access
-     grant supersedes the individual folder prompts. Record each answer in the
-     ledger. Neither gates the merge.
+     grant supersedes the individual folder prompts. Record each observed answer
+     in the ledger. If the ceremony did not test Full Disk Access, record that
+     decision as unmeasured and leave the README marker unchanged. Neither
+     gates the merge.
   6. Reconcile the README with step 5's answers. If one Full Disk Access grant
      supersedes the individual prompts, rewrite U3 step 5's paragraph to
      document the single grant and delete the unresolved marker. If it does
