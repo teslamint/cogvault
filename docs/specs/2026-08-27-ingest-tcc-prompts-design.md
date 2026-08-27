@@ -25,9 +25,11 @@ source read visible in the ingest report instead of hiding it in `skipped`.
 ### S1: Maintainer rebuilds a signed binary and the schedule stays silent
 
 A maintainer holds an Apple Developer ID Application identity. They set
-`CODESIGN_IDENTITY` once, run `make install`, and rebuild many times afterwards.
-The TCC grants already given to `~/bin/cogvault` keep matching, so the hourly
-launchd job runs with no new prompt.
+`CODESIGN_IDENTITY` once and run `make install`. The switch away from the ad-hoc
+identity resets the binary's TCC identity once, so this first signed install
+still costs one round of prompts; S3 is that round. Afterwards they rebuild many
+times. The grants given after the switch keep matching, so the hourly launchd job
+runs with no new prompt.
 
 ```bash
 make install CODESIGN_IDENTITY="Developer ID Application: <name> (<team>)"
@@ -55,6 +57,9 @@ make install CODESIGN_IDENTITY="Developer ID Application: <name> (<team>)"
 launchctl kickstart -k gui/$(id -u)/com.teslamint.cogvault.ingest
 ```
 
+`launchctl kickstart` addresses an already-loaded job, so the README's load step
+precedes it; the block above shows only the two steps this spec adds.
+
 The manual run must go through launchd, not through the terminal. TCC attributes
 a terminal-spawned process to the terminal application, which is the responsible
 process; only under launchd is `cogvault` itself the client. A grant obtained
@@ -75,15 +80,22 @@ operates far more broadly than the single stale row.
 ### S5: A denied source directory is visible in the ingest report
 
 The scheduled job cannot read a source directory or file because consent was not
-granted. The report line names the denial as a permission problem and points at
-the grant procedure, instead of appearing as a generic `skipped` or a bare
-`source-error` with an untyped OS string.
+granted. Every report line for that denial names it as a permission problem and
+points at the grant procedure, instead of appearing as a generic `skipped` or a
+bare `source-error` with an untyped OS string.
 
 ```
 $ cogvault ingest --config ~/.config/cogvault/config.yaml
-scanned=0 digested=0 ... source-errors=1
-  source-error  ~/Downloads/_Articles  permission denied: cannot read source; macOS consent required, see README "launchd automation"
+scanned=0 digested=0 failed=0 refused=0 skipped=0 deferred=0 unchanged=0 archived=0 source-errors=2
+  source-error  ~/Sources/articles  permission denied: cannot read source; macOS consent required, see README "Schedule zero-touch ingest"
+  source-error  ~/Sources/articles  permission denied: cannot read source; macOS consent required, see README "Schedule zero-touch ingest"
 ```
+
+The two lines are the orphan sweep and the scan reporting the same denial, in
+that order, because `Run` sweeps before it scans. The sweep line appears only
+when the ledger already holds rows for that directory; a directory with no rows
+yields one line and `source-errors=1`. Deduplicating the pair is out of scope —
+this spec changes error text only, never counters or line structure.
 
 ## Scope
 
@@ -95,12 +107,16 @@ scanned=0 digested=0 ... source-errors=1
 - `README.md`: build section and launchd section updates covering the stable
   identity requirement, the one-time grant ceremony driven through
   `launchctl kickstart` (never a terminal ingest run) with the responsible-process
-  reason stated, and the `go build` caveat.
+  reason stated, and the `go build` caveat. The heading `Schedule zero-touch
+  ingest` must survive the edit, because the runtime diagnostic quotes it as the
+  anchor an operator greps for.
 - `docs/solutions/build-errors/macos-sigkill-rebuilt-go-binary.md`: correction of
   the prevention guidance, which currently presents ad-hoc re-signing as
   sufficient.
 - `internal/ingest`: permission-denied classification for source directory and
-  source file reads, with an actionable diagnostic string.
+  source file reads, with an actionable diagnostic string, applied at all three
+  sites that surface a read error for a source path — `scan`'s `os.ReadDir`,
+  `scan`'s `hashFile`, and the sweep's `reportSweepSourceError`.
 - `SPEC.md` and `DESIGN.md`: update wherever they describe report actions,
   ingest skip semantics, or the Makefile's responsibility.
 
@@ -112,6 +128,8 @@ scanned=0 digested=0 ... source-errors=1
   directories.
 - Any attempt to grant, pre-seed, or script TCC consent — macOS requires a human
   action by design, and automating it is out of bounds.
+- Deduplicating the scan line and the sweep line that one denial produces, and
+  any change to report counters or line structure.
 - Non-macOS platforms; the signing and consent behavior is macOS-only.
 - Hardened runtime (`--options runtime`), which notarization would require but
   local grants do not.
@@ -130,6 +148,7 @@ certificate material, or personal path is committed.
 | The build machine holds a usable Developer ID Application identity | `security find-identity -v -p codesigning` | `2026-08-27T14:36:00+09:00` | 2 valid identities, of which 1 is a Developer ID Application identity | Local login keychain (not committed) |
 | The SQLite driver is pure Go, so signing options cannot break a native dependency | `rg -n "sqlite" go.mod` | `2026-08-27T14:38:00+09:00` | `modernc.org/sqlite v1.48.1`; no cgo SQLite driver | Working tree at `58d8a00` |
 | A denied source read is currently indistinguishable from an ordinary skip | `rg -n "hashFile\(" internal/ingest/ingest.go` and reading `internal/ingest/ingest.go:233-283` | `2026-08-27T14:39:00+09:00` | `os.ReadDir` failure becomes `actionSourceError` with a raw OS string; `hashFile` failure becomes `actionSkipped` with `read: <os error>` | Working tree at `58d8a00` |
+| The orphan sweep also reads the same source directories, before the scan, and reports a denial with an untyped OS string, so `scan` alone does not cover the report | `rg -n "reportSweepSourceError\|snapshotDir\(" internal/ingest/ingest.go` and reading `internal/ingest/ingest.go:425-516` | `2026-08-27T16:20:00+09:00` | `snapshotDir` returns early only for `os.ErrNotExist`, so `EACCES` reaches `reportSweepSourceError`, which emits `err.Error()` bare; the sweep skips directories with no ledger rows and `continue`s past the recheck after the first failure, bounding it to one extra line per directory per run | Feature worktree at `2b0afc0` |
 | The test suite is green before any change | `go test -race ./...` | `2026-08-27T14:20:00+09:00` | 14 packages `ok`, 0 failures | Feature worktree at `58d8a00` |
 
 Environment invariants that still apply:
@@ -154,18 +173,43 @@ No package boundary changes. Two independent surfaces move:
    Both the build artifact and the install destination are signed, preserving the
    destination re-sign rule established by the earlier codesign work.
 
-2. **Denial visibility (`internal/ingest`).** `scan` already records two failure
-   points: `os.ReadDir` on a source directory and `hashFile` on a source file. Both
-   gain a permission check using `errors.Is(err, fs.ErrPermission)`. A permission
-   failure keeps its existing counter and action so the report sum invariant
-   (`Report.SumCheck`) is untouched; only the `Error` string changes, to a fixed
-   diagnostic that names the denial.
+2. **Denial visibility (`internal/ingest`).** Three sites surface a read error
+   for a source path, because `Run` reads every source directory twice: the
+   orphan sweep first, then the scan.
+
+   - `scan`'s `os.ReadDir` on a source directory — `source-error`.
+   - `scan`'s `hashFile` on a source file — `skipped`, prefix `read: `.
+   - the sweep's `snapshotDir` → `reportSweepSourceError` — `source-error`.
+     `snapshotDir` special-cases only `os.ErrNotExist`, so `EACCES` propagates
+     and reaches this reporter.
+
+   A single denied directory therefore yields one line or two. The sweep skips a
+   directory that holds no ledger rows, and its first `snapshotDir` failure
+   `continue`s past the recheck call, so the sweep contributes at most one line
+   per directory per run.
+
+   All three route their error text through one unexported helper in the package
+   that applies `errors.Is(err, fs.ErrPermission)` and returns either the fixed
+   diagnostic or `err.Error()` unchanged. Leaving the sweep out would let one
+   denial print a typed line and an untyped line in the same report, which is the
+   confusion S5 exists to remove.
+
+   `scan`'s `os.Lstat` failure (`skipped`, prefix `stat: `) is deliberately left
+   alone: a directory-level denial fails at `os.ReadDir` before any `Lstat` runs,
+   and a file-level denial still permits metadata reads, so the site cannot
+   produce a TCC denial in practice.
+
+   A permission failure keeps its existing counter and action so the report sum
+   invariant (`Report.SumCheck`) is untouched; only the `Error` string changes.
+   The substitution is report-only. `reportSweepSourceError` keeps passing the
+   original `err` to its `slog.Warn` call, so the raw OS text stays available in
+   the structured log for anyone debugging a non-TCC denial.
 
    `fs.ErrPermission` also matches `EACCES` on Linux, where no TCC exists, so the
    macOS-specific half of the diagnostic is gated on `runtime.GOOS == "darwin"`
-   at runtime. A runtime check is chosen over a build tag because the caller is a
-   single shared `scan` path; the package's existing `notify_darwin.go` build-tag
-   split stays untouched.
+   at runtime. A runtime check is chosen over a build tag because the gate lives
+   inside the one shared helper the three sites call; the package's existing
+   `notify_darwin.go` build-tag split stays untouched.
 
 Data flow, ledger semantics, error classes, and attempt accounting are unchanged.
 A denied read never reaches the LLM, so it cannot consume a permanent attempt.
@@ -183,25 +227,35 @@ The diagnostic text is two fixed strings so tests can assert them exactly:
 
 - every platform: `permission denied: cannot read source`
 - additionally on `runtime.GOOS == "darwin"`, the suffix
-  `; macOS consent required, see README "launchd automation"`
+  `; macOS consent required, see README "Schedule zero-touch ingest"`
 
 The full darwin string is therefore
-`permission denied: cannot read source; macOS consent required, see README "launchd automation"`.
-The `os.ReadDir` failure emits the string bare, as it emits `err.Error()` bare
-today. The `hashFile` failure keeps the `read: ` prefix it already emits, so its
-line reads `read: permission denied: cannot read source…`.
+`permission denied: cannot read source; macOS consent required, see README "Schedule zero-touch ingest"`.
+Each site keeps whatever prefix it emits today and only substitutes the error
+text. `scan`'s `os.ReadDir` and the sweep's `reportSweepSourceError` emit the
+string bare, as both emit `err.Error()` bare today. `scan`'s `hashFile` keeps the
+`read: ` prefix, so its line reads `read: permission denied: cannot read source…`.
 
 ## Testing
 
-- `internal/ingest`: a table test creates a source directory, removes its
-  permissions with `os.Chmod(dir, 0)`, runs `scan`, and asserts the
-  `source-error` line carries the permission diagnostic. A second case chmods a
-  single file to `0` and asserts the `skipped` line carries it. Both skip when
-  running as root, where the permission bits do not deny access. Both assert the
-  platform-independent half of the string always, and assert the macOS suffix
-  only under `runtime.GOOS == "darwin"`, so the suite stays green on Linux CI.
-- `internal/ingest`: an existing-behavior test asserts that a non-permission read
-  error keeps its current message shape, so the change stays narrow.
+- `internal/ingest`: `TestRunSourcePermissionDenied`, a table test driving
+  `Runner.Run` through the package's existing test harness, in the shape of
+  `TestRunSourceDirReadError` (`internal/ingest/ingest_test.go:1123`). Case one
+  runs once normally so the ledger holds a row for the source directory, then
+  removes the directory's permissions with `os.Chmod(dir, 0)` and runs again.
+  The second run must produce two `source-error` lines for that path — one from
+  the sweep, one from `scan` — and the assertion covers **every** such line, so
+  an unconverted sweep reporter fails the test. Case two chmods a single file to
+  `0` and asserts the `skipped` line carries it. Each case restores the
+  mode in `t.Cleanup` before the temp directory is removed, because `RemoveAll`
+  cannot descend into a `0`-mode directory and the cleanup failure would surface
+  as an unrelated test failure. Both skip when running as root, where the
+  permission bits do not deny access. Both assert the platform-independent half
+  of the string always, and assert the macOS suffix only under
+  `runtime.GOOS == "darwin"`, so the suite stays green on Linux CI.
+- `internal/ingest`: `TestRunSourceDirReadError` already covers a non-permission
+  read error and must keep passing unchanged, which proves the substitution is
+  narrow.
 - Full suite: `go test -race ./...`.
 - Signing behavior cannot be asserted automatically, because TCC state is a
   machine-level side effect. The manual verification procedure is part of Success
@@ -239,7 +293,7 @@ line reads `read: permission denied: cannot read source…`.
 3. A build without any signing certificate still succeeds.
    - **Measured by**: `make clean && make build CODESIGN_IDENTITY=- && ./cogvault --help` exits 0.
 4. A denied source read is reported as a permission problem.
-   - **Measured by**: `go test ./internal/ingest -run TestScanPermissionDenied` passes.
+   - **Measured by**: `go test ./internal/ingest -run 'TestRunSourcePermissionDenied|TestRunSourceDirReadError'` passes, the second name proving the non-permission path is unchanged.
 5. The full test suite stays green.
    - **Measured by**: `go test -race ./...` reports 0 failures.
 6. The documentation lets an operator perform the grant and the cleanup without asking a question.
