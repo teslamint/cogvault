@@ -8,7 +8,7 @@ symptoms:
   - "Rebuilt Go binary exits immediately with signal: killed (exit code 137)"
   - "go run ./cmd/cogvault/ works but the compiled binary does not"
   - "Binary worked before rebuild; same source, different binary hash"
-root_cause: "macOS FDA (Full Disk Access) tracks binaries by code directory hash; a rebuilt binary has a new hash and loses its TCC grant, causing SIGKILL on first protected-resource access"
+root_cause: "macOS FDA (Full Disk Access) can track an ad-hoc-signed rebuild whose code directory hash changes; that rebuild loses its TCC grant and can receive SIGKILL on first protected-resource access"
 resolution_type: code_signing
 tags:
   - macos
@@ -83,6 +83,9 @@ only a `cdhash`; a changed rebuild cannot satisfy it. A Developer ID signature
 with a fixed identifier has a certificate-based designated requirement without
 that `cdhash` term, so a changed binary signed with the same identity can
 satisfy the prior requirement.
+
+An unchanged-source reproducible build can retain its `cdhash`. Treat the
+`cdhash` as diagnostic context, not as a TCC verification pass criterion.
 
 TCC storage is service-specific. The observed AppData row exists after Allow
 but stores a NULL `csreq`; that row does not itself prove the code requirement.

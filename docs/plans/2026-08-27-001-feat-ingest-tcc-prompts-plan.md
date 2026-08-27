@@ -2,9 +2,10 @@
 schema: plan/v1
 title: "Stable code identity for scheduled ingest"
 type: feat
-status: approved
+status: done
 body_seal: 7a262f9c748c876584ac4a80733dfd97d34ff320a6991b19dd50821a28af0e23
 date: 2026-08-27
+completed_by: 5f64f49ead9e3da4c6a24692f57b61e1819586a6
 execution: code
 origin: docs/specs/2026-08-27-ingest-tcc-prompts-design.md
 ---
