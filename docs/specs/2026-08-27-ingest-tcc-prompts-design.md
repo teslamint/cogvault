@@ -47,9 +47,23 @@ make build          # CODESIGN_IDENTITY defaults to "-" (ad-hoc)
 ### S3: First-time operator performs the one-time grant
 
 An operator setting up the launchd schedule follows README steps: install the
-signed binary, run one manual ingest to trigger the prompts, grant the access,
-then load the launchd job. The README states which grant covers which access and
-that a `go build` outside the Makefile silently reverts the identity.
+signed binary, load the launchd job, then force one immediate run of that job and
+answer the prompts it raises.
+
+```bash
+make install CODESIGN_IDENTITY="Developer ID Application: <name> (<team>)"
+launchctl kickstart -k gui/$(id -u)/com.teslamint.cogvault.ingest
+```
+
+The manual run must go through launchd, not through the terminal. TCC attributes
+a terminal-spawned process to the terminal application, which is the responsible
+process; only under launchd is `cogvault` itself the client. A grant obtained
+from a terminal run therefore lands on the terminal's identity and leaves the
+scheduled job still prompting. This asymmetry also explains the reported
+symptom: prompts appear under the schedule and never during manual ingest.
+
+The README states which grant covers which access and that a `go build` outside
+the Makefile silently reverts the identity.
 
 ### S4: Operator removes grants left behind by earlier binaries
 
@@ -68,7 +82,7 @@ the grant procedure, instead of appearing as a generic `skipped` or a bare
 ```
 $ cogvault ingest --config ~/.config/cogvault/config.yaml
 scanned=0 digested=0 ... source-errors=1
-  source-error  ~/Downloads/_Articles  permission denied: macOS consent required; see README "launchd automation"
+  source-error  ~/Downloads/_Articles  permission denied: cannot read source; macOS consent required, see README "launchd automation"
 ```
 
 ## Scope
@@ -79,7 +93,9 @@ scanned=0 digested=0 ... source-errors=1
   both the build artifact and the install destination; an echo line naming the
   identity actually used.
 - `README.md`: build section and launchd section updates covering the stable
-  identity requirement, the one-time grant ceremony, and the `go build` caveat.
+  identity requirement, the one-time grant ceremony driven through
+  `launchctl kickstart` (never a terminal ingest run) with the responsible-process
+  reason stated, and the `go build` caveat.
 - `docs/solutions/build-errors/macos-sigkill-rebuilt-go-binary.md`: correction of
   the prevention guidance, which currently presents ad-hoc re-signing as
   sufficient.
@@ -109,7 +125,7 @@ certificate material, or personal path is committed.
 | Claim | Command | Observed at | Observed result | Evidence source |
 |---|---|---|---|---|
 | TCC grants for the installed binary are pinned to `cdhash`, so a rebuild invalidates them | `sqlite3 "$HOME/Library/Application Support/com.apple.TCC/TCC.db" "select service, length(csreq), hex(csreq) from access where client like '%cogvault%';"` | `2026-08-27T14:33:00+09:00` | 9 grant rows; 8 carry a 40-byte requirement decoding to a single `cdhash` condition, across 3 distinct `cdhash` values dated 2026-07-23, 2026-08-15/17 and 2026-08-25/26/27; the newest equals the installed binary's current `cdhash` | Local user TCC database (not committed) |
-| A Developer ID signed CLI receives an identifier-and-team requirement instead, which survives rebuilds | `sqlite3 ... | xxd -r -p | csreq -r- -t` on a Developer ID signed CLI row | `2026-08-27T14:35:00+09:00` | Requirement decodes to `identifier "<id>" and anchor apple generic and ... certificate leaf[subject.OU] = <team>`; no `cdhash` term | Local user TCC database (not committed) |
+| A Developer ID signed CLI receives an identifier-and-team requirement instead, which survives rebuilds | select the row's `csreq` with `sqlite3`, decode it through `xxd -r -p`, then print it with `csreq -r- -t`, on a Developer ID signed CLI row | `2026-08-27T14:35:00+09:00` | Requirement decodes to `identifier "<id>" and anchor apple generic and ... certificate leaf[subject.OU] = <team>`; no `cdhash` term | Local user TCC database (not committed) |
 | The installed binary carries the Go linker's ad-hoc signature and a generic identifier | `codesign -dv --verbose=4 ~/bin/cogvault` | `2026-08-27T14:20:00+09:00` | `flags=0x20002(adhoc,linker-signed)`, `Identifier=a.out` — the Makefile's `codesign --force --sign -` step was not applied to the installed copy | Local build machine (not committed) |
 | The build machine holds a usable Developer ID Application identity | `security find-identity -v -p codesigning` | `2026-08-27T14:36:00+09:00` | 2 valid identities, of which 1 is a Developer ID Application identity | Local login keychain (not committed) |
 | The SQLite driver is pure Go, so signing options cannot break a native dependency | `rg -n "sqlite" go.mod` | `2026-08-27T14:38:00+09:00` | `modernc.org/sqlite v1.48.1`; no cgo SQLite driver | Working tree at `58d8a00` |
@@ -143,7 +159,13 @@ No package boundary changes. Two independent surfaces move:
    gain a permission check using `errors.Is(err, fs.ErrPermission)`. A permission
    failure keeps its existing counter and action so the report sum invariant
    (`Report.SumCheck`) is untouched; only the `Error` string changes, to a fixed
-   diagnostic that names the denial and points at the README procedure.
+   diagnostic that names the denial.
+
+   `fs.ErrPermission` also matches `EACCES` on Linux, where no TCC exists, so the
+   macOS-specific half of the diagnostic is gated on `runtime.GOOS == "darwin"`
+   at runtime. A runtime check is chosen over a build tag because the caller is a
+   single shared `scan` path; the package's existing `notify_darwin.go` build-tag
+   split stays untouched.
 
 Data flow, ledger semantics, error classes, and attempt accounting are unchanged.
 A denied read never reaches the LLM, so it cannot consume a permanent attempt.
@@ -157,8 +179,17 @@ A denied read never reaches the LLM, so it cannot consume a permanent attempt.
 | Config file | No change |
 | MCP tools | No change |
 
-The diagnostic text is a single fixed string so tests can assert it exactly:
-`permission denied: macOS consent required; see README "launchd automation"`.
+The diagnostic text is two fixed strings so tests can assert them exactly:
+
+- every platform: `permission denied: cannot read source`
+- additionally on `runtime.GOOS == "darwin"`, the suffix
+  `; macOS consent required, see README "launchd automation"`
+
+The full darwin string is therefore
+`permission denied: cannot read source; macOS consent required, see README "launchd automation"`.
+The `os.ReadDir` failure emits the string bare, as it emits `err.Error()` bare
+today. The `hashFile` failure keeps the `read: ` prefix it already emits, so its
+line reads `read: permission denied: cannot read source…`.
 
 ## Testing
 
@@ -166,7 +197,9 @@ The diagnostic text is a single fixed string so tests can assert it exactly:
   permissions with `os.Chmod(dir, 0)`, runs `scan`, and asserts the
   `source-error` line carries the permission diagnostic. A second case chmods a
   single file to `0` and asserts the `skipped` line carries it. Both skip when
-  running as root, where the permission bits do not deny access.
+  running as root, where the permission bits do not deny access. Both assert the
+  platform-independent half of the string always, and assert the macOS suffix
+  only under `runtime.GOOS == "darwin"`, so the suite stays green on Linux CI.
 - `internal/ingest`: an existing-behavior test asserts that a non-permission read
   error keeps its current message shape, so the change stays narrow.
 - Full suite: `go test -race ./...`.
@@ -188,10 +221,21 @@ The diagnostic text is a single fixed string so tests can assert it exactly:
 
 ## Success Criteria
 
-1. The binary's TCC requirement is identity-based, not `cdhash`-based, after a signed install.
-   - **Measured by**: `sqlite3 "$HOME/Library/Application Support/com.apple.TCC/TCC.db" "select hex(csreq) from access where client='$HOME/bin/cogvault' limit 1;" | xxd -r -p | csreq -r- -t` prints a requirement containing `identifier "com.teslamint.cogvault"` and a `certificate leaf[subject.OU]` term, and contains no `cdhash` term.
-2. A rebuild does not invalidate existing grants.
-   - **Measured by**: record `codesign -dv --verbose=4 ~/bin/cogvault` CDHash, run `make install`, confirm the CDHash changed, then run `launchctl kickstart -k gui/$(id -u)/com.teslamint.cogvault.ingest` and confirm no consent prompt appears and `select count(*) from access where client='$HOME/bin/cogvault' and last_modified > <the recorded epoch>` returns 0.
+1. Every TCC grant recorded after the signed install is identity-based, not
+   `cdhash`-based. Re-signing does not rewrite rows that already exist, so the
+   claim is scoped to rows whose `last_modified` is at or after the signed
+   install; pre-existing `cdhash` rows are expected to remain until the
+   documented stale-grant cleanup (S4) removes them.
+   - **Measured by**: record `INSTALL_EPOCH=$(date +%s)` immediately before the signed `make install`. After the re-grant round, for **every** row returned by `sqlite3 "$HOME/Library/Application Support/com.apple.TCC/TCC.db" "select service, hex(csreq) from access where client='$HOME/bin/cogvault' and last_modified >= $INSTALL_EPOCH;"`, decoding its `csreq` through `xxd -r -p` and `csreq -r- -t` prints a requirement containing `identifier "com.teslamint.cogvault"` and a `certificate leaf[subject.OU]` term, and containing no `cdhash` term. At least one row must be returned; zero rows fails the criterion rather than passing it vacuously.
+2. A rebuild after the grants are re-established does not invalidate them. The
+   measurement runs in this exact order, because the first signed install still
+   costs one final round of prompts:
+   1. `make install CODESIGN_IDENTITY=<identity>` — signed install.
+   2. `launchctl kickstart -k gui/$(id -u)/com.teslamint.cogvault.ingest`, then answer every prompt it raises. This is the one-time re-grant round.
+   3. Record `codesign -dv --verbose=4 ~/bin/cogvault` CDHash and `REBUILD_EPOCH=$(date +%s)`.
+   4. `make install CODESIGN_IDENTITY=<identity>` again; confirm the CDHash changed.
+   5. `launchctl kickstart -k gui/$(id -u)/com.teslamint.cogvault.ingest`.
+   - **Measured by**: after step 5, no consent prompt appears, and `select count(*) from access where client='$HOME/bin/cogvault' and last_modified >= $REBUILD_EPOCH;` returns 0.
 3. A build without any signing certificate still succeeds.
    - **Measured by**: `make clean && make build CODESIGN_IDENTITY=- && ./cogvault --help` exits 0.
 4. A denied source read is reported as a permission problem.
