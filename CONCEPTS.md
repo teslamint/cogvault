@@ -54,3 +54,27 @@ load), not against a count of passing runs. "5 back-to-back passes" proves
 one load profile cooperated 5 times; it does not bound the margin against a
 load profile that hasn't occurred yet. *Avoid: validating a wall-clock test
 margin by repeated-run count alone.*
+
+## Responsible process
+
+The process macOS TCC attributes a protected access to, which is not always the
+process making the call. A terminal-spawned `cogvault` run is attributed to the
+terminal application; only under launchd is `cogvault` itself the client. This is
+why consent prompts appear for the scheduled job and never for a manual run, and
+why a grant must be obtained by forcing the launchd job to run. *Avoid: "calling
+process", "the app asking for permission".*
+
+## Code identity
+
+The signing identity plus code-signing identifier that macOS records inside a TCC
+grant's requirement. An ad-hoc signature pins the grant to a `cdhash`, so every
+rebuild invalidates every grant; a Developer ID signature pins it to the
+identifier and the team certificate, which survives rebuilds. *Avoid: "the
+signature", "the binary hash".*
+
+## Stale grant
+
+A TCC grant whose recorded requirement can no longer match the installed binary —
+typically a `cdhash` requirement left behind by a superseded build. Stale grants
+accumulate under the same client path, never take effect, and are removed only by
+a deliberate cleanup. *Avoid: "old permission", "orphaned grant".*
