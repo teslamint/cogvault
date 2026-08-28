@@ -54,5 +54,7 @@ launchd domain and verifies that the temporary job is absent afterward.
 
 - Approved contract: `docs/specs/2026-08-29-scheduled-access-check-design.md`
 - Successor plan: `docs/plans/2026-08-29-001-feat-scheduled-access-check-plan.md`
-- Review evidence: `.release-loop/runs/scheduled-access-check/` design and planning review artifacts
+- Review evidence: `.release-loop/runs/scheduled-access-check/plan-deepening-review.md`
+- Finding disposition: all architecture, feasibility, and security findings in that
+  artifact are fixed by the successor plan
 - Implementation owners: `scripts/check-scheduled-access.sh` and `scripts/check-scheduled-access_test.sh`
