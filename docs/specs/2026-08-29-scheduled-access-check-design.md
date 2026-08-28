@@ -17,7 +17,8 @@ read access at every `sources[]` root. Add a temporary LaunchAgent harness that
 runs the preflight twice so the user can verify that macOS reuses those grants. This
 check does not verify unconfigured Documents or Pictures folders or every AppData
 access made by subprocesses during a full ingest run. Source reads are bounded
-access probes, not full-file readability or integrity checks.
+access probes, not full-file readability or integrity checks. A configured path on
+a mounted network volume uses the same probe; the command never scans network mounts.
 
 ## User Scenarios
 
@@ -59,6 +60,8 @@ keeps logs needed for diagnosis.
 - Add a macOS script that verifies two invocations through one temporary LaunchAgent.
 - Add the command's config-only bootstrap exception to `SPEC.md` and `DESIGN.md`.
 - Document that the second prompt remains a user observation, not a programmatic fact.
+- Explain how to distinguish a configured-path prompt from a prompt that appears only
+  during full ingest subprocess or notification execution.
 
 ### Out
 
@@ -67,6 +70,7 @@ keeps logs needed for diagnosis.
 - Claiming to verify AppData access by `claude`, notification delivery, or the
   complete ingest path.
 - Probing unconfigured Documents, Pictures, Photos Library, or other arbitrary paths.
+- Enumerating `/Volumes` or requesting access to an unconfigured network share.
 - Changing arguments or state for the existing scheduled ingest LaunchAgent.
 - Promising that a grant survives certificate, identifier, or designated-requirement changes.
 - Supporting the launchd harness on non-macOS systems.
@@ -82,6 +86,7 @@ session because macOS may need to display a consent dialog.
 | `wiki_dir` may reside in a macOS-protected location. | `rg -n 'wiki_dir.*iCloud Drive' SPEC.md` | 2026-08-28T22:55:06Z | SPEC allows the wiki root under iCloud Drive. | `SPEC.md` |
 | The current command tree loads configuration through the root `--config` flag. | `sed -n '1,120p' cmd/cogvault/main.go` | 2026-08-28T22:55:06Z | Root defines the persistent flag and registers subcommands. | `cmd/cogvault/main.go` |
 | The active config does not name Documents or Pictures as a source. | `sed -n '/^sources:/,/^[^ -]/p' "$HOME/.config/cogvault/config.yaml"` | 2026-08-28T23:10:39Z | The only configured source is a directory under Downloads. | Local config; path category only, no personal value retained. |
+| Active configured paths are not on a mounted network volume. | `df -P <wiki_dir> <db_parent> <source>; mount | rg 'smbfs|afpfs|nfs|webdav|osxfuse|macfuse'` | 2026-08-28T23:16:06Z | All paths resolve to the local Data volume; no matching network mount is present. | Local mount table; sanitized summary only. |
 
 ## Architecture
 
@@ -149,6 +154,14 @@ the stdout and stderr paths. The script then states that absence of a second dia
 shows access reuse only for the selected binary, temporary job, and configured
 filesystem surfaces.
 
+The README interpretation is diagnostic. A folder or network-volume prompt during
+`access-check` belongs to its execution path. The operator first checks the selected
+binary and config path, then the configured filesystem surfaces. A prompt that
+appears only during full `ingest` is outside this preflight. The next candidates
+include the database file and its sidecars, wiki contents, Git operations, `claude`,
+and `osascript`. The documentation keeps these candidates separate and never
+instructs the operator to approve unrelated broad access.
+
 ## Testing
 
 - CLI tests use temporary wiki, database-parent, and source directories to verify
@@ -194,11 +207,15 @@ filesystem surfaces.
    - **Measured by**: `go test -race ./...`
 5. The user can distinguish configured-path checks from a complete ingest or AppData check.
    - **Measured by**: reviewer confirms the CLI help, script output, and README limit the result to configured filesystem surfaces and never claim to query TCC persistence or unconfigured folders.
+6. A configured network-volume path uses the normal surface probe without mount discovery.
+   - **Measured by**: a recording filesystem seam confirms that source enumeration receives exactly the configured source roots; a static check confirms the implementation contains no `/Volumes` mount-discovery path.
 
 ## Open Decisions
 
 The cause of prompts for unconfigured Documents or Pictures paths remains unresolved.
-The existing candidates are the spawned `claude` CLI, `osascript` notification path,
-and AppData access under iCloud Drive. This implementation does not request broad
-folder access to hide that diagnostic gap. The operator decides whether absence of a
-second dialog is sufficient for the configured filesystem surfaces.
+Candidates include direct database and wiki content access, Git operations, the
+spawned `claude` CLI, `osascript`, and AppData access under iCloud Drive. A
+network-volume prompt is also unresolved when the binary, config, and configured
+surfaces use local storage. This implementation does not request broad folder or
+network access to hide that diagnostic gap. The operator decides whether absence of
+a second dialog is sufficient for the configured filesystem surfaces.
