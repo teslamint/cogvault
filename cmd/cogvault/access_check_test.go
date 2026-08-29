@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -54,6 +55,8 @@ func TestAccessCheckConfiguredSurfaces(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(configBody), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	wikiBefore := directoryNames(t, wikiDir)
+	dbBefore := directoryNames(t, dbDir)
 
 	stdout, _, err := executeCommand("access-check", "--config", configPath)
 	if err != nil {
@@ -70,6 +73,25 @@ func TestAccessCheckConfiguredSurfaces(t *testing.T) {
 			t.Errorf("stdout missing %q:\n%s", want, stdout)
 		}
 	}
+	if got := directoryNames(t, wikiDir); strings.Join(got, "\x00") != strings.Join(wikiBefore, "\x00") {
+		t.Fatalf("wiki directory changed: before=%v after=%v", wikiBefore, got)
+	}
+	if got := directoryNames(t, dbDir); strings.Join(got, "\x00") != strings.Join(dbBefore, "\x00") {
+		t.Fatalf("database parent changed: before=%v after=%v", dbBefore, got)
+	}
+}
+
+func directoryNames(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, len(entries))
+	for i, entry := range entries {
+		names[i] = entry.Name()
+	}
+	return names
 }
 
 func TestAccessCheckDoesNotBootstrap(t *testing.T) {
@@ -193,6 +215,157 @@ func TestAccessCheckPreservesSentinelReadAndCleanupErrors(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error missing %q: %v", want, err)
 		}
+	}
+}
+
+func TestAccessCheckReportsCleanupOnlyFailure(t *testing.T) {
+	base := t.TempDir()
+	wikiDir := filepath.Join(base, "wiki")
+	dbDir := filepath.Join(base, "state")
+	for _, dir := range []string{wikiDir, dbDir} {
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	configPath := filepath.Join(base, "config.yaml")
+	writeAccessCheckConfig(t, configPath, wikiDir, filepath.Join(dbDir, "cogvault.db"))
+	original := defaultAccessCheckOps
+	t.Cleanup(func() { defaultAccessCheckOps = original })
+	defaultAccessCheckOps.remove = func(path string) error {
+		if filepath.Dir(path) == wikiDir {
+			return errors.New("cleanup denied")
+		}
+		return os.Remove(path)
+	}
+	_, _, err := executeCommand("access-check", "--config", configPath)
+	if err == nil || !strings.Contains(err.Error(), "remove sentinel") || !strings.Contains(err.Error(), "cleanup denied") {
+		t.Fatalf("cleanup-only error = %v", err)
+	}
+	if names := directoryNames(t, wikiDir); len(names) != 1 || !strings.HasPrefix(names[0], ".cogvault-access-check-") {
+		t.Fatalf("residual sentinel inventory = %v", names)
+	}
+}
+
+func TestAccessCheckFIFOReplacementReturnsWithoutBlocking(t *testing.T) {
+	base := t.TempDir()
+	wikiDir := filepath.Join(base, "wiki")
+	dbDir := filepath.Join(base, "state")
+	sourceDir := filepath.Join(base, "source")
+	for _, dir := range []string{wikiDir, dbDir, sourceDir} {
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	originalPath := filepath.Join(sourceDir, "original.md")
+	fifoPath := filepath.Join(sourceDir, "replacement.md")
+	if err := os.WriteFile(originalPath, []byte("body"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Mkfifo(fifoPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(base, "config.yaml")
+	writeAccessCheckConfig(t, configPath, wikiDir, filepath.Join(dbDir, "cogvault.db"), sourceDir)
+	originalOps := defaultAccessCheckOps
+	t.Cleanup(func() { defaultAccessCheckOps = originalOps })
+	defaultAccessCheckOps.open = func(path string, flags int, mode uint32) (int, error) {
+		if path == originalPath {
+			return unix.Open(fifoPath, flags, mode)
+		}
+		return unix.Open(path, flags, mode)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := executeCommand("access-check", "--config", configPath)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), originalPath) {
+			t.Fatalf("FIFO replacement error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("FIFO replacement blocked")
+	}
+}
+
+func TestAccessCheckRejectsNonDirectoryWriteSurface(t *testing.T) {
+	base := t.TempDir()
+	wikiPath := filepath.Join(base, "wiki-file")
+	dbDir := filepath.Join(base, "state")
+	if err := os.WriteFile(wikiPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(dbDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(base, "config.yaml")
+	writeAccessCheckConfig(t, configPath, wikiPath, filepath.Join(dbDir, "cogvault.db"))
+	_, _, err := executeCommand("access-check", "--config", configPath)
+	if err == nil || !strings.Contains(err.Error(), "wiki_dir") || !strings.Contains(err.Error(), wikiPath) || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("non-directory error = %v", err)
+	}
+}
+
+func TestAccessCheckSourceOperationErrorsNameBoundary(t *testing.T) {
+	for _, operation := range []string{"read directory", "lstat", "open", "read"} {
+		t.Run(operation, func(t *testing.T) {
+			base := t.TempDir()
+			wikiDir := filepath.Join(base, "wiki")
+			dbDir := filepath.Join(base, "state")
+			sourceDir := filepath.Join(base, "source")
+			for _, dir := range []string{wikiDir, dbDir, sourceDir} {
+				if err := os.Mkdir(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			accepted := filepath.Join(sourceDir, "accepted.md")
+			if err := os.WriteFile(accepted, []byte("body"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			configPath := filepath.Join(base, "config.yaml")
+			writeAccessCheckConfig(t, configPath, wikiDir, filepath.Join(dbDir, "cogvault.db"), sourceDir)
+			original := defaultAccessCheckOps
+			t.Cleanup(func() { defaultAccessCheckOps = original })
+			injected := errors.New("permission sentinel")
+			switch operation {
+			case "read directory":
+				defaultAccessCheckOps.readDir = func(path string) ([]os.DirEntry, error) {
+					if path == sourceDir {
+						return nil, injected
+					}
+					return os.ReadDir(path)
+				}
+			case "lstat":
+				defaultAccessCheckOps.lstat = func(path string) (os.FileInfo, error) {
+					if path == accepted {
+						return nil, injected
+					}
+					return os.Lstat(path)
+				}
+			case "open":
+				defaultAccessCheckOps.open = func(path string, flags int, mode uint32) (int, error) {
+					if path == accepted {
+						return -1, injected
+					}
+					return unix.Open(path, flags, mode)
+				}
+			case "read":
+				defaultAccessCheckOps.read = func(file *os.File, b []byte) (int, error) {
+					if file.Name() == accepted {
+						return 0, injected
+					}
+					return file.Read(b)
+				}
+			}
+			_, _, err := executeCommand("access-check", "--config", configPath)
+			if err == nil || !strings.Contains(err.Error(), "source "+sourceDir) || !strings.Contains(err.Error(), operation) || !strings.Contains(err.Error(), "permission sentinel") {
+				t.Fatalf("%s error = %v", operation, err)
+			}
+			if operation != "read directory" && !strings.Contains(err.Error(), accepted) {
+				t.Errorf("error missing exact file path: %v", err)
+			}
+		})
 	}
 }
 
