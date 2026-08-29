@@ -119,6 +119,10 @@ case $cmd in
     arg1=$(<"$FAKE_STATE/registered.ProgramArguments.1"); arg2=$(<"$FAKE_STATE/registered.ProgramArguments.2"); arg3=$(<"$FAKE_STATE/registered.ProgramArguments.3")
     "$program" "$arg1" "$arg2" "$arg3" >"$out" 2>"$err"
     [[ ${FAKE_MODE:-} == missing-marker ]] && : >"$out"
+    if [[ ${FAKE_MODE:-} == delayed-marker ]]; then
+      : >"$out"
+      (sleep .2; echo 'configured ingest access check passed' >"$out") >/dev/null 2>&1 &
+    fi
     if [[ ${FAKE_MODE:-} == signal-INT ]]; then (sleep .1; kill -INT "$ACCESS_CHECK_HARNESS_PID") >/dev/null 2>&1 & fi
     if [[ ${FAKE_MODE:-} == signal-TERM ]]; then (sleep .1; kill -TERM "$ACCESS_CHECK_HARNESS_PID") >/dev/null 2>&1 & fi
     if [[ ${FAKE_MODE:-} == timeout || ${FAKE_MODE:-} == signal-INT || ${FAKE_MODE:-} == signal-TERM ]]; then sleep 10 >/dev/null 2>&1 & echo $!; else echo 999999; fi
@@ -138,7 +142,7 @@ run_case() {
   local name=$1 mode=${2:-happy}; shift 2 || true
   local dir; dir=$(make_fixture "$name" "$mode")
   set +e
-  output=$(env PATH="$dir/bin:/usr/bin:/bin" HOME="$dir/home" USER="${USER:-tester}" FAKE_STATE="$dir/state" FAKE_MODE="$mode" ACCESS_CHECK_TIMEOUT=1 COGVAULT_BIN="$dir/cogvault bin" COGVAULT_CONFIG="$dir/config file & test.yml" "$HARNESS" "$@" 2>&1)
+  output=$(env PATH="$dir/bin:/usr/bin:/bin" HOME="$dir/home" USER="${USER:-tester}" FAKE_STATE="$dir/state" FAKE_MODE="$mode" ACCESS_CHECK_TIMEOUT="${CASE_TIMEOUT:-1}" COGVAULT_BIN="$dir/cogvault bin" COGVAULT_CONFIG="$dir/config file & test.yml" "$HARNESS" "$@" 2>&1)
   status=$?
   set -e
   CASE_DIR=$dir CASE_OUTPUT=$output CASE_STATUS=$status
@@ -177,6 +181,11 @@ grep -Fq "ProgramArguments.2 -string --config" "$CASE_DIR/state/plutil-transcrip
 grep -Fq "ProgramArguments.3 -string $CASE_DIR/config\\ file\\ \\&\\ test.yml" "$CASE_DIR/state/plutil-transcript" || fail "config argument was not preserved"
 ! grep -Eq 'ProgramArguments\.[0-9]+ -string (/(bin|usr/bin)/(ba)?sh|.*shell)' "$CASE_DIR/state/plutil-transcript" || fail "shell wrapper inserted"
 [[ ${MUTATION_PROBE:-0} == 1 ]] && exit 0
+
+CASE_TIMEOUT=2 run_case delayed-marker delayed-marker
+[[ $CASE_STATUS -eq 0 ]] || fail "delayed launchd stdout marker was missed: $CASE_OUTPUT"
+assert_job_absent "$CASE_DIR"
+[[ ! -e "$CASE_DIR/state/private" ]] || fail "delayed-marker success artifacts retained"
 
 for mode in invalid-signature second-run-signature-failure identity-change after-first-identity-change after-second-identity-change missing-marker timeout; do
   run_case "$mode" "$mode"
