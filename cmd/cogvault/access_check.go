@@ -92,10 +92,6 @@ func probeWriteSurface(surface, dir string, ops accessCheckOps) (result error) {
 			result = errors.Join(result, fmt.Errorf("%s %s: remove sentinel %s: %w", surface, dir, path, removeErr))
 		}
 	}()
-	if err := file.Chmod(0o600); err != nil {
-		_ = file.Close()
-		return fmt.Errorf("%s %s: chmod sentinel: %w", surface, dir, err)
-	}
 	payload := []byte("cogvault-access-check")
 	if _, err := file.Write(payload); err != nil {
 		_ = file.Close()
