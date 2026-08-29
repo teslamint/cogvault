@@ -167,6 +167,7 @@ assert_contains "$CASE_OUTPUT" "The second run should not show another permissio
 [[ $(<"$CASE_DIR/state/registered.ProgramArguments.3") == "$CASE_DIR/config file & test.yml" ]] || fail "registered config path differs"
 [[ $(<"$CASE_DIR/state/dir-mode") == 700 && $(<"$CASE_DIR/state/plist-mode") == 600 ]] || fail "private modes"
 [[ ! -e "$CASE_DIR/state/private" ]] || fail "success artifacts retained"
+assert_job_absent "$CASE_DIR"
 grep -q 'bootstrap gui/501' "$CASE_DIR/state/transcript" || fail "wrong GUI bootstrap"
 [[ $(grep -c '^kickstart ' "$CASE_DIR/state/transcript") == 2 ]] || fail "kickstart count"
 [[ $(sed -n 's/^kickstart -kp //p' "$CASE_DIR/state/transcript" | sort -u | wc -l | tr -d ' ') == 1 ]] || fail "runs used different labels"
@@ -198,6 +199,9 @@ assert_contains "$CASE_OUTPUT" "launchctl bootout"
 assert_contains "$CASE_OUTPUT" "rm -rf"
 assert_retained "$CASE_DIR" 2
 assert_job_present "$CASE_DIR"
+bootout_label=$(<"$CASE_DIR/state/registered.Label")
+assert_contains "$CASE_OUTPUT" "recover job: launchctl bootout 'gui/501/$bootout_label'"
+assert_contains "$CASE_OUTPUT" "delete after inspection: rm -rf '$CASE_DIR/state/private'"
 
 run_case preflight happy
 rm -f "$CASE_DIR/config file & test.yml"
@@ -264,6 +268,12 @@ if [[ ${SKIP_MUTATIONS:-0} == 0 ]]; then
   chmod +x "$TMP/no-postrun-seal.sh"
   set +e; MUTATION_PROBE=1 SKIP_MUTATIONS=1 HARNESS="$TMP/no-postrun-seal.sh" bash "$0" >/dev/null 2>&1; mutation_status=$?; set -e
   [[ $mutation_status -ne 0 ]] || fail "post-run seal removal mutation survived"
+
+  cp "$HARNESS" "$TMP/no-success-bootout.sh"
+  sed -i '' '/^launchctl bootout "\$DOMAIN\/\$LABEL"$/d' "$TMP/no-success-bootout.sh"
+  chmod +x "$TMP/no-success-bootout.sh"
+  set +e; MUTATION_PROBE=1 SKIP_MUTATIONS=1 HARNESS="$TMP/no-success-bootout.sh" bash "$0" >/dev/null 2>&1; mutation_status=$?; set -e
+  [[ $mutation_status -ne 0 ]] || fail "success bootout removal mutation survived"
 
   set +e; INJECT_ARTIFACT_LOSS=1 ARTIFACT_LOSS_PROBE=1 SKIP_MUTATIONS=1 bash "$0" >/dev/null 2>&1; mutation_status=$?; set -e
   [[ $mutation_status -ne 0 ]] || fail "retained artifact loss injection survived"
