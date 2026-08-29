@@ -58,26 +58,28 @@ func TestAccessCheckConfiguredSurfaces(t *testing.T) {
 	wikiBefore := directoryNames(t, wikiDir)
 	dbBefore := directoryNames(t, dbDir)
 
-	stdout, _, err := executeCommand("access-check", "--config", configPath)
-	if err != nil {
-		t.Fatalf("access-check failed: %v", err)
-	}
-	for _, want := range []string{
-		"passed: wiki_dir: " + wikiDir,
-		"passed: db_parent: " + dbDir,
-		"passed: source: " + sourceA,
-		"passed: source: " + sourceB,
-		"configured ingest access check passed",
-	} {
-		if !strings.Contains(stdout, want) {
-			t.Errorf("stdout missing %q:\n%s", want, stdout)
+	for run := 1; run <= 2; run++ {
+		stdout, _, err := executeCommand("access-check", "--config", configPath)
+		if err != nil {
+			t.Fatalf("access-check run %d failed: %v", run, err)
 		}
-	}
-	if got := directoryNames(t, wikiDir); strings.Join(got, "\x00") != strings.Join(wikiBefore, "\x00") {
-		t.Fatalf("wiki directory changed: before=%v after=%v", wikiBefore, got)
-	}
-	if got := directoryNames(t, dbDir); strings.Join(got, "\x00") != strings.Join(dbBefore, "\x00") {
-		t.Fatalf("database parent changed: before=%v after=%v", dbBefore, got)
+		for _, want := range []string{
+			"passed: wiki_dir: " + wikiDir,
+			"passed: db_parent: " + dbDir,
+			"passed: source: " + sourceA,
+			"passed: source: " + sourceB,
+			"configured ingest access check passed",
+		} {
+			if !strings.Contains(stdout, want) {
+				t.Errorf("run %d stdout missing %q:\n%s", run, want, stdout)
+			}
+		}
+		if got := directoryNames(t, wikiDir); strings.Join(got, "\x00") != strings.Join(wikiBefore, "\x00") {
+			t.Fatalf("run %d wiki directory changed: before=%v after=%v", run, wikiBefore, got)
+		}
+		if got := directoryNames(t, dbDir); strings.Join(got, "\x00") != strings.Join(dbBefore, "\x00") {
+			t.Fatalf("run %d database parent changed: before=%v after=%v", run, dbBefore, got)
+		}
 	}
 }
 
@@ -243,6 +245,34 @@ func TestAccessCheckReportsCleanupOnlyFailure(t *testing.T) {
 	}
 	if names := directoryNames(t, wikiDir); len(names) != 1 || !strings.HasPrefix(names[0], ".cogvault-access-check-") {
 		t.Fatalf("residual sentinel inventory = %v", names)
+	}
+}
+
+func TestAccessCheckReadbackMismatchStillCleansSentinel(t *testing.T) {
+	base := t.TempDir()
+	wikiDir := filepath.Join(base, "wiki")
+	dbDir := filepath.Join(base, "state")
+	for _, dir := range []string{wikiDir, dbDir} {
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	configPath := filepath.Join(base, "config.yaml")
+	writeAccessCheckConfig(t, configPath, wikiDir, filepath.Join(dbDir, "cogvault.db"))
+	original := defaultAccessCheckOps
+	t.Cleanup(func() { defaultAccessCheckOps = original })
+	defaultAccessCheckOps.readFile = func(path string) ([]byte, error) {
+		if filepath.Dir(path) == wikiDir {
+			return []byte("different bytes"), nil
+		}
+		return os.ReadFile(path)
+	}
+	_, _, err := executeCommand("access-check", "--config", configPath)
+	if err == nil || !strings.Contains(err.Error(), "compare sentinel") || !strings.Contains(err.Error(), "content mismatch") {
+		t.Fatalf("readback mismatch error = %v", err)
+	}
+	if names := directoryNames(t, wikiDir); len(names) != 0 {
+		t.Fatalf("sentinel not cleaned after mismatch: %v", names)
 	}
 }
 
