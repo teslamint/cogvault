@@ -18,6 +18,8 @@ type accessCheckOps struct {
 	lstat    func(string) (os.FileInfo, error)
 	open     func(string, int, uint32) (int, error)
 	read     func(*os.File, []byte) (int, error)
+	write    func(*os.File, []byte) (int, error)
+	close    func(*os.File) error
 	readFile func(string) ([]byte, error)
 	remove   func(string) error
 }
@@ -27,6 +29,8 @@ var defaultAccessCheckOps = accessCheckOps{
 	lstat:    os.Lstat,
 	open:     unix.Open,
 	read:     func(file *os.File, b []byte) (int, error) { return file.Read(b) },
+	write:    func(file *os.File, b []byte) (int, error) { return file.Write(b) },
+	close:    func(file *os.File) error { return file.Close() },
 	readFile: os.ReadFile,
 	remove:   os.Remove,
 }
@@ -93,11 +97,11 @@ func probeWriteSurface(surface, dir string, ops accessCheckOps) (result error) {
 		}
 	}()
 	payload := []byte("cogvault-access-check")
-	if _, err := file.Write(payload); err != nil {
-		_ = file.Close()
+	if _, err := ops.write(file, payload); err != nil {
+		_ = ops.close(file)
 		return fmt.Errorf("%s %s: write sentinel: %w", surface, dir, err)
 	}
-	if err := file.Close(); err != nil {
+	if err := ops.close(file); err != nil {
 		return fmt.Errorf("%s %s: close sentinel: %w", surface, dir, err)
 	}
 	got, err := ops.readFile(path)

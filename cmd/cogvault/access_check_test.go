@@ -276,6 +276,50 @@ func TestAccessCheckReadbackMismatchStillCleansSentinel(t *testing.T) {
 	}
 }
 
+func TestAccessCheckWriteAndCloseFailuresCleanSentinel(t *testing.T) {
+	for _, operation := range []string{"write", "close"} {
+		t.Run(operation, func(t *testing.T) {
+			base := t.TempDir()
+			wikiDir := filepath.Join(base, "wiki")
+			dbDir := filepath.Join(base, "state")
+			for _, dir := range []string{wikiDir, dbDir} {
+				if err := os.Mkdir(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			configPath := filepath.Join(base, "config.yaml")
+			writeAccessCheckConfig(t, configPath, wikiDir, filepath.Join(dbDir, "cogvault.db"))
+			original := defaultAccessCheckOps
+			t.Cleanup(func() { defaultAccessCheckOps = original })
+			injected := errors.New(operation + " sentinel")
+			switch operation {
+			case "write":
+				defaultAccessCheckOps.write = func(file *os.File, _ []byte) (int, error) {
+					if filepath.Dir(file.Name()) == wikiDir {
+						return 0, injected
+					}
+					return 0, errors.New("unexpected write")
+				}
+			case "close":
+				defaultAccessCheckOps.close = func(file *os.File) error {
+					err := file.Close()
+					if filepath.Dir(file.Name()) == wikiDir {
+						return errors.Join(err, injected)
+					}
+					return err
+				}
+			}
+			_, _, err := executeCommand("access-check", "--config", configPath)
+			if err == nil || !strings.Contains(err.Error(), operation+" sentinel") || !strings.Contains(err.Error(), wikiDir) {
+				t.Fatalf("%s error = %v", operation, err)
+			}
+			if names := directoryNames(t, wikiDir); len(names) != 0 {
+				t.Fatalf("%s failure left sentinel: %v", operation, names)
+			}
+		})
+	}
+}
+
 func TestAccessCheckFIFOReplacementReturnsWithoutBlocking(t *testing.T) {
 	base := t.TempDir()
 	wikiDir := filepath.Join(base, "wiki")
