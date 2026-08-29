@@ -119,6 +119,7 @@ case $cmd in
     arg1=$(<"$FAKE_STATE/registered.ProgramArguments.1"); arg2=$(<"$FAKE_STATE/registered.ProgramArguments.2"); arg3=$(<"$FAKE_STATE/registered.ProgramArguments.3")
     "$program" "$arg1" "$arg2" "$arg3" >"$out" 2>"$err"
     [[ ${FAKE_MODE:-} == missing-marker ]] && : >"$out"
+    [[ ${FAKE_MODE:-} == marker-decoy ]] && echo 'passed: source: /tmp/configured ingest access check passed' >"$out"
     if [[ ${FAKE_MODE:-} == delayed-marker ]]; then
       : >"$out"
       (sleep .2; echo 'configured ingest access check passed' >"$out") >/dev/null 2>&1 &
@@ -187,11 +188,11 @@ CASE_TIMEOUT=2 run_case delayed-marker delayed-marker
 assert_job_absent "$CASE_DIR"
 [[ ! -e "$CASE_DIR/state/private" ]] || fail "delayed-marker success artifacts retained"
 
-for mode in invalid-signature second-run-signature-failure identity-change after-first-identity-change after-second-identity-change missing-marker timeout; do
+for mode in invalid-signature second-run-signature-failure identity-change after-first-identity-change after-second-identity-change missing-marker marker-decoy timeout; do
   run_case "$mode" "$mode"
   [[ $CASE_STATUS -ne 0 ]] || fail "$mode unexpectedly passed"
 done
-for mode in second-run-signature-failure identity-change after-first-identity-change after-second-identity-change missing-marker timeout; do
+for mode in second-run-signature-failure identity-change after-first-identity-change after-second-identity-change missing-marker marker-decoy timeout; do
   [[ -d "$TMP/$mode/state/private" ]] || fail "$mode lost retained artifacts"
   assert_job_absent "$TMP/$mode"
 done
@@ -200,6 +201,7 @@ assert_retained "$TMP/identity-change" 0
 assert_retained "$TMP/after-first-identity-change" 1
 assert_retained "$TMP/after-second-identity-change" 2
 assert_retained "$TMP/missing-marker" 0
+assert_retained "$TMP/marker-decoy" 0
 assert_retained "$TMP/timeout" 0
 
 run_case bootout bootout-failure
