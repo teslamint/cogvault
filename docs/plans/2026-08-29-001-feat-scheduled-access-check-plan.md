@@ -2,11 +2,12 @@
 schema: plan/v1
 title: Scheduled configured-path access check
 type: feat
-status: draft
+status: approved
 date: 2026-08-29
 execution: code
 origin: docs/specs/2026-08-29-scheduled-access-check-design.md
 deepened: true
+body_seal: b11d30828a89ec54a443b21c1e84299cc286767670fd2dc808ebfa62855aad85
 ---
 
 ## Goal
