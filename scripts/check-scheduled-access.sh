@@ -88,7 +88,11 @@ run_once() {
     (( now - start < TIMEOUT )) || { echo "run $n timed out after ${TIMEOUT}s" >&2; return 1; }
     sleep 1
   done
-  grep -Fq 'configured ingest access check passed' "$stdout" || { echo "run $n missing success marker: $stdout" >&2; return 1; }
+  while ! grep -Fq 'configured ingest access check passed' "$stdout"; do
+    now=$SECONDS
+    (( now - start < TIMEOUT )) || { echo "run $n missing success marker after ${TIMEOUT}s: $stdout" >&2; return 1; }
+    sleep .1
+  done
   cp "$stdout" "$PRIVATE/run-$n.stdout"
   cp "$stderr" "$PRIVATE/run-$n.stderr"
   chmod 600 "$PRIVATE/run-$n.stdout" "$PRIVATE/run-$n.stderr"
