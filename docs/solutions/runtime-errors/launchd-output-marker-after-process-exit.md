@@ -1,6 +1,7 @@
 ---
 module: launchd access-check harness
 date: 2026-08-29
+last_updated: 2026-08-29
 problem_type: runtime_error
 component: shell-harness
 severity: medium
@@ -55,3 +56,5 @@ Add delayed-marker and decoy-marker fixtures. Require an exact-line match rather
 than a substring so diagnostic text cannot satisfy the success condition.
 
 Evidence: commits `5c6ddb5` and `0323684`; `bash scripts/check-scheduled-access_test.sh`.
+The scheduled-access-check retrospective revalidated this boundary after merge
+in commit `dcf6187`.
