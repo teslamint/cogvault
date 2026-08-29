@@ -43,14 +43,13 @@ The vault concept from v1 is gone: `wiki_dir` is the single storage root, and
 
 ```bash
 make build                         # build + adhoc codesign (default, no certificate needed)
-make install CODESIGN_IDENTITY="Developer ID Application: <your name> (<team>)"
+make install CODESIGN_IDENTITY="<identity from security find-identity -v -p codesigning>"
 ```
 
-The default `-` identity produces an ad-hoc signature whose TCC grants die on
-every rebuild. A stable identity can preserve existing grants only when every
-rebuild uses that same identity. Changing the code-signing identifier resets
-the binary's TCC identity once, so the first signed install costs one final
-round of prompts; later rebuilds signed with the same identity do not.
+The default `-` identity produces an ad-hoc signature that changes on rebuild.
+Use one available Apple signing identity and the same identifier for scheduled
+runs. A stable signature gives macOS a stable code requirement to evaluate. It
+does not guarantee that macOS will retain any permission decision.
 
 A manual build silently restores the linker's ad-hoc signature and
 `Identifier=a.out`, even after a stable identity was applied:
@@ -151,36 +150,65 @@ mkdir -p ~/Library/Logs/cogvault
 
 The default interval is 3600s (1 hour). launchd's PATH excludes `~/.local/bin`,
 so the template sets an explicit PATH that includes the `claude` CLI directory
-(verified by the O1 spike). Grant the scheduled binary's permissions through
-this ceremony:
+(verified by the O1 spike). Install one signed binary first:
 
-1. ```bash
-   make install CODESIGN_IDENTITY="Developer ID Application: <your name> (<team>)"
-   ```
-2. ```bash
-   cp deploy/com.teslamint.cogvault.ingest.plist ~/Library/LaunchAgents/
-   ```
+```bash
+make install CODESIGN_IDENTITY="Apple Development: <account> (<team>)"
+```
 
-   Edit the copied template's binary and home-directory placeholders for this
-   machine, then load it:
+Copy and load the scheduled ingest job:
 
-   ```bash
-   launchctl load ~/Library/LaunchAgents/com.teslamint.cogvault.ingest.plist
-   ```
-3. ```bash
-   launchctl kickstart -k gui/$(id -u)/com.teslamint.cogvault.ingest
-   ```
-4. Answer each consent prompt once.
+```bash
+cp deploy/com.teslamint.cogvault.ingest.plist ~/Library/LaunchAgents/
+```
 
-Step 3 must be a `kickstart`, not a manual `cogvault ingest` in a terminal:
+Edit the copied template's binary and home-directory placeholders for this
+machine, then load it:
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.teslamint.cogvault.ingest.plist
+```
+
+Before starting a complete ingest, verify the configured filesystem operations
+under launchd. The script requires an absolute, regular, executable, signed
+binary. It uses the installed binary directly, not a copy.
+
+```bash
+COGVAULT_BIN="$HOME/bin/cogvault" \
+COGVAULT_CONFIG="$HOME/.config/cogvault/config.yaml" \
+scripts/check-scheduled-access.sh
+```
+
+The script creates a temporary label named
+`com.teslamint.cogvault.access-check.<uid>.<random>.<random>`. It launches the
+same sealed binary twice. Observe both launches. Approve only a prompt that
+names a configured path. Record and stop on an unexpected Documents, Pictures,
+network-volume, or AppData prompt. The second launch should not show another prompt for the same checked operation.
+This observation is evidence about those two runs, not proof of TCC persistence.
+
+Each run probes `wiki_dir`, the `db_path` parent, and configured source roots.
+An iCloud File Provider path can resolve to local storage. A configured network
+path is checked as configured; the script does not discover mounted shares.
+
+On success, the script unloads the temporary job and removes its private files.
+On failure, it unloads the job and retains the 0600 plist and logs. It prints
+`retained access-check artifacts: <dir>` and
+`delete after inspection: rm -rf '<dir>'`. If unload fails, it also prints
+`recover job: launchctl bootout 'gui/<uid>/<label>'`.
+
+Passing twice does not prove that a complete ingest will run without prompts.
+It does not prove access to unconfigured Documents, Pictures, Photos Library,
+or network shares. It does not prove that macOS stored a TCC decision.
+
+After the access check, start the real scheduled job:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.teslamint.cogvault.ingest
+```
+
+This test must use launchd, not a manual `cogvault ingest` in a terminal:
 macOS attributes a terminal-spawned process to the terminal, so a manual run
-grants the terminal rather than cogvault and the scheduled job keeps prompting.
-
-A folder prompt covers reads of that one source directory. The observed "data
-from other apps" prompt creates a `kTCCServiceSystemPolicyAppData` row for
-cogvault. The exact access that triggers it remains unmeasured. **Unresolved
-(Open Decision 2):** whether one Full Disk Access grant supersedes these
-individual prompts must be verified on the maintainer's machine.
+tests the terminal process context instead of the scheduled process context.
 
 - **Auth**: `claude` must resolve auth non-interactively under launchd (it does
   when subscription auth is in the login keychain and the GUI session is active).
@@ -190,20 +218,6 @@ not found" errors under the template's minimal PATH — they don't affect ingest
 exit code or result. Extend PATH with the node directory in the plist if the
 noise bothers you (see O1 spike finding 2 in
 [docs/research/o1-headless-pdf-verification.md](docs/research/o1-headless-pdf-verification.md)).
-
-#### Removing stale grants
-
-The same binary path can retain TCC grant rows bound to earlier code
-requirements. Inspect them before changing anything:
-
-```bash
-sqlite3 "$HOME/Library/Application Support/com.apple.TCC/TCC.db" \
-  "select service, length(csreq), hex(csreq) from access where client like '%cogvault%';"
-```
-
-`tccutil reset <service>` clears that service for every application on the
-machine, not only cogvault. Use System Settings' per-application view when you
-need the narrower instrument.
 
 `~/bin/cogvault` also backs the `com.teslamint.cogvault` `serve` job. A running
 `serve` process keeps using the pre-install image, so restart that job after an

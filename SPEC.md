@@ -623,10 +623,10 @@ page leaves no trace at all.
 Every command takes `--config <path>` (default `~/.config/cogvault/config.yaml`).
 launchd invokes `cogvault ingest --config <path>` explicitly (no useful cwd).
 
-Every command except `fetch` and `status` opens the index and runs a forced
-consistency check first (§2.3). A check error warns on stderr and does not stop
-the command. `fetch` reads the config only; it never opens the index or the
-wiki. `status` loads the config and the ingest ledger only.
+Every command except `fetch`, `status`, and `access-check` opens the index and
+runs a forced consistency check first (§2.3). A check error warns on stderr and
+does not stop the command. `fetch` reads the config only; it never opens the
+index or the wiki. `status` loads the config and the ingest ledger only.
 
 ### 9.1 init (two-step)
 
@@ -912,6 +912,34 @@ If the ledger database does not exist, the command returns the clean empty
 output and does not create the database. For an existing database, it opens
 the ledger and may run its idempotent schema DDL. The command does not open the
 index. It does not open wiki storage or acquire the ingest lock.
+
+### 9.14 access-check
+
+```
+cogvault access-check [--config <path>]
+```
+
+The command loads and validates only the selected config. Positional arguments
+are rejected. It does not bootstrap the database, wiki schema, index, Git, LLM,
+notification, or ingest pipeline.
+
+For `wiki_dir` and the parent directory of `db_path`, the command creates a
+unique sentinel file. It writes, closes, reads, compares, and removes that file.
+Each successful probe prints `passed: <name>: <path>`.
+
+For each configured source, the command lists only its top-level entries. It
+selects regular files that match `sources[].types` and `max_file_size_mb`.
+It opens each selected file without following symlinks, verifies its descriptor
+identity, and reads at most one byte. An empty file passes. Each successful
+source probe prints `passed: source: <path>`.
+
+The command stops on the first failed probe and names the operation and path.
+A complete run prints `configured ingest access check passed` last.
+
+This result covers only the configured paths and operations above. It does not
+prove that macOS stored a TCC decision. It does not prove that a complete ingest
+will run without prompts. It does not prove access to unconfigured Documents,
+Pictures, Photos Library, or network shares.
 
 ---
 

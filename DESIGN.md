@@ -373,6 +373,17 @@ rather than race.
 not bootstrap storage, the index, or the ingest runner. Human output uses local
 timestamps. JSON preserves the stored canonical UTC timestamp.
 
+`access_check.go` loads the config without calling `bootstrap`. It probes only
+`wiki_dir`, the `db_path` parent, and configured `sources[]`. Write probes use a
+unique sentinel and require successful write, close, exact readback, and
+removal. Source probes list only top-level entries and apply the ingest type and
+size filters. Accepted files use `O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC`. A descriptor
+stat must still identify the regular file observed before open. Each accepted
+file receives one read of at most one byte. The private `accessCheckOps` value
+provides narrow failure seams for command tests; production uses OS operations.
+This command does not construct storage, index, LLM, notification, Git, ledger,
+or ingest components.
+
 `serve.go`: `serve` takes `--transport` (`stdio` default, `sse`, or `http`),
 `--addr` (default `localhost:8080`, `sse`/`http` only; `requireAddrHost`
 rejects an empty host part — `:8080` binds every interface and would build
@@ -660,7 +671,7 @@ resolveConfigPath → Load → bootstrap(store/index/adapter) → CheckConsisten
 | `httpauth/metadata.go` | Protected Resource Metadata handler |
 | `httpauth/oauth.go` | OAuthValidator (JWT validation via golang-jwt/jwt/v5) |
 | `httpauth/jwks.go` | JWKSCache (OIDC discovery + JWKS fetch, key decode) |
-| `cmd/cogvault/*` | cobra CLI: `--config`, init/search/serve/ingest/status |
+| `cmd/cogvault/*` | cobra CLI: `--config`, init/search/serve/ingest/status/access-check |
 | `Makefile` | build/install with `CODESIGN_IDENTITY` (default `-`, ad-hoc) and `CODESIGN_IDENTIFIER` (default `dev.tmint.cogvault`) applied to the build artifact and install destination; test, clean |
 | `schema/schema.go` + `default_schema.md` | `go:embed` default schema |
 
@@ -697,7 +708,7 @@ serialized with other wiki writes.
 | ingest | mock `llm.Adapter` + real temp dirs; ledger transitions; lock; ctx |
 | mcp | mcp-go test client; schema has no scope; tool annotation coverage |
 | httpauth | `httptest` stub JWKS server + locally generated RSA/EC keys; auth-mode, challenge-shape, and body/Origin/stream-bound unit tests |
-| cmd | in-process cobra; `--config` temp files; ingest via fake `claude` on PATH; `--transport http/sse` startup guards |
+| cmd | in-process cobra; `--config` temp files; access-check filesystem boundaries; ingest via fake `claude` on PATH; `--transport http/sse` startup guards |
 | integration (U9) | backlog/incremental/contention e2e |
 | race | `go test -race ./...` |
 
