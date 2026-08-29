@@ -2,7 +2,8 @@
 schema: plan/v1
 title: Scheduled configured-path access check
 type: feat
-status: approved
+status: done
+completed_by: 03236848f15850e12b7d57ad95fb7bd430340ce1
 date: 2026-08-29
 execution: code
 origin: docs/specs/2026-08-29-scheduled-access-check-design.md
