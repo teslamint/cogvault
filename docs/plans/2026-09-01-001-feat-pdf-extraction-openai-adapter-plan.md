@@ -2,10 +2,11 @@
 schema: plan/v1
 title: PDF extraction and OpenAI-compatible local adapter
 type: feat
-status: draft
+status: approved
 date: 2026-09-01
 execution: code
 origin: docs/specs/2026-09-01-pdf-extraction-openai-adapter-design.md
+body_seal: a5d2589ae0f6f99327dd0841a51ab93657432b8d3461cfbdb0e6f003583c81ad
 ---
 
 # Goal
