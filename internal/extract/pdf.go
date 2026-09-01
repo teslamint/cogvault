@@ -210,64 +210,36 @@ func (e *PDFExtractor) pageDimensions(ctx context.Context, path string, page int
 }
 
 func (e *PDFExtractor) render(ctx context.Context, path string, page int, imagePath string) error {
-	cmd := e.commands.CommandContext(ctx, "pdftoppm", "-f", strconv.Itoa(page), "-l", strconv.Itoa(page), "-r", "200", "-png", path, "-")
-	out, err := cmd.StdoutPipe()
-	if err != nil {
-		return transient(err)
-	}
+	// pdftoppm's stdout form (`-png <file> -`) writes nothing on some Poppler
+	// builds (verified empty on Poppler 26.08.0), so render to an owned file
+	// with `-singlefile`, which writes exactly <prefix>.png. The pixel
+	// preflight in ocr() already rejects pages above maxPixels before we get
+	// here; we additionally reject a rendered file above maxImageBytes.
+	prefix := strings.TrimSuffix(imagePath, ".png")
+	cmd := e.commands.CommandContext(ctx, "pdftoppm",
+		"-f", strconv.Itoa(page), "-l", strconv.Itoa(page),
+		"-r", "200", "-png", "-singlefile", path, prefix)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-	if err := cmd.Start(); err != nil {
-		return transient(err)
-	}
-	f, err := os.OpenFile(imagePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
-	if err != nil {
-		cmd.Process.Kill()
-		cmd.Wait()
-		return transient(err)
-	}
-	cw := &cappedWriter{w: f, limit: maxImageBytes}
-	_, copyErr := io.Copy(cw, out)
-	closeErr := f.Close()
-	if copyErr != nil || cw.overflow {
-		cmd.Process.Kill()
-		cmd.Wait()
-		os.Remove(imagePath)
-		return fmt.Errorf("rendered PDF page exceeds image limit")
-	}
-	if closeErr != nil {
-		cmd.Process.Kill()
-		cmd.Wait()
-		os.Remove(imagePath)
-		return transient(closeErr)
-	}
-	if err := classifyProcess(ctx, cmd.Wait(), stderr.String(), "pdftoppm"); err != nil {
+	runErr := cmd.Run()
+	if err := classifyProcess(ctx, runErr, stderr.String(), "pdftoppm"); err != nil {
 		os.Remove(imagePath)
 		return err
 	}
+	info, statErr := os.Stat(imagePath)
+	if statErr != nil {
+		os.Remove(imagePath)
+		return transient(statErr)
+	}
+	if info.Size() > maxImageBytes {
+		os.Remove(imagePath)
+		return fmt.Errorf("rendered PDF page exceeds image limit")
+	}
+	if info.Size() == 0 {
+		os.Remove(imagePath)
+		return fmt.Errorf("pdftoppm produced no image for page %d", page)
+	}
 	return nil
-}
-
-type cappedWriter struct {
-	w        io.Writer
-	limit    int64
-	n        int64
-	overflow bool
-}
-
-func (w *cappedWriter) Write(p []byte) (int, error) {
-	remain := w.limit - w.n
-	if remain <= 0 {
-		w.overflow = true
-		return len(p), nil
-	}
-	if int64(len(p)) > remain {
-		p = p[:remain]
-		w.overflow = true
-	}
-	n, err := w.w.Write(p)
-	w.n += int64(n)
-	return len(p), err
 }
 
 func (e *PDFExtractor) run(ctx context.Context, name string, args ...string) (string, error) {

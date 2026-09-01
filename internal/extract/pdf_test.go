@@ -128,6 +128,16 @@ func TestExtractLetterlessTextFallsBackToOCR(t *testing.T) {
 	}
 }
 
+// pdftoppmCmd emulates `pdftoppm ... -singlefile <path> <prefix>` by writing a
+// nonzero PNG to "<prefix>.png". The real render() stats that owned file
+// instead of reading pdftoppm's stdout, which is empty on some Poppler builds.
+func pdftoppmCmd(args []string) *exec.Cmd {
+	prefix := args[len(args)-1]
+	cmd := exec.Command("sh", "-c", `printf 'PNGDATA' > "$OUT.png"`)
+	cmd.Env = append(os.Environ(), "OUT="+prefix)
+	return cmd
+}
+
 func ocrFixture(name string, args []string) *exec.Cmd {
 	switch name {
 	case "pdfinfo":
@@ -136,7 +146,7 @@ func ocrFixture(name string, args []string) *exec.Cmd {
 		}
 		return envCmd("Pages: 2", name, args...)
 	case "pdftoppm":
-		return envCmd("PNGDATA", name, args...)
+		return pdftoppmCmd(args)
 	case "tesseract":
 		page := 1
 		for _, a := range args {
@@ -183,7 +193,7 @@ func TestExtractAggregateOCRCapWhileTesseractStreams(t *testing.T) {
 			}
 			return exec.Command("sh", "-c", "printf '%s' 'Pages: 2'")
 		case "pdftoppm":
-			return exec.Command("sh", "-c", "printf 'PNG'")
+			return pdftoppmCmd(args)
 		case "tesseract":
 			tesseractCalls++
 			return exec.Command("sh", "-c", "printf 'ok '; dd if=/dev/zero bs=1m count=8 2>/dev/null | tr '\\0' x")
@@ -270,7 +280,9 @@ func TestExtractLaterOversizePage(t *testing.T) {
 				return exec.Command("sh", "-c", "printf '%s' 'Page size: 612 x 792 pts (letter)'")
 			}
 			return exec.Command("sh", "-c", "printf '%s' 'Pages: 2'")
-		case "pdftoppm", "tesseract":
+		case "pdftoppm":
+			return pdftoppmCmd(args)
+		case "tesseract":
 			return exec.Command("sh", "-c", "printf '%s' 'ok "+strings.Repeat("x", 90)+"'")
 		}
 		return exec.Command("sh", "-c", "true")
@@ -304,7 +316,7 @@ func TestExtractAggregateOCRCap(t *testing.T) {
 			}
 			return exec.Command("sh", "-c", "printf '%s' 'Pages: 2'")
 		case "pdftoppm":
-			return exec.Command("sh", "-c", "printf 'PNG'")
+			return pdftoppmCmd(args)
 		case "tesseract":
 			return exec.Command("sh", "-c", fmt.Sprintf("printf %%s %q", pageText))
 		}
@@ -342,7 +354,7 @@ func TestExtractUnusableOCRFailsPermanent(t *testing.T) {
 			}
 			return exec.Command("sh", "-c", "printf '%s' 'Pages: 1'")
 		case "pdftoppm":
-			return exec.Command("sh", "-c", "printf 'PNG'")
+			return pdftoppmCmd(args)
 		case "tesseract":
 			return exec.Command("sh", "-c", "printf ''")
 		}
@@ -391,7 +403,7 @@ func TestExtractParsesRangedPdfinfoDimensions(t *testing.T) {
 			}
 			return envCmd("Pages:           1", name, args...)
 		case "pdftoppm":
-			return exec.Command("sh", "-c", "printf 'PNG'")
+			return pdftoppmCmd(args)
 		case "tesseract":
 			return envCmd(ocrText, name, args...)
 		}
@@ -405,6 +417,50 @@ func TestExtractParsesRangedPdfinfoDimensions(t *testing.T) {
 	}
 	if out != ocrText {
 		t.Fatalf("OCR text mismatch: %q", short(out))
+	}
+}
+
+// TestExtractRendersToSinglefileNotStdout pins the render contract against a
+// Poppler build whose `pdftoppm -png <path> -` stdout form writes nothing:
+// render() must pass -singlefile and read the owned file, and an empty render
+// must fail rather than hand tesseract a truncated image.
+func TestExtractRendersToSinglefileNotStdout(t *testing.T) {
+	var pdftoppmArgs []string
+	stdoutOnly := Commands{CommandContext: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		switch name {
+		case "pdftotext":
+			return exec.Command("sh", "-c", "printf ''")
+		case "pdfinfo":
+			if len(args) > 0 && args[0] == "-f" {
+				return envCmd("Page 1 size: 612 x 792 pts", name, args...)
+			}
+			return envCmd("Pages: 1", name, args...)
+		case "pdftoppm":
+			pdftoppmArgs = append([]string{}, args...)
+			// Emulate the broken host: emit bytes to stdout, write no file.
+			return exec.Command("sh", "-c", "printf 'PNGDATA'")
+		case "tesseract":
+			return envCmd(strings.Repeat("a", 90), name, args...)
+		}
+		t.Fatalf("unexpected command %q", name)
+		return nil
+	}}
+	e := NewPDFExtractor(10000, stdoutOnly)
+	_, err := e.Extract(context.Background(), "f.pdf")
+	if err == nil {
+		t.Fatalf("an empty render must fail, not reach OCR with a missing image")
+	}
+	sawSinglefile := false
+	for _, a := range pdftoppmArgs {
+		if a == "-singlefile" {
+			sawSinglefile = true
+		}
+		if a == "-" {
+			t.Fatalf("render must not use pdftoppm stdout mode; argv=%v", pdftoppmArgs)
+		}
+	}
+	if !sawSinglefile {
+		t.Fatalf("render must pass -singlefile; argv=%v", pdftoppmArgs)
 	}
 }
 
