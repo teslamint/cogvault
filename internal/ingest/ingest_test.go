@@ -26,9 +26,10 @@ import (
 var errPermanent = errors.New("permanent digest failure")
 
 type mockLLM struct {
-	mu       sync.Mutex
-	requests []llm.DigestRequest
-	fn       func(req llm.DigestRequest) (*llm.DigestResult, error)
+	mu        sync.Mutex
+	requests  []llm.DigestRequest
+	fn        func(req llm.DigestRequest) (*llm.DigestResult, error)
+	inputMode llm.InputMode
 }
 
 func (m *mockLLM) Digest(_ context.Context, req llm.DigestRequest) (*llm.DigestResult, error) {
@@ -37,6 +38,8 @@ func (m *mockLLM) Digest(_ context.Context, req llm.DigestRequest) (*llm.DigestR
 	m.mu.Unlock()
 	return m.fn(req)
 }
+
+func (m *mockLLM) InputMode() llm.InputMode { return m.inputMode }
 
 func (m *mockLLM) Name() string { return "mock" }
 
