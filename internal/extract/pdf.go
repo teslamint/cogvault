@@ -185,18 +185,26 @@ func (e *PDFExtractor) pageDimensions(ctx context.Context, path string, page int
 	}
 	for _, line := range strings.Split(output, "\n") {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "Page size:") {
-			fields := strings.Fields(strings.TrimSpace(strings.TrimPrefix(line, "Page size:")))
-			if len(fields) < 3 {
-				return 0, 0, fmt.Errorf("invalid PDF page dimensions")
-			}
-			w, x := strconv.ParseFloat(fields[0], 64)
-			h, y := strconv.ParseFloat(fields[2], 64)
-			if x != nil || y != nil {
-				return 0, 0, fmt.Errorf("invalid PDF page dimensions")
-			}
-			return w, h, nil
+		// pdfinfo emits "Page size: W x H pts" for a single-page probe and
+		// "Page N size: W x H pts" for a -f/-l range probe. Match both by
+		// splitting on the "size:" label rather than a fixed prefix.
+		if !strings.HasPrefix(line, "Page") {
+			continue
 		}
+		idx := strings.Index(line, "size:")
+		if idx < 0 {
+			continue
+		}
+		fields := strings.Fields(strings.TrimSpace(line[idx+len("size:"):]))
+		if len(fields) < 3 {
+			return 0, 0, fmt.Errorf("invalid PDF page dimensions")
+		}
+		w, x := strconv.ParseFloat(fields[0], 64)
+		h, y := strconv.ParseFloat(fields[2], 64)
+		if x != nil || y != nil {
+			return 0, 0, fmt.Errorf("invalid PDF page dimensions")
+		}
+		return w, h, nil
 	}
 	return 0, 0, fmt.Errorf("pdfinfo did not report page dimensions")
 }

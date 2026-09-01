@@ -375,6 +375,39 @@ func TestExtractCleansTempDir(t *testing.T) {
 	}
 }
 
+// TestExtractParsesRangedPdfinfoDimensions pins the real Poppler output shape:
+// `pdfinfo -f N -l N` emits "Page N size: W x H pts", not "Page size: ...".
+// A parser matching only the whole-document "Page size:" prefix fails every
+// OCR fallback with "pdfinfo did not report page dimensions".
+func TestExtractParsesRangedPdfinfoDimensions(t *testing.T) {
+	ocrText := strings.Repeat("가나다라마바사아", 20)
+	cmds := Commands{CommandContext: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		switch name {
+		case "pdftotext":
+			return exec.Command("sh", "-c", "printf ''")
+		case "pdfinfo":
+			if len(args) > 0 && args[0] == "-f" {
+				return envCmd("Page    1 size:  612 x 792 pts (letter)", name, args...)
+			}
+			return envCmd("Pages:           1", name, args...)
+		case "pdftoppm":
+			return exec.Command("sh", "-c", "printf 'PNG'")
+		case "tesseract":
+			return envCmd(ocrText, name, args...)
+		}
+		t.Fatalf("unexpected command %q", name)
+		return nil
+	}}
+	e := NewPDFExtractor(10000, cmds)
+	out, err := e.Extract(context.Background(), "f.pdf")
+	if err != nil {
+		t.Fatalf("ranged pdfinfo dimensions should parse and OCR should succeed, got %v", err)
+	}
+	if out != ocrText {
+		t.Fatalf("OCR text mismatch: %q", short(out))
+	}
+}
+
 func short(s string) string {
 	if len(s) > 120 {
 		return s[:120] + "..."
