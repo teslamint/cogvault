@@ -257,15 +257,17 @@ func TestAttentionRowsEmptyLedger(t *testing.T) {
 	}
 }
 
-func TestAttentionRowsOrdersVariableRFC3339NanoChronologically(t *testing.T) {
+func TestAttentionRowsOrdersByTimestampRegardlessOfInsertionOrder(t *testing.T) {
 	l := newTestLedger(t)
 	const model = "current-model"
 
+	// Insert the later timestamp first per source_path to verify the query
+	// uses normalized timestamp ordering, not insertion (rowid) order.
 	seed := []ledgerRow{
-		{sourcePath: "/src/fractional-resolved.md", contentHash: "old", digestedAt: "2026-08-25T00:00:00.1Z", status: "failed", attempts: 3, llmModel: model},
 		{sourcePath: "/src/fractional-resolved.md", contentHash: "new", digestedAt: "2026-08-25T00:00:00.11Z", status: "success", llmModel: model},
-		{sourcePath: "/src/fractional-attention.md", contentHash: "old", digestedAt: "2026-08-25T00:00:01.1Z", status: "success", llmModel: model},
+		{sourcePath: "/src/fractional-resolved.md", contentHash: "old", digestedAt: "2026-08-25T00:00:00.1Z", status: "failed", attempts: 3, llmModel: model},
 		{sourcePath: "/src/fractional-attention.md", contentHash: "new", digestedAt: "2026-08-25T00:00:01.11Z", status: "failed", attempts: 3, llmModel: model},
+		{sourcePath: "/src/fractional-attention.md", contentHash: "old", digestedAt: "2026-08-25T00:00:01.1Z", status: "success", llmModel: model},
 	}
 	for _, row := range seed {
 		if err := l.upsert(row); err != nil {
@@ -277,11 +279,8 @@ func TestAttentionRowsOrdersVariableRFC3339NanoChronologically(t *testing.T) {
 	if err != nil {
 		t.Fatalf("attentionRows: %v", err)
 	}
-	if len(got) != 1 {
-		t.Fatalf("rows = %+v, want only the chronologically newer failure", got)
-	}
-	if got[0].sourcePath != "/src/fractional-attention.md" || got[0].contentHash != "new" {
-		t.Fatalf("row = %+v, want the chronologically newer failure", got[0])
+	if len(got) != 1 || got[0].sourcePath != "/src/fractional-attention.md" || got[0].contentHash != "new" {
+		t.Fatalf("rows = %+v, want chronologically latest failed row only", got)
 	}
 }
 
