@@ -23,6 +23,10 @@ const (
 	maxPages      = 50
 	maxPixels     = 16 * 1000 * 1000
 	maxImageBytes = 32 * 1024 * 1024
+
+	// ExtractionContractVersion identifies the complete-only text extraction
+	// behavior that contributes to text-mode digest identity.
+	ExtractionContractVersion = "pdf-text-v1"
 )
 
 type Commands struct {

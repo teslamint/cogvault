@@ -21,6 +21,7 @@ import (
 
 	"github.com/teslamint/cogvault/internal/config"
 	cverr "github.com/teslamint/cogvault/internal/errors"
+	"github.com/teslamint/cogvault/internal/extract"
 	"github.com/teslamint/cogvault/internal/index"
 	"github.com/teslamint/cogvault/internal/llm"
 	"github.com/teslamint/cogvault/internal/schema"
@@ -60,12 +61,13 @@ type RunOptions struct {
 }
 
 type Runner struct {
-	cfg    *config.Config
-	store  storage.Storage
-	idx    index.Index
-	llm    llm.Adapter
-	ledger *ledger
-	dbPath string
+	cfg       *config.Config
+	store     storage.Storage
+	idx       index.Index
+	llm       llm.Adapter
+	extractor TextExtractor
+	ledger    *ledger
+	dbPath    string
 
 	// injectable for tests; defaults set in New.
 	settleWindow time.Duration
@@ -73,6 +75,11 @@ type Runner struct {
 	now          func() time.Time
 	readDir      func(string) ([]os.DirEntry, error)
 	notifyFunc   func(title, body string) error
+	withTimeout  func(context.Context, time.Duration) (context.Context, context.CancelFunc)
+}
+
+type TextExtractor interface {
+	Extract(context.Context, string) (string, error)
 }
 
 func New(cfg *config.Config, store storage.Storage, idx index.Index, llmAdapter llm.Adapter, dbPath string) (*Runner, error) {
@@ -84,18 +91,26 @@ func New(cfg *config.Config, store storage.Storage, idx index.Index, llmAdapter 
 		return nil, err
 	}
 	return &Runner{
-		cfg:          cfg,
-		store:        store,
-		idx:          idx,
-		llm:          llmAdapter,
-		ledger:       l,
-		dbPath:       dbPath,
-		settleWindow: settleWindow,
-		maxFileSize:  int64(cfg.MaxFileSizeMB) << 20,
-		now:          time.Now,
-		readDir:      os.ReadDir,
-		notifyFunc:   defaultNotify,
+		cfg: cfg, store: store, idx: idx, llm: llmAdapter,
+		extractor: extract.NewPDFExtractor(cfg.LLM.MaxInputChars, extract.Commands{}),
+		ledger:    l, dbPath: dbPath, settleWindow: settleWindow,
+		maxFileSize: int64(cfg.MaxFileSizeMB) << 20, now: time.Now,
+		readDir: os.ReadDir, notifyFunc: defaultNotify, withTimeout: context.WithTimeout,
 	}, nil
+}
+
+// DigestProfile returns the retry identity for a digest configuration.
+// ExtractionContractVersion is included because text-mode provider input is
+// produced by the local extractor rather than sent as a raw PDF.
+func DigestProfile(cfg *config.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	return fmt.Sprintf("%s|%s|%s|%d|%s", cfg.LLM.Backend, cfg.LLM.Model, strings.TrimRight(cfg.LLM.BaseURL, "/"), cfg.LLM.MaxInputChars, extract.ExtractionContractVersion)
+}
+
+func (r *Runner) digestProfile() string {
+	return DigestProfile(r.cfg)
 }
 
 func (r *Runner) Close() error {
@@ -133,23 +148,20 @@ func (r *Runner) Run(ctx context.Context, opts RunOptions) (*Report, error) {
 		return nil, err
 	}
 	defer unlock()
-
 	report := &Report{}
 	if err := ctx.Err(); err != nil {
 		return report, fmt.Errorf("ingest.Run: %w", err)
 	}
-
 	if err := r.sweepOrphans(ctx, report, opts.DryRun); err != nil {
 		return report, fmt.Errorf("ingest.Run: %w", err)
 	}
-
 	schemaText, err := r.readSchema()
 	if err != nil {
 		return report, err
 	}
-
 	digested := 0
 	entries := r.scan(report)
+	currentProfile := r.digestProfile()
 	for i, entry := range entries {
 		if err := ctx.Err(); err != nil {
 			return report, fmt.Errorf("ingest.Run: %w", err)
@@ -158,7 +170,6 @@ func (r *Runner) Run(ctx context.Context, opts RunOptions) (*Report, error) {
 			report.NotExamined = len(entries) - i
 			break
 		}
-
 		hash := entry.hash
 		prev, found, err := r.ledger.lookup(entry.absPath, hash)
 		if err != nil {
@@ -176,24 +187,19 @@ func (r *Runner) Run(ctx context.Context, opts RunOptions) (*Report, error) {
 				report.Unchanged++
 				continue
 			case "refused":
-				if prev.llmModel == r.cfg.LLM.Model {
+				if prev.digestProfile == currentProfile || (prev.digestProfile == "" && prev.llmModel == r.cfg.LLM.Model) {
 					report.Skipped++
-					report.PerFile = append(report.PerFile, FileResult{
-						Path: entry.absPath, Action: actionRefused, Error: prev.lastError,
-					})
+					report.PerFile = append(report.PerFile, FileResult{Path: entry.absPath, Action: actionRefused, Error: prev.lastError})
 					continue
 				}
 			case "failed":
-				if prev.attempts >= maxAttempts && prev.llmModel == r.cfg.LLM.Model {
+				if prev.attempts >= maxAttempts && (prev.digestProfile == currentProfile || (prev.digestProfile == "" && prev.llmModel == r.cfg.LLM.Model)) {
 					report.Skipped++
-					report.PerFile = append(report.PerFile, FileResult{
-						Path: entry.absPath, Action: actionExhausted, Error: prev.lastError,
-					})
+					report.PerFile = append(report.PerFile, FileResult{Path: entry.absPath, Action: actionExhausted, Error: prev.lastError})
 					continue
 				}
 			}
 		}
-
 		digested++
 		if opts.DryRun {
 			report.Digested++
@@ -202,7 +208,6 @@ func (r *Runner) Run(ctx context.Context, opts RunOptions) (*Report, error) {
 		}
 		r.digestOne(ctx, entry, hash, schemaText, opts.Origin, prev, report)
 	}
-
 	if err := report.SumCheck(); err != nil {
 		report.SumMismatch = err.Error()
 	}
@@ -291,14 +296,28 @@ func (r *Runner) scan(report *Report) []scanEntry {
 	return entries
 }
 
-func (r *Runner) digestOne(ctx context.Context, entry scanEntry, hash, schemaText, origin string, prev *ledgerRow, report *Report) {
+func (r *Runner) digestOne(parent context.Context, entry scanEntry, hash, schemaText, origin string, prev *ledgerRow, report *Report) {
+	budget := 5 * time.Minute
+	if r.cfg.LLM.TimeoutSeconds > 0 {
+		budget = time.Duration(r.cfg.LLM.TimeoutSeconds) * time.Second
+	}
+	ctx, cancel := r.withTimeout(parent, budget)
+	defer cancel()
+	sourceText := ""
+	if r.llm.InputMode() == llm.TextInput {
+		var err error
+		sourceText, err = r.extractor.Extract(ctx, entry.absPath)
+		if err != nil {
+			class := classPermanent
+			if errors.Is(err, extract.ErrTransient) {
+				class = classTransient
+			}
+			r.recordFailure(entry, hash, origin, prev, report, "extract: "+err.Error(), class)
+			return
+		}
+	}
 	slug := slugFor(entry.absPath, hash)
-	res, err := r.llm.Digest(ctx, llm.DigestRequest{
-		SourcePath: entry.absPath,
-		SchemaText: schemaText,
-		PageSlug:   slug,
-		SourceExt:  filepath.Ext(entry.absPath),
-	})
+	res, err := r.llm.Digest(ctx, llm.DigestRequest{SourcePath: entry.absPath, SourceText: sourceText, SchemaText: schemaText, PageSlug: slug, SourceExt: filepath.Ext(entry.absPath)})
 	if err != nil {
 		class := classPermanent
 		if errors.Is(err, llm.ErrTransient) {
@@ -309,52 +328,32 @@ func (r *Runner) digestOne(ctx context.Context, entry scanEntry, hash, schemaTex
 		r.recordFailure(entry, hash, origin, prev, report, "digest: "+err.Error(), class)
 		return
 	}
-
 	fm, title, ok := parsePage(res.PageContent)
 	if !ok {
 		r.recordFailure(entry, hash, origin, prev, report, "validate: page missing frontmatter or title", classPermanent)
 		return
 	}
-
 	page, err := r.pagePath(slug, entry.absPath)
 	if err != nil {
 		r.recordFailure(entry, hash, origin, prev, report, "ledger: "+err.Error(), classInfra)
 		return
 	}
-
 	if err := r.store.Write(page, []byte(res.PageContent)); err != nil {
 		r.recordFailure(entry, hash, origin, prev, report, "write: "+err.Error(), classInfra)
 		return
 	}
-
-	// Index-fail after write leaves an orphan page; classInfra spares the
-	// attempt so the next run re-digests the same slug and overwrites.
 	if err := r.idx.Add(page, res.PageContent, buildMeta(fm, title)); err != nil {
 		r.recordFailure(entry, hash, origin, prev, report, "index: "+err.Error(), classInfra)
 		return
 	}
-
 	if err := r.ledger.supersedePrevSuccess(entry.absPath); err != nil {
 		r.recordFailure(entry, hash, origin, prev, report, "ledger: "+err.Error(), classInfra)
 		return
 	}
-	err = r.ledger.upsert(ledgerRow{
-		sourcePath:  entry.absPath,
-		contentHash: hash,
-		sourceDir:   entry.sourceDir,
-		digestedAt:  r.now().UTC().Format(time.RFC3339Nano),
-		wikiPage:    page,
-		status:      "success",
-		attempts:    0,
-		lastError:   "",
-		runOrigin:   origin,
-		llmModel:    r.cfg.LLM.Model,
-	})
-	if err != nil {
+	if err := r.ledger.upsert(ledgerRow{sourcePath: entry.absPath, contentHash: hash, sourceDir: entry.sourceDir, digestedAt: r.now().UTC().Format(time.RFC3339Nano), wikiPage: page, status: "success", runOrigin: origin, llmModel: r.cfg.LLM.Model, digestProfile: r.digestProfile()}); err != nil {
 		r.recordFailure(entry, hash, origin, prev, report, "ledger: "+err.Error(), classInfra)
 		return
 	}
-
 	report.Digested++
 	report.PerFile = append(report.PerFile, FileResult{Path: entry.absPath, Action: actionDigested})
 }
@@ -368,31 +367,16 @@ func (r *Runner) recordFailure(entry scanEntry, hash, origin string, prev *ledge
 	if class == classRefused {
 		status = "refused"
 	}
-	if err := r.ledger.upsert(ledgerRow{
-		sourcePath:  entry.absPath,
-		contentHash: hash,
-		sourceDir:   entry.sourceDir,
-		digestedAt:  r.now().UTC().Format(time.RFC3339Nano),
-		wikiPage:    "",
-		status:      status,
-		attempts:    attempts,
-		lastError:   msg,
-		runOrigin:   origin,
-		llmModel:    r.cfg.LLM.Model,
-	}); err != nil {
+	if err := r.ledger.upsert(ledgerRow{sourcePath: entry.absPath, contentHash: hash, sourceDir: entry.sourceDir, digestedAt: r.now().UTC().Format(time.RFC3339Nano), status: status, attempts: attempts, lastError: msg, runOrigin: origin, llmModel: r.cfg.LLM.Model, digestProfile: r.digestProfile()}); err != nil {
 		slog.Error("recordFailure: ledger upsert", "path", entry.absPath, "error", err)
 	}
-	wasAlreadyExhausted := prev != nil && prev.llmModel == r.cfg.LLM.Model && prev.attempts >= maxAttempts
-	if class == classPermanent && attempts >= maxAttempts && !wasAlreadyExhausted {
-		report.NewAttention = append(report.NewAttention, FileResult{
-			Path: entry.absPath, Action: actionFailed, Error: msg,
-		})
+	profile := r.digestProfile()
+	legacy := prev != nil && prev.digestProfile == "" && prev.llmModel == r.cfg.LLM.Model
+	if class == classPermanent && attempts >= maxAttempts && (prev == nil || (!legacy && (prev.digestProfile != profile || prev.attempts < maxAttempts)) || (legacy && prev.attempts < maxAttempts)) {
+		report.NewAttention = append(report.NewAttention, FileResult{Path: entry.absPath, Action: actionFailed, Error: msg})
 	}
-	wasAlreadyRefused := prev != nil && prev.status == "refused" && prev.llmModel == r.cfg.LLM.Model
-	if class == classRefused && !wasAlreadyRefused {
-		report.NewAttention = append(report.NewAttention, FileResult{
-			Path: entry.absPath, Action: actionRefused, Error: msg,
-		})
+	if class == classRefused && (prev == nil || (!legacy && (prev.status != "refused" || prev.digestProfile != profile))) {
+		report.NewAttention = append(report.NewAttention, FileResult{Path: entry.absPath, Action: actionRefused, Error: msg})
 	}
 	if class == classRefused {
 		report.Refused++

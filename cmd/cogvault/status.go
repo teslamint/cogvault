@@ -35,7 +35,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	rows, err := ingest.AttentionRows(cfg.DBPath, cfg.LLM.Model)
+	rows, err := ingest.AttentionRows(cfg.DBPath, cfg.LLM.Model, ingest.DigestProfile(cfg))
 	if err != nil {
 		return err
 	}

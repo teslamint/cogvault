@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"path/filepath"
 	"sort"
+	"sync"
 	"testing"
 )
 
@@ -281,5 +282,49 @@ func TestAttentionRowsOrdersVariableRFC3339NanoChronologically(t *testing.T) {
 	}
 	if got[0].sourcePath != "/src/fractional-attention.md" || got[0].contentHash != "new" {
 		t.Fatalf("row = %+v, want the chronologically newer failure", got[0])
+	}
+}
+
+func TestOpenLedgerConcurrentDigestProfileMigration(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy.db")
+	raw, err := sql.Open("sqlite", dsnWithPragmas(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = raw.Exec(`CREATE TABLE ingest_ledger (source_path TEXT, content_hash TEXT, source_dir TEXT, digested_at TEXT, wiki_page TEXT, status TEXT, attempts INTEGER, last_error TEXT, run_origin TEXT, llm_model TEXT NOT NULL DEFAULT '', PRIMARY KEY(source_path,content_hash))`); err != nil {
+		t.Fatal(err)
+	}
+	_ = raw.Close()
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			l, e := openLedger(dbPath)
+			if e == nil {
+				e = l.close()
+			}
+			errs <- e
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		if e != nil {
+			t.Fatal(e)
+		}
+	}
+	l, e := openLedger(dbPath)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer l.close()
+	var n int
+	if e = l.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('ingest_ledger') WHERE name='digest_profile'`).Scan(&n); e != nil {
+		t.Fatal(e)
+	}
+	if n != 1 {
+		t.Fatalf("digest_profile columns=%d", n)
 	}
 }
