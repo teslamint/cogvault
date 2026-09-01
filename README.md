@@ -48,7 +48,15 @@ The vault concept from v1 is gone: `wiki_dir` is the single storage root, and
 
 ```bash
 make build                         # build + adhoc codesign (default, no certificate needed)
-make install CODESIGN_IDENTITY="<identity from security find-identity -v -p codesigning>"
+./scripts/install-signed.sh        # Developer ID install + verification + launchd restart
+```
+
+The signed installer automatically selects the only valid Developer ID
+Application identity. If the keychain contains more than one, pass the full
+identity as its single argument:
+
+```bash
+./scripts/install-signed.sh "Developer ID Application: <your name> (<team>)"
 ```
 
 The default `-` identity produces an ad-hoc signature that changes on rebuild.
@@ -175,7 +183,7 @@ explicit PATH containing `/opt/homebrew/bin` and the Claude CLI directory.
 Install one signed binary first:
 
 ```bash
-make install CODESIGN_IDENTITY="Apple Development: <account> (<team>)"
+./scripts/install-signed.sh
 ```
 
 Copy and load the scheduled ingest job:
