@@ -100,6 +100,19 @@ func (r *Runner) Close() error {
 	return r.ledger.close()
 }
 
+// DigestProfile returns the retry identity for a digest configuration.
+// ExtractionContractVersion is included because text-mode provider input is
+// produced by the local extractor rather than sent as a raw PDF.
+func DigestProfile(cfg *config.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	return fmt.Sprintf("%s|%s|%s|%d|%s", cfg.LLM.Backend, cfg.LLM.Model, strings.TrimRight(cfg.LLM.BaseURL, "/"), cfg.LLM.MaxInputChars, extract.ExtractionContractVersion)
+}
+
+func (r *Runner) digestProfile() string {
+	return DigestProfile(r.cfg)
+}
 func (r *Runner) Notify(report *Report) {
 	if report == nil || len(report.NewAttention) == 0 {
 		return
