@@ -1,6 +1,6 @@
 ---
 title: PDF text extraction and OpenAI-compatible local provider adapter
-status: draft
+status: approved
 date: 2026-09-01
 schema: spec/v1
 ---
