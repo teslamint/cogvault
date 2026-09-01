@@ -254,9 +254,13 @@ A future local backend implements the same interface without touching `ingest`.
 
 `PDFExtractor` owns bounded Poppler/Tesseract subprocesses. It first runs
 `pdftotext`; usable complete text skips OCR. Otherwise it preflights page count
-and dimensions with `pdfinfo`, renders one page at a time with capped
-`pdftoppm` output, and OCRs each temporary image with `tesseract -l eng+kor`.
-The aggregate collector enforces `max_input_chars` and preserves page order.
+and per-page dimensions with `pdfinfo` (parsing both the whole-document
+`Page size:` and ranged `Page N size:` forms), rejects pages over the pixel
+cap, renders one page at a time to an owned temporary file with `pdftoppm
+-singlefile` (its `-png … -` stdout form emits nothing on some Poppler
+builds), enforces a rendered-image byte cap, and OCRs each image with
+`tesseract -l eng+kor`. The aggregate collector enforces `max_input_chars`
+and preserves page order.
 `ValidatePrerequisites` exposes the command and language names checked by the
 CLI before the OpenAI adapter or ingest ledger is constructed.
 
