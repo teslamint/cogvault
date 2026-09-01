@@ -29,6 +29,26 @@ const (
 	ExtractionContractVersion = "pdf-text-v1"
 )
 
+// RequiredTools lists the executables and Tesseract language data required by
+// the OpenAI PDF ingestion path.
+var RequiredTools = []string{"pdftotext", "pdfinfo", "pdftoppm", "tesseract", "eng", "kor"}
+
+// ValidatePrerequisites checks that every required executable or language
+// resource is available. lookup is injected by command tests; production
+// callers should provide a lookup that handles both executable names and
+// language data names.
+func ValidatePrerequisites(lookup func(string) (string, error)) error {
+	if lookup == nil {
+		return fmt.Errorf("validate PDF prerequisites: nil lookup")
+	}
+	for _, name := range RequiredTools {
+		if _, err := lookup(name); err != nil {
+			return fmt.Errorf("PDF ingestion prerequisite %q not found: %w", name, err)
+		}
+	}
+	return nil
+}
+
 type Commands struct {
 	CommandContext func(context.Context, string, ...string) *exec.Cmd
 }

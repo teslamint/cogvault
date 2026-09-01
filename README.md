@@ -17,10 +17,13 @@ Three stages — Phase 1 builds the middle one:
    sheet, list that folder in `sources[]`, and the scheduled run digests
    whatever lands there. cogvault has no phone app and needs none.
 2. **Digest** — `cogvault ingest` scans the configured sources, detects
-   unprocessed files by content hash, digests each PDF through the Claude Code CLI
-   into a wiki source page (summary, key points, provenance frontmatter), indexes
-   it (SQLite FTS5), and records the outcome in a processing ledger. A
-   launchd-scheduled run makes this zero-touch.
+   unprocessed files by content hash, and routes them through the configured
+   LLM backend. Claude Code keeps path-mode ingestion; the local `openai`
+   backend first extracts complete PDF text with Poppler and bounded
+   English/Korean Tesseract OCR, then sends that text to a ready loopback
+   OpenAI-compatible endpoint. Successful pages are indexed (SQLite FTS5) and
+   outcomes are recorded in a processing ledger. A launchd-scheduled run makes
+   this zero-touch.
 3. **Consume** — `cogvault search` and the `wiki_search` MCP tool query the
    digested wiki. Because the wiki can live under iCloud Drive, source pages are
    also readable on a phone in the Files app or any Markdown viewer — no Obsidian
@@ -33,9 +36,11 @@ The vault concept from v1 is gone: `wiki_dir` is the single storage root, and
 ## Requirements
 
 - macOS (the launchd automation is macOS-specific; the CLI itself is portable).
-- The [Claude Code](https://claude.com/claude-code) CLI (`claude`), installed and
-  authenticated non-interactively (subscription auth via the login keychain).
+- The [Claude Code](https://claude.com/claude-code) CLI (`claude`) when using
+  `claudecode`, installed and authenticated non-interactively.
 - Go 1.26.1+ to build.
+- For the local `openai` backend: Poppler (`pdftotext`, `pdfinfo`, `pdftoppm`),
+  Tesseract, and English/Korean language data (`eng`, `kor`).
 
 ## Setup
 
@@ -82,6 +87,19 @@ sources:
     types: [pdf]        # Phase 1 digests PDFs only; the filter skips e.g. .webp
 llm:
   backend: claudecode
+```
+
+For a local OpenAI-compatible provider, configure a loopback API root and a
+ready model. Cogvault validates Poppler, Tesseract, and `eng`/`kor`, then
+checks `<base_url>/models` before constructing the adapter; failures occur
+before ledger construction.
+
+```yaml
+llm:
+  backend: openai
+  model: qwen3.8:27b
+  base_url: http://127.0.0.1:11434/v1
+  max_input_chars: 1000000
 ```
 
 Notes on paths: a leading `~/` is expanded; every other path must be absolute; a
@@ -143,14 +161,18 @@ before exposing either transport to the internet.
 
 ### 5. Schedule zero-touch ingest (launchd)
 
+The default interval is 3600s (1 hour). The local `openai` backend requires
+Homebrew Poppler and Tesseract. Install Korean language data alongside the
+English data before scheduling PDF ingestion:
+
 ```bash
-# Create the log directory (launchd will not create it for you):
-mkdir -p ~/Library/Logs/cogvault
+brew install poppler tesseract tesseract-lang
+tesseract --list-langs             # must include eng and kor
 ```
 
-The default interval is 3600s (1 hour). launchd's PATH excludes `~/.local/bin`,
-so the template sets an explicit PATH that includes the `claude` CLI directory
-(verified by the O1 spike). Install one signed binary first:
+launchd's PATH excludes Homebrew and `~/.local/bin`, so the template sets an
+explicit PATH containing `/opt/homebrew/bin` and the Claude CLI directory.
+Install one signed binary first:
 
 ```bash
 make install CODESIGN_IDENTITY="Apple Development: <account> (<team>)"
@@ -163,10 +185,11 @@ cp deploy/com.teslamint.cogvault.ingest.plist ~/Library/LaunchAgents/
 ```
 
 Edit the copied template's binary and home-directory placeholders for this
-machine, then load it:
+machine. Load it initially, or reload it after edits:
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.teslamint.cogvault.ingest.plist
+launchctl bootout gui/$(id -u)/com.teslamint.cogvault.ingest 2>/dev/null || true
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.teslamint.cogvault.ingest.plist
 ```
 
 Before starting a complete ingest, verify the configured filesystem operations

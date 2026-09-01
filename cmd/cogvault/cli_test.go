@@ -2,7 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -1130,5 +1133,146 @@ func TestFreshWikiIsLintClean(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "no issues found") {
 		t.Fatalf("expected a clean report, got: %q", stdout)
+	}
+}
+
+func writeOpenAIConfig(t *testing.T, configPath, wikiDir, dbPath, srcDir string) {
+	t.Helper()
+	content := fmt.Sprintf("wiki_dir: %s\ndb_path: %s\nadapter: obsidian\nsources:\n  - path: %s\n    types: [pdf]\nllm:\n  backend: openai\n  model: test-model\n  base_url: http://127.0.0.1:12345/v1\n  max_input_chars: 1000\n", wikiDir, dbPath, srcDir)
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestIngestOpenAIMissingPDFPrerequisiteFailsBeforeLedger(t *testing.T) {
+	configPath, srcDir, wikiDir, dbPath := setupIngestVault(t)
+	writeOpenAIConfig(t, configPath, wikiDir, dbPath, srcDir)
+	if _, _, err := executeCommand("init", "--config", configPath); err != nil {
+		t.Fatalf("init failed: %v", err)
+	}
+	originalLookup := ingestLookPath
+	originalReady := ingestCheckOpenAIReady
+	t.Cleanup(func() { ingestLookPath = originalLookup; ingestCheckOpenAIReady = originalReady })
+	ingestCheckOpenAIReady = func(context.Context, string, string) error { return nil }
+	ingestLookPath = func(name string) (string, error) {
+		if name == "pdfinfo" {
+			return "", errors.New("missing")
+		}
+		return "/fake/" + name, nil
+	}
+	_, _, err := executeCommand("ingest", "--config", configPath)
+	if err == nil || !strings.Contains(err.Error(), "pdfinfo") {
+		t.Fatalf("expected pdfinfo prerequisite error, got %v", err)
+	}
+	if ledgerTableExists(t, dbPath) {
+		t.Fatal("prerequisite failure constructed the ledger")
+	}
+}
+
+func TestIngestOpenAIReadinessFailsBeforeLedger(t *testing.T) {
+	configPath, srcDir, wikiDir, dbPath := setupIngestVault(t)
+	writeOpenAIConfig(t, configPath, wikiDir, dbPath, srcDir)
+	if _, _, err := executeCommand("init", "--config", configPath); err != nil {
+		t.Fatalf("init failed: %v", err)
+	}
+	originalLookup := ingestLookPath
+	originalReady := ingestCheckOpenAIReady
+	t.Cleanup(func() { ingestLookPath = originalLookup; ingestCheckOpenAIReady = originalReady })
+	ingestLookPath = func(name string) (string, error) { return "/fake/" + name, nil }
+	ingestCheckOpenAIReady = func(context.Context, string, string) error { return errors.New("provider unavailable") }
+	_, _, err := executeCommand("ingest", "--config", configPath)
+	if err == nil || !strings.Contains(err.Error(), "provider unavailable") {
+		t.Fatalf("expected readiness error, got %v", err)
+	}
+	if ledgerTableExists(t, dbPath) {
+		t.Fatal("readiness failure constructed the ledger")
+	}
+}
+
+func TestIngestClaudeDoesNotRequirePDFTools(t *testing.T) {
+	configPath, srcDir, wikiDir, dbPath := setupIngestVault(t)
+	writeConfigFile(t, configPath, wikiDir, dbPath, srcDir)
+	originalLookup := ingestLookPath
+	t.Cleanup(func() { ingestLookPath = originalLookup })
+	ingestLookPath = func(name string) (string, error) {
+		if name == "claude" {
+			return "/fake/claude", nil
+		}
+		return "", errors.New("unexpected tool lookup")
+	}
+	t.Setenv("PATH", "")
+	if _, _, err := executeCommand("ingest", "--config", configPath); err != nil {
+		t.Fatalf("Claude path-mode ingest should construct without extraction tools: %v", err)
+	}
+}
+
+func ledgerTableExists(t *testing.T, dbPath string) bool {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var count int
+	if err := db.QueryRow("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='ingest_ledger'").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	return count != 0
+}
+
+func TestIngestOpenAIEachMissingPrerequisiteFailsBeforeLedger(t *testing.T) {
+	for _, missing := range []string{"pdftotext", "pdfinfo", "pdftoppm", "tesseract", "eng", "kor"} {
+		t.Run(missing, func(t *testing.T) {
+			configPath, srcDir, wikiDir, dbPath := setupIngestVault(t)
+			writeOpenAIConfig(t, configPath, wikiDir, dbPath, srcDir)
+			if _, _, err := executeCommand("init", "--config", configPath); err != nil {
+				t.Fatalf("init failed: %v", err)
+			}
+			oldLookup, oldReady := ingestLookPath, ingestCheckOpenAIReady
+			t.Cleanup(func() { ingestLookPath, ingestCheckOpenAIReady = oldLookup, oldReady })
+			ingestLookPath = func(name string) (string, error) {
+				if name == missing {
+					return "", errors.New("missing")
+				}
+				return "/fake/" + name, nil
+			}
+			ingestCheckOpenAIReady = func(context.Context, string, string) error { return nil }
+			_, _, err := executeCommand("ingest", "--config", configPath)
+			if err == nil || !strings.Contains(err.Error(), missing) {
+				t.Fatalf("expected %s prerequisite error, got %v", missing, err)
+			}
+			if ledgerTableExists(t, dbPath) {
+				t.Fatal("missing prerequisite constructed the ledger")
+			}
+		})
+	}
+}
+
+func TestIngestOpenAIReadyConstructsAfterPreflight(t *testing.T) {
+	configPath, srcDir, wikiDir, dbPath := setupIngestVault(t)
+	writeOpenAIConfig(t, configPath, wikiDir, dbPath, srcDir)
+	oldLookup, oldReady := ingestLookPath, ingestCheckOpenAIReady
+	t.Cleanup(func() { ingestLookPath, ingestCheckOpenAIReady = oldLookup, oldReady })
+	called := false
+	ingestLookPath = func(name string) (string, error) { return "/fake/" + name, nil }
+	ingestCheckOpenAIReady = func(context.Context, string, string) error { called = true; return nil }
+	if _, _, err := executeCommand("ingest", "--config", configPath); err != nil {
+		t.Fatalf("ready OpenAI ingest failed: %v", err)
+	}
+	if !called {
+		t.Fatal("OpenAI readiness was not checked before construction")
+	}
+}
+
+func TestLaunchdPATHKeepsStandardHomebrewAndClaudeDirs(t *testing.T) {
+	data, err := os.ReadFile("../../deploy/com.teslamint.cogvault.ingest.plist")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := string(data)
+	for _, entry := range []string{"/usr/bin", "/bin", "/usr/sbin", "/sbin", "/opt/homebrew/bin", "/Users/USERNAME/.local/bin"} {
+		if !strings.Contains(path, entry) {
+			t.Errorf("launchd PATH missing %s", entry)
+		}
 	}
 }
