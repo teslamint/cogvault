@@ -3,14 +3,15 @@ package storage
 import (
 	"errors"
 	"fmt"
-	"github.com/teslamint/cogvault/internal/adapter"
-	"github.com/teslamint/cogvault/internal/config"
-	cverr "github.com/teslamint/cogvault/internal/errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/teslamint/cogvault/internal/adapter"
+	"github.com/teslamint/cogvault/internal/config"
+	cverr "github.com/teslamint/cogvault/internal/errors"
 )
 
 type FSStorage struct {
