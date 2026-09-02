@@ -464,6 +464,45 @@ func TestExtractRendersToSinglefileNotStdout(t *testing.T) {
 	}
 }
 
+func TestExtractOversizeRenderedImageRejected(t *testing.T) {
+	var tesseractCalled bool
+	cmds := Commands{CommandContext: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		switch name {
+		case "pdftotext":
+			return exec.Command("sh", "-c", "printf ''")
+		case "pdfinfo":
+			if len(args) > 0 && args[0] == "-f" {
+				return exec.Command("sh", "-c", "printf '%s' 'Page size: 612 x 792 pts (letter)'")
+			}
+			return exec.Command("sh", "-c", "printf '%s' 'Pages: 1'")
+		case "pdftoppm":
+			// Write a sparse file just over the 32 MiB cap via -singlefile.
+			prefix := args[len(args)-1]
+			oversize := 32*1024*1024 + 1
+			return exec.Command("sh", "-c",
+				fmt.Sprintf("dd if=/dev/zero of=\"%s.png\" bs=1 count=0 seek=%d 2>/dev/null", prefix, oversize))
+		case "tesseract":
+			tesseractCalled = true
+			return exec.Command("sh", "-c", "printf 'should-not-reach'")
+		}
+		return exec.Command("sh", "-c", "true")
+	}}
+	e := NewPDFExtractor(100000, cmds)
+	_, err := e.Extract(context.Background(), "f.pdf")
+	if err == nil {
+		t.Fatal("expected oversize render error")
+	}
+	if !strings.Contains(err.Error(), "exceeds image limit") {
+		t.Fatalf("wrong error: %v", err)
+	}
+	if tesseractCalled {
+		t.Fatal("tesseract should not be invoked for an oversize render")
+	}
+	if errors.Is(err, ErrTransient) {
+		t.Fatal("oversize render should be permanent, not transient")
+	}
+}
+
 func short(s string) string {
 	if len(s) > 120 {
 		return s[:120] + "..."

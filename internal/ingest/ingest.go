@@ -187,13 +187,13 @@ func (r *Runner) Run(ctx context.Context, opts RunOptions) (*Report, error) {
 				report.Unchanged++
 				continue
 			case "refused":
-				if prev.digestProfile == currentProfile || (prev.digestProfile == "" && prev.llmModel == r.cfg.LLM.Model) {
+				if prev.digestProfile == currentProfile {
 					report.Skipped++
 					report.PerFile = append(report.PerFile, FileResult{Path: entry.absPath, Action: actionRefused, Error: prev.lastError})
 					continue
 				}
 			case "failed":
-				if prev.attempts >= maxAttempts && (prev.digestProfile == currentProfile || (prev.digestProfile == "" && prev.llmModel == r.cfg.LLM.Model)) {
+				if prev.attempts >= maxAttempts && prev.digestProfile == currentProfile {
 					report.Skipped++
 					report.PerFile = append(report.PerFile, FileResult{Path: entry.absPath, Action: actionExhausted, Error: prev.lastError})
 					continue

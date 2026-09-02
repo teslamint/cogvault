@@ -362,20 +362,6 @@ func (e *PDFExtractor) ocrPageInto(ctx context.Context, imagePath string, collec
 	return classifyProcess(ctx, waitErr, stderr.String(), "tesseract")
 }
 
-func usable(s string) bool {
-	count, alnum := 0, false
-	for _, r := range s {
-		if unicode.IsSpace(r) {
-			continue
-		}
-		count++
-		if unicode.IsLetter(r) || unicode.IsNumber(r) {
-			alnum = true
-		}
-	}
-	return count >= 80 && alnum
-}
-
 func transient(err error) error {
 	if err == nil {
 		return nil

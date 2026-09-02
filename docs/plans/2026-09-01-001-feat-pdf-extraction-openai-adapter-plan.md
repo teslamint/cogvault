@@ -17,7 +17,7 @@ Implement complete-only local PDF ingestion: Cogvault extracts PDF text, falls b
 
 - `llm.Adapter` gains `InputMode()`: `PathInput` preserves Claude Code; `TextInput` selects the new extraction route. `DigestRequest` gains `SourceText`; only `TextInput` adapters require it.
 - `internal/extract` owns Poppler/Tesseract subprocesses. It validates UTF-8, trims while streaming, treats a text layer as usable at 80 non-whitespace runes plus one letter/number, and never submits a retained prefix. `pdftotext` drains an over-cap candidate to decide whether an unusable layer must fall back to OCR. One aggregate collector bounds all OCR-page output.
-- OCR preflights total page count and each page's dimensions. A one-page `pdftoppm` stdout stream is bounded before it reaches an owned temporary file; Tesseract processes that file, which is removed before the next page.
+- OCR preflights total page count and each page's dimensions. A one-page `pdftoppm -singlefile` render writes a PNG to an owned temporary directory (Poppler's stdout form writes zero bytes on some builds); the file is size-checked after render and deleted if it exceeds the 32 MiB cap. Tesseract processes that file, which is removed before the next page.
 - `openai` uses loopback `http` only, a canonicalized API-root URL, redirect-disabled endpoint-pinned HTTP clients, `GET /models` readiness preflight, then `POST /chat/completions`. It never starts, loads, warms, or stops a provider.
 - Failed/refused retry identity becomes `digest_profile`: backend, model, canonical base URL, `max_input_chars`, and extraction-contract version. `llm_model` stays provenance. Additive SQLite migration keeps legacy rows retryable once, and every terminal attention/notification/status comparison uses the same current profile rather than model alone.
 - Rejected alternatives: native PDF/image attachments (all local providers rejected them); source truncation/map-reduce (violates complete-only decision); provider lifecycle ownership (provider-specific operational surface); macOS Vision (unnecessary platform bridge while Tesseract is selected).
@@ -92,7 +92,7 @@ Test scenarios:
 Steps:
   1. Create fake executable seams that record argv/context and emit controlled stdout/stderr without host tools.
   2. Write failing tests for trim-aware candidate collection, UTF-8 validity, text-layer/OCR routing, and no-prefix overflow behavior.
-  3. Implement bounded `pdftotext`, per-page `pdfinfo`, one-page `pdftoppm` stdout-to-capped-file, and `tesseract -l eng+kor stdout` execution with cleanup.
+  3. Implement bounded `pdftotext`, per-page `pdfinfo`, one-page `pdftoppm -singlefile` file-render with post-write size check, and `tesseract -l eng+kor stdout` execution with cleanup.
   4. Add limit, mixed-page, aggregate-overflow, and cancellation controls; verify all temporary paths disappear on each result.
   5. Run `go test ./internal/extract`; commit: `feat(ingest): extract complete PDF text locally`.
 Acceptance: U2 tests prove no provider-facing text exists after any incomplete capture and no renderer writes above the image cap.

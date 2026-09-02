@@ -2827,3 +2827,118 @@ func TestRunPathInputDoesNotInvokeExtractor(t *testing.T) {
 		t.Fatalf("extractor called %d times", ex.called)
 	}
 }
+
+func TestRunLegacyExhaustedRowRetriedOnceAndThenSkipped(t *testing.T) {
+	m := &mockLLM{fn: func(_ llm.DigestRequest) (*llm.DigestResult, error) {
+		return nil, errPermanent
+	}}
+	h := newHarness(t, []string{"md"}, m)
+	h.runner.cfg.LLM.Model = "current-model"
+	h.runner.cfg.LLM.Backend = "openai"
+	h.runner.cfg.LLM.BaseURL = "http://127.0.0.1:1"
+	src := h.write(t, "legacy.md", "content")
+	hash := contentHash([]byte("content"))
+
+	// Seed a legacy exhausted row: digestProfile="" (pre-migration), same model.
+	if err := h.runner.ledger.upsert(ledgerRow{
+		sourcePath:  src,
+		contentHash: hash,
+		sourceDir:   h.srcDir,
+		status:      "failed",
+		attempts:    maxAttempts,
+		lastError:   "digest: old failure",
+		runOrigin:   "scheduled",
+		llmModel:    "current-model",
+	}); err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+
+	// First Run: legacy row should be re-attempted (not skipped).
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "scheduled"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Skipped != 0 {
+		t.Fatalf("first run: skipped=%d, want 0 (legacy row should retry)", rep.Skipped)
+	}
+	if rep.Failed != 1 {
+		t.Fatalf("first run: failed=%d, want 1", rep.Failed)
+	}
+	if len(m.requests) != 1 {
+		t.Fatalf("first run: llm calls=%d, want 1", len(m.requests))
+	}
+
+	// Verify the row now carries the current profile.
+	row, found, err := h.runner.ledger.lookup(src, hash)
+	if err != nil || !found {
+		t.Fatalf("lookup: found=%v err=%v", found, err)
+	}
+	wantProfile := DigestProfile(h.runner.cfg)
+	if row.digestProfile != wantProfile {
+		t.Fatalf("digest_profile=%q, want %q", row.digestProfile, wantProfile)
+	}
+
+	// Second Run: now exhausted with the current profile, should be skipped.
+	m.mu.Lock()
+	m.requests = nil
+	m.mu.Unlock()
+	rep2, err := h.runner.Run(context.Background(), RunOptions{Origin: "scheduled"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep2.Skipped != 1 {
+		t.Fatalf("second run: skipped=%d, want 1 (now has current profile)", rep2.Skipped)
+	}
+	if len(m.requests) != 0 {
+		t.Fatalf("second run: llm calls=%d, want 0", len(m.requests))
+	}
+}
+
+func TestRunLegacyRefusedRowRetriedOnce(t *testing.T) {
+	m := &mockLLM{fn: func(_ llm.DigestRequest) (*llm.DigestResult, error) {
+		return nil, llm.ErrRefused
+	}}
+	h := newHarness(t, []string{"md"}, m)
+	h.runner.cfg.LLM.Model = "current-model"
+	h.runner.cfg.LLM.Backend = "openai"
+	h.runner.cfg.LLM.BaseURL = "http://127.0.0.1:1"
+	src := h.write(t, "legacy-refused.md", "content")
+	hash := contentHash([]byte("content"))
+
+	// Seed a legacy refused row: digestProfile="" (pre-migration), same model.
+	if err := h.runner.ledger.upsert(ledgerRow{
+		sourcePath:  src,
+		contentHash: hash,
+		sourceDir:   h.srcDir,
+		status:      "refused",
+		lastError:   "digest: old refusal",
+		runOrigin:   "scheduled",
+		llmModel:    "current-model",
+	}); err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+
+	// Run: legacy refused row should be re-attempted (not skipped).
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "scheduled"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Skipped != 0 {
+		t.Fatalf("skipped=%d, want 0 (legacy refused should retry)", rep.Skipped)
+	}
+	if rep.Refused != 1 {
+		t.Fatalf("refused=%d, want 1", rep.Refused)
+	}
+
+	// After retry the row carries the current profile; second run skips.
+	m.mu.Lock()
+	m.requests = nil
+	m.mu.Unlock()
+	rep2, err := h.runner.Run(context.Background(), RunOptions{Origin: "scheduled"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep2.Skipped != 1 {
+		t.Fatalf("second run: skipped=%d, want 1", rep2.Skipped)
+	}
+}

@@ -1069,7 +1069,8 @@ ingest_ledger(
   status TEXT,            -- success | failed | refused | superseded
   attempts INTEGER, last_error TEXT,
   run_origin TEXT,        -- scheduled | interactive
-  llm_model TEXT,
+  llm_model TEXT NOT NULL DEFAULT '',
+  digest_profile TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (source_path, content_hash)
 )
 ```
@@ -1079,8 +1080,11 @@ busy_timeout make the second connection safe). Type-excluded/oversized files are
 reported per run, not persisted. Source originals are never moved or deleted.
 Existing ledger rows are not migrated when refusal classification changes. A
 historical generic API failure already recorded as `refused` remains terminal
-until `llm.model` or source content changes, which activates the existing
-model/content-hash re-attempt gate.
+until its `digest_profile` or source content changes, which activates the
+retry gate. `digest_profile` encodes backend, model, canonical base URL,
+`max_input_chars`, and extraction-contract version; changing any part makes a
+prior failed or refused row retryable. A legacy row with an empty profile is
+retryable once under the current profile.
 
 ### 10.7 Behavior constants and promoted knobs
 

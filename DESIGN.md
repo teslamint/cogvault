@@ -273,7 +273,7 @@ func New(cfg *config.Config, store storage.Storage, idx index.Index,
 func (r *Runner) Run(ctx context.Context, opts RunOptions) (*Report, error)
 func (r *Runner) Notify(report *Report)
 func (r *Runner) Close() error
-func AttentionRows(dbPath, model string) ([]AttentionRow, error)
+func AttentionRows(dbPath, model string, profile ...string) ([]AttentionRow, error)
 type RunOptions struct { DryRun bool; Limit int; Origin string }
 ```
 
