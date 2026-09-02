@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/adrg/frontmatter"
 
@@ -24,6 +25,7 @@ import (
 	"github.com/teslamint/cogvault/internal/storage"
 
 	"golang.org/x/sys/unix"
+	"golang.org/x/text/unicode/norm"
 )
 
 const (
@@ -644,6 +646,16 @@ func slugFor(absPath, hash string) string {
 	if slug == "" {
 		return "src-" + hash[:8]
 	}
+	// iCloud Drive converts filenames from NFC to NFD, which can expand
+	// Korean characters 2-3x in byte length (e.g. 126 → 276 bytes).
+	// The filesystem filename limit is 255 bytes. Cap the slug so the
+	// NFD form of "sources/<slug>-<hash8>.md" stays safely under 255.
+	// Budget: 255 - len("sources/") - len("-") - 8 - len(".md") = 236.
+	slug = truncateNFDSafe(slug, 220)
+	slug = strings.Trim(slug, "-")
+	if slug == "" {
+		return "src-" + hash[:8]
+	}
 	return slug
 }
 
@@ -662,6 +674,28 @@ func collapseDashes(s string) string {
 		b.WriteRune(ch)
 	}
 	return b.String()
+}
+
+// truncateNFDSafe truncates s (NFC) so its NFD byte representation does not
+// exceed maxBytes, without splitting a multi-byte character.
+func truncateNFDSafe(s string, maxBytes int) string {
+	nfd := norm.NFD.String(s)
+	if len(nfd) <= maxBytes {
+		return s
+	}
+	// Walk rune-by-rune through the NFC string, accumulating NFD byte cost.
+	var nfcCut int
+	var nfdLen int
+	for i, r := range s {
+		rNFD := norm.NFD.String(string(r))
+		if nfdLen+len(rNFD) > maxBytes {
+			nfcCut = i
+			break
+		}
+		nfdLen += len(rNFD)
+		nfcCut = i + utf8.RuneLen(r)
+	}
+	return s[:nfcCut]
 }
 
 func parsePage(content string) (map[string]any, string, bool) {
