@@ -42,16 +42,25 @@ The vault concept from v1 is gone: `wiki_dir` is the single storage root, and
 ### 1. Build
 
 ```bash
-make build                         # build + adhoc codesign (macOS FDA safe)
-make install                       # build + copy to ~/bin/ (launchd path)
-make install INSTALL_DIR=/usr/local/bin  # alternate install path
+make build                         # build + adhoc codesign (default, no certificate needed)
+make install CODESIGN_IDENTITY="Developer ID Application: <your name> (<team>)"
 ```
 
-Or manually (without codesign — may cause macOS SIGKILL if FDA is granted):
+The default `-` identity produces an ad-hoc signature whose TCC grants die on
+every rebuild. A stable identity can preserve existing grants only when every
+rebuild uses that same identity. Changing the code-signing identifier resets
+the binary's TCC identity once, so the first signed install costs one final
+round of prompts; later rebuilds signed with the same identity do not.
+
+A manual build silently restores the linker's ad-hoc signature and
+`Identifier=a.out`, even after a stable identity was applied:
 
 ```bash
 go build -o cogvault ./cmd/cogvault
 ```
+
+Run `make build` or `make install` again with the same `CODESIGN_IDENTITY` to
+restore the stable identity.
 
 ### 2. Create and edit the config (two-step `init`)
 
@@ -136,24 +145,43 @@ before exposing either transport to the internet.
 ### 5. Schedule zero-touch ingest (launchd)
 
 ```bash
-# 1. Create the log directory (launchd will not create it for you):
+# Create the log directory (launchd will not create it for you):
 mkdir -p ~/Library/Logs/cogvault
-
-# 2. Copy the template and edit the placeholders inside it:
-#    - the absolute path to your built cogvault binary
-#    - every /Users/USERNAME/... path → your real home
-cp deploy/com.teslamint.cogvault.ingest.plist ~/Library/LaunchAgents/
-
-# 3. Load it:
-launchctl load ~/Library/LaunchAgents/com.teslamint.cogvault.ingest.plist
 ```
 
 The default interval is 3600s (1 hour). launchd's PATH excludes `~/.local/bin`,
 so the template sets an explicit PATH that includes the `claude` CLI directory
-(verified by the O1 spike). One-time grants the scheduled binary needs:
+(verified by the O1 spike). Grant the scheduled binary's permissions through
+this ceremony:
 
-- **TCC**: macOS may prompt for access to `~/Downloads` (or your source folder)
-  the first time the scheduled job reads it; grant it.
+1. ```bash
+   make install CODESIGN_IDENTITY="Developer ID Application: <your name> (<team>)"
+   ```
+2. ```bash
+   cp deploy/com.teslamint.cogvault.ingest.plist ~/Library/LaunchAgents/
+   ```
+
+   Edit the copied template's binary and home-directory placeholders for this
+   machine, then load it:
+
+   ```bash
+   launchctl load ~/Library/LaunchAgents/com.teslamint.cogvault.ingest.plist
+   ```
+3. ```bash
+   launchctl kickstart -k gui/$(id -u)/com.teslamint.cogvault.ingest
+   ```
+4. Answer each consent prompt once.
+
+Step 3 must be a `kickstart`, not a manual `cogvault ingest` in a terminal:
+macOS attributes a terminal-spawned process to the terminal, so a manual run
+grants the terminal rather than cogvault and the scheduled job keeps prompting.
+
+A folder prompt covers reads of that one source directory. The observed "data
+from other apps" prompt creates a `kTCCServiceSystemPolicyAppData` row for
+cogvault. The exact access that triggers it remains unmeasured. **Unresolved
+(Open Decision 2):** whether one Full Disk Access grant supersedes these
+individual prompts must be verified on the maintainer's machine.
+
 - **Auth**: `claude` must resolve auth non-interactively under launchd (it does
   when subscription auth is in the login keychain and the GUI session is active).
 
@@ -162,6 +190,24 @@ not found" errors under the template's minimal PATH — they don't affect ingest
 exit code or result. Extend PATH with the node directory in the plist if the
 noise bothers you (see O1 spike finding 2 in
 [docs/research/o1-headless-pdf-verification.md](docs/research/o1-headless-pdf-verification.md)).
+
+#### Removing stale grants
+
+The same binary path can retain TCC grant rows bound to earlier code
+requirements. Inspect them before changing anything:
+
+```bash
+sqlite3 "$HOME/Library/Application Support/com.apple.TCC/TCC.db" \
+  "select service, length(csreq), hex(csreq) from access where client like '%cogvault%';"
+```
+
+`tccutil reset <service>` clears that service for every application on the
+machine, not only cogvault. Use System Settings' per-application view when you
+need the narrower instrument.
+
+`~/bin/cogvault` also backs the `com.teslamint.cogvault` `serve` job. A running
+`serve` process keeps using the pre-install image, so restart that job after an
+install when the new identity must apply to it too.
 
 ## Migrating from v1
 
