@@ -42,16 +42,24 @@ The vault concept from v1 is gone: `wiki_dir` is the single storage root, and
 ### 1. Build
 
 ```bash
-make build                         # build + adhoc codesign (macOS FDA safe)
-make install                       # build + copy to ~/bin/ (launchd path)
-make install INSTALL_DIR=/usr/local/bin  # alternate install path
+make build                         # build + adhoc codesign (default, no certificate needed)
+make install CODESIGN_IDENTITY="<identity from security find-identity -v -p codesigning>"
 ```
 
-Or manually (without codesign — may cause macOS SIGKILL if FDA is granted):
+The default `-` identity produces an ad-hoc signature that changes on rebuild.
+Use one available Apple signing identity and the same identifier for scheduled
+runs. A stable signature gives macOS a stable code requirement to evaluate. It
+does not guarantee that macOS will retain any permission decision.
+
+A manual build silently restores the linker's ad-hoc signature and
+`Identifier=a.out`, even after a stable identity was applied:
 
 ```bash
 go build -o cogvault ./cmd/cogvault
 ```
+
+Run `make build` or `make install` again with the same `CODESIGN_IDENTITY` to
+restore the stable identity.
 
 ### 2. Create and edit the config (two-step `init`)
 
@@ -136,24 +144,72 @@ before exposing either transport to the internet.
 ### 5. Schedule zero-touch ingest (launchd)
 
 ```bash
-# 1. Create the log directory (launchd will not create it for you):
+# Create the log directory (launchd will not create it for you):
 mkdir -p ~/Library/Logs/cogvault
-
-# 2. Copy the template and edit the placeholders inside it:
-#    - the absolute path to your built cogvault binary
-#    - every /Users/USERNAME/... path → your real home
-cp deploy/com.teslamint.cogvault.ingest.plist ~/Library/LaunchAgents/
-
-# 3. Load it:
-launchctl load ~/Library/LaunchAgents/com.teslamint.cogvault.ingest.plist
 ```
 
 The default interval is 3600s (1 hour). launchd's PATH excludes `~/.local/bin`,
 so the template sets an explicit PATH that includes the `claude` CLI directory
-(verified by the O1 spike). One-time grants the scheduled binary needs:
+(verified by the O1 spike). Install one signed binary first:
 
-- **TCC**: macOS may prompt for access to `~/Downloads` (or your source folder)
-  the first time the scheduled job reads it; grant it.
+```bash
+make install CODESIGN_IDENTITY="Apple Development: <account> (<team>)"
+```
+
+Copy and load the scheduled ingest job:
+
+```bash
+cp deploy/com.teslamint.cogvault.ingest.plist ~/Library/LaunchAgents/
+```
+
+Edit the copied template's binary and home-directory placeholders for this
+machine, then load it:
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.teslamint.cogvault.ingest.plist
+```
+
+Before starting a complete ingest, verify the configured filesystem operations
+under launchd. The script requires an absolute, regular, executable, signed
+binary. It uses the installed binary directly, not a copy.
+
+```bash
+COGVAULT_BIN="$HOME/bin/cogvault" \
+COGVAULT_CONFIG="$HOME/.config/cogvault/config.yaml" \
+scripts/check-scheduled-access.sh
+```
+
+The script creates a temporary label named
+`com.teslamint.cogvault.access-check.<uid>.<random>.<random>`. It launches the
+same sealed binary twice. Observe both launches. Approve only a prompt that
+names a configured path. Record and stop on an unexpected Documents, Pictures,
+network-volume, or AppData prompt. The second launch should not show another prompt for the same checked operation.
+This observation is evidence about those two runs, not proof of TCC persistence.
+
+Each run probes `wiki_dir`, the `db_path` parent, and configured source roots.
+An iCloud File Provider path can resolve to local storage. A configured network
+path is checked as configured; the script does not discover mounted shares.
+
+On success, the script unloads the temporary job and removes its private files.
+On failure, it unloads the job and retains the 0600 plist and logs. It prints
+`retained access-check artifacts: <dir>` and
+`delete after inspection: rm -rf '<dir>'`. If unload fails, it also prints
+`recover job: launchctl bootout 'gui/<uid>/<label>'`.
+
+Passing twice does not prove that a complete ingest will run without prompts.
+It does not prove access to unconfigured Documents, Pictures, Photos Library,
+or network shares. It does not prove that macOS stored a TCC decision.
+
+After the access check, start the real scheduled job:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.teslamint.cogvault.ingest
+```
+
+This test must use launchd, not a manual `cogvault ingest` in a terminal:
+macOS attributes a terminal-spawned process to the terminal, so a manual run
+tests the terminal process context instead of the scheduled process context.
+
 - **Auth**: `claude` must resolve auth non-interactively under launchd (it does
   when subscription auth is in the login keychain and the GUI session is active).
 
@@ -162,6 +218,10 @@ not found" errors under the template's minimal PATH — they don't affect ingest
 exit code or result. Extend PATH with the node directory in the plist if the
 noise bothers you (see O1 spike finding 2 in
 [docs/research/o1-headless-pdf-verification.md](docs/research/o1-headless-pdf-verification.md)).
+
+`~/bin/cogvault` also backs the `com.teslamint.cogvault` `serve` job. A running
+`serve` process keeps using the pre-install image, so restart that job after an
+install when the new identity must apply to it too.
 
 ## Migrating from v1
 
