@@ -28,7 +28,6 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(newEmbedCmd())
 	cmd.AddCommand(newSimilarCmd())
 	cmd.AddCommand(newStatusCmd())
-	cmd.AddCommand(newAccessCheckCmd())
 	cmd.SetOut(os.Stdout)
 	return cmd
 }

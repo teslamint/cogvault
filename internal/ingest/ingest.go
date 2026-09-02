@@ -6,16 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"time"
 	"unicode"
-	"unicode/utf8"
 
 	"github.com/adrg/frontmatter"
 
@@ -27,7 +24,6 @@ import (
 	"github.com/teslamint/cogvault/internal/storage"
 
 	"golang.org/x/sys/unix"
-	"golang.org/x/text/unicode/norm"
 )
 
 const (
@@ -243,7 +239,7 @@ func (r *Runner) scan(report *Report) []scanEntry {
 		dirEntries, err := os.ReadDir(dir)
 		if err != nil {
 			report.SourceErrors++
-			report.PerFile = append(report.PerFile, FileResult{Path: dir, Action: actionSourceError, Error: sourceErrorText(err)})
+			report.PerFile = append(report.PerFile, FileResult{Path: dir, Action: actionSourceError, Error: err.Error()})
 			continue
 		}
 		for _, de := range dirEntries {
@@ -281,7 +277,7 @@ func (r *Runner) scan(report *Report) []scanEntry {
 			hash, err := hashFile(abs)
 			if err != nil {
 				report.Skipped++
-				report.PerFile = append(report.PerFile, FileResult{Path: abs, Action: actionSkipped, Error: "read: " + sourceErrorText(err)})
+				report.PerFile = append(report.PerFile, FileResult{Path: abs, Action: actionSkipped, Error: "read: " + err.Error()})
 				continue
 			}
 			entries = append(entries, scanEntry{absPath: abs, sourceDir: dir, hash: hash, size: info.Size(), mtime: info.ModTime()})
@@ -515,7 +511,7 @@ func (r *Runner) reportSweepSourceError(report *Report, dir string, err error) {
 	report.PerFile = append(report.PerFile, FileResult{
 		Path:   dir,
 		Action: actionSourceError,
-		Error:  sourceErrorText(err),
+		Error:  err.Error(),
 	})
 }
 
@@ -617,17 +613,6 @@ func hashFile(path string) (string, error) {
 	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 
-func sourceErrorText(err error) string {
-	if !errors.Is(err, fs.ErrPermission) {
-		return err.Error()
-	}
-	msg := "permission denied: cannot read source"
-	if runtime.GOOS == "darwin" {
-		msg += `; macOS consent required, see README "Schedule zero-touch ingest"`
-	}
-	return msg
-}
-
 func hash8(data []byte) string {
 	h := sha256.Sum256(data)
 	return fmt.Sprintf("%x", h)[:8]
@@ -659,16 +644,6 @@ func slugFor(absPath, hash string) string {
 	if slug == "" {
 		return "src-" + hash[:8]
 	}
-	// iCloud Drive converts filenames from NFC to NFD, which can expand
-	// Korean characters ~2.2x in byte length (e.g. 126 → 276 bytes).
-	// The filesystem filename limit is 255 bytes. Cap the slug so the
-	// NFD form of "sources/<slug>-<hash8>.md" stays safely under 255.
-	// Budget: 255 - len("sources/") - len("-") - 8 - len(".md") = 236.
-	slug = truncateNFDSafe(slug, 220)
-	slug = strings.Trim(slug, "-")
-	if slug == "" {
-		return "src-" + hash[:8]
-	}
 	return slug
 }
 
@@ -687,28 +662,6 @@ func collapseDashes(s string) string {
 		b.WriteRune(ch)
 	}
 	return b.String()
-}
-
-// truncateNFDSafe truncates s (NFC) so its NFD byte representation does not
-// exceed maxBytes, without splitting a multi-byte character.
-func truncateNFDSafe(s string, maxBytes int) string {
-	nfd := norm.NFD.String(s)
-	if len(nfd) <= maxBytes {
-		return s
-	}
-	// Walk rune-by-rune through the NFC string, accumulating NFD byte cost.
-	var nfcCut int
-	var nfdLen int
-	for i, r := range s {
-		rNFD := norm.NFD.String(string(r))
-		if nfdLen+len(rNFD) > maxBytes {
-			nfcCut = i
-			break
-		}
-		nfdLen += len(rNFD)
-		nfcCut = i + utf8.RuneLen(r)
-	}
-	return s[:nfcCut]
 }
 
 func parsePage(content string) (map[string]any, string, bool) {
