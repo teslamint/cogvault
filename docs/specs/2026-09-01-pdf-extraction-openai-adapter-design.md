@@ -134,7 +134,7 @@ The ledger retains `llm_model` for provenance and adds a `digest_profile` value 
 
 | Risk | Mitigation |
 |---|---|
-| OCR rendering expands a small or malicious PDF into excessive temporary data. | Preflight page count and each page's dimensions, render one 200-DPI page at a time to stdout, cap the streamed PNG at 32 MiB, then remove it before continuing. |
+| OCR rendering expands a small or malicious PDF into excessive temporary data. | Preflight page count and each page's dimensions, render one 200-DPI page at a time to an owned temporary file via `-singlefile`, check the file size against the 32 MiB limit, and remove the file before continuing. |
 | A document exceeds model context or an operator raises the input limit. | Reject complete-only over-limit input, persist the text-mode digest profile, and retry failed rows when that profile changes. |
 | The endpoint is cold, unavailable, or stalls during readiness. | Do not own lifecycle; use a capped 10-second `/models` preflight, reject an absent configured model before ledger mutation, treat `loaded: false`, preflight expiry, or the two declared unloaded-model messages as transient, and retry on the next schedule. |
 | Raw PDF content or a path-based read request reaches a provider. | The text-mode adapter receives extracted text plus provenance metadata required by source-page frontmatter, but emits no raw PDF bytes, page images, or instruction to read a path. |

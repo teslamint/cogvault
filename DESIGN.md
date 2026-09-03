@@ -320,7 +320,7 @@ DB file safe. DDL and transitions (`lookup`, `supersedePrevSuccess`, `upsert`) p
 SPEC §10.6.
 
 `AttentionRows` opens only the ledger connection. It selects the latest row
-for each source path with a fixed-width UTC nanosecond sort key. It returns
+for each source path using `MAX(rowid)`. It returns
 exhausted and refused rows for the current model. A missing database returns
 an empty result without creating files.
 

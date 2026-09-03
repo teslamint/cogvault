@@ -307,6 +307,7 @@ func (c *streamCollector) consumeRune(r rune, encoded []byte) {
 		c.appendBytes(c.pending)
 	}
 	c.pending = c.pending[:0]
+	c.pendingRunes = 0
 	c.usableCount++
 	c.content = true
 	c.runeCount++

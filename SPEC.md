@@ -171,7 +171,10 @@ later (0001). Rejected:
 - A source that contains, is contained by, or equals `wiki_dir` (overlap).
 - `db_path` inside `wiki_dir`.
 - `db_path` that is a directory-like path.
-- `adapter` outside the allowed list; `llm.backend` other than `claudecode`.
+- `adapter` outside the allowed list; `llm.backend` outside
+  `claudecode`/`ollama`/`openai`. For `openai`: a missing or non-loopback
+  `base_url`, a missing `model`, a non-PDF `sources[].types` entry, or
+  `max_input_chars` outside 1..1000000.
 - `max_file_size_mb` negative (zero or omitted defaults to 32).
 - `auth.mode` outside `none`/`bearer`/`oauth`.
 - `auth.oauth.issuer` empty or not an absolute `https://` URL, when `auth.mode`
@@ -1142,6 +1145,7 @@ github.com/golang-jwt/jwt/v5    # JWT parsing/validation (oauth mode)
 The `claudecode` backend shells out to the `claude` CLI; the `ollama` and
 `openai` backends use HTTP. The `openai` PDF path additionally requires Poppler,
 Tesseract, and `eng`/`kor` language data at runtime.
+
 ---
 
 ## Appendix A: Test requirements (v2 highlights)

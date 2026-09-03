@@ -10,15 +10,8 @@ import (
 	"testing"
 )
 
-// fake returns a Commands.CommandContext that runs sh snippets, records argv,
-// and can record per-command invocations. No host tools are needed.
-type recorder struct{ calls *[]string }
-
-func shOut(s string) *exec.Cmd {
-	// Pass output via environment variable to survive sh quoting for any byte
-	// sequence without Go's %q producing \n escapes sh does not interpret.
-	return exec.Command("sh", "-c", `printf '%s' "$OUT"`)
-}
+// envCmd emits a fixed payload through the environment so sh quoting cannot
+// alter any byte sequence. No host tools are needed.
 
 func envCmd(s string, name string, args ...string) *exec.Cmd {
 	cmd := exec.Command("sh", "-c", `printf '%s' "$OUT"`)
@@ -196,7 +189,7 @@ func TestExtractAggregateOCRCapWhileTesseractStreams(t *testing.T) {
 			return pdftoppmCmd(args)
 		case "tesseract":
 			tesseractCalls++
-			return exec.Command("sh", "-c", "printf 'ok '; dd if=/dev/zero bs=1m count=8 2>/dev/null | tr '\\0' x")
+			return exec.Command("sh", "-c", "printf 'ok '; head -c 8388608 /dev/zero | tr '\\0' x")
 		}
 		return exec.Command("sh", "-c", "true")
 	}}
@@ -217,6 +210,25 @@ func TestExtractOverCapUsableText(t *testing.T) {
 	_, err := e.Extract(context.Background(), "f.pdf")
 	if err == nil || strings.Contains(err.Error(), "transient") {
 		t.Fatalf("want permanent over-cap, got %v", err)
+	}
+}
+
+func TestExtractSpacedTextWithinLimit(t *testing.T) {
+	// Regression: pendingRunes was not reset, inflating runeCount so normal
+	// space-separated text falsely triggered overflow.
+	words := make([]string, 200)
+	for i := range words {
+		words[i] = "word"
+	}
+	text := strings.Join(words, " ") // 200 words, 999 runes (200*4 + 199 spaces)
+	cmds := Commands{CommandContext: fakeCmdWithOutput(text)}
+	e := NewPDFExtractor(1000, cmds) // limit > actual rune count
+	out, err := e.Extract(context.Background(), "f.pdf")
+	if err != nil {
+		t.Fatalf("spaced text within limit should succeed, got %v", err)
+	}
+	if !strings.Contains(out, "word") {
+		t.Fatalf("output missing content: %q", out[:min(len(out), 80)])
 	}
 }
 
