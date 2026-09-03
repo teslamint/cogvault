@@ -108,6 +108,20 @@ an ordinary page; nothing reads it back.
 The MCP server passes a schema **summary** as server instructions; the full text
 is read with `wiki_read("_schema.md")`.
 
+### 2.5 Signed installation helper
+
+`scripts/install-signed.sh` provides the one-command installation path for a
+scheduled macOS deployment. It must:
+
+- require exactly one valid `Developer ID Application` identity unless the
+  caller passes an identity explicitly;
+- delegate atomic build and destination signing to `make install`;
+- reject an installed binary whose strict signature verification fails or whose
+  identifier is not `dev.tmint.cogvault`;
+- restart the loaded `com.teslamint.cogvault.ingest` launchd job, and skip that
+  step without error when the job is not loaded; and
+- never reset or modify TCC grants.
+
 ---
 
 ## 3. Config file

@@ -257,15 +257,22 @@ func TestAttentionRowsEmptyLedger(t *testing.T) {
 	}
 }
 
-func TestAttentionRowsOrdersVariableRFC3339NanoChronologically(t *testing.T) {
+func TestAttentionRowsUsesInsertionOrderNotTimestamp(t *testing.T) {
 	l := newTestLedger(t)
 	const model = "current-model"
 
+	// MAX(rowid) determines "latest" — insertion order, not timestamp.
+	// For each path the LAST-inserted row has the EARLIER timestamp,
+	// so timestamp ordering would pick the opposite row.
 	seed := []ledgerRow{
-		{sourcePath: "/src/fractional-resolved.md", contentHash: "old", digestedAt: "2026-08-25T00:00:00.1Z", status: "failed", attempts: 3, llmModel: model},
-		{sourcePath: "/src/fractional-resolved.md", contentHash: "new", digestedAt: "2026-08-25T00:00:00.11Z", status: "success", llmModel: model},
-		{sourcePath: "/src/fractional-attention.md", contentHash: "old", digestedAt: "2026-08-25T00:00:01.1Z", status: "success", llmModel: model},
-		{sourcePath: "/src/fractional-attention.md", contentHash: "new", digestedAt: "2026-08-25T00:00:01.11Z", status: "failed", attempts: 3, llmModel: model},
+		// resolved: insert failed(t=0.11) first, then success(t=0.1) second.
+		// MAX(rowid) → success → NOT attention.  Timestamp → failed → attention.
+		{sourcePath: "/src/resolved.md", contentHash: "old", digestedAt: "2026-08-25T00:00:00.11Z", status: "failed", attempts: 3, llmModel: model},
+		{sourcePath: "/src/resolved.md", contentHash: "new", digestedAt: "2026-08-25T00:00:00.1Z", status: "success", llmModel: model},
+		// attention: insert success(t=0.11) first, then failed(t=0.1) second.
+		// MAX(rowid) → failed → attention.  Timestamp → success → NOT attention.
+		{sourcePath: "/src/attention.md", contentHash: "old", digestedAt: "2026-08-25T00:00:01.11Z", status: "success", llmModel: model},
+		{sourcePath: "/src/attention.md", contentHash: "new", digestedAt: "2026-08-25T00:00:01.1Z", status: "failed", attempts: 3, llmModel: model},
 	}
 	for _, row := range seed {
 		if err := l.upsert(row); err != nil {
@@ -277,11 +284,8 @@ func TestAttentionRowsOrdersVariableRFC3339NanoChronologically(t *testing.T) {
 	if err != nil {
 		t.Fatalf("attentionRows: %v", err)
 	}
-	if len(got) != 1 {
-		t.Fatalf("rows = %+v, want only the chronologically newer failure", got)
-	}
-	if got[0].sourcePath != "/src/fractional-attention.md" || got[0].contentHash != "new" {
-		t.Fatalf("row = %+v, want the chronologically newer failure", got[0])
+	if len(got) != 1 || got[0].sourcePath != "/src/attention.md" || got[0].contentHash != "new" {
+		t.Fatalf("rows = %+v, want only /src/attention.md (last-inserted is failed)", got)
 	}
 }
 

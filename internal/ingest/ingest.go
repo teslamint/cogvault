@@ -38,7 +38,6 @@ const (
 
 // ErrAlreadyRunning is returned by Run when another ingest holds the flock.
 var ErrAlreadyRunning = errors.New("ingest already running")
-
 var defaultNotify func(title, body string) error
 
 // failureClass adjudicates whether a digest failure consumes a retry attempt.
@@ -59,7 +58,6 @@ type RunOptions struct {
 	Limit  int
 	Origin string
 }
-
 type Runner struct {
 	cfg       *config.Config
 	store     storage.Storage
@@ -77,7 +75,6 @@ type Runner struct {
 	notifyFunc   func(title, body string) error
 	withTimeout  func(context.Context, time.Duration) (context.Context, context.CancelFunc)
 }
-
 type TextExtractor interface {
 	Extract(context.Context, string) (string, error)
 }
@@ -108,15 +105,12 @@ func DigestProfile(cfg *config.Config) string {
 	}
 	return fmt.Sprintf("%s|%s|%s|%d|%s", cfg.LLM.Backend, cfg.LLM.Model, strings.TrimRight(cfg.LLM.BaseURL, "/"), cfg.LLM.MaxInputChars, extract.ExtractionContractVersion)
 }
-
 func (r *Runner) digestProfile() string {
 	return DigestProfile(r.cfg)
 }
-
 func (r *Runner) Close() error {
 	return r.ledger.close()
 }
-
 func (r *Runner) Notify(report *Report) {
 	if report == nil || len(report.NewAttention) == 0 {
 		return
@@ -141,7 +135,6 @@ func (r *Runner) Notify(report *Report) {
 		slog.Warn("ingest notification failed", "error", err)
 	}
 }
-
 func (r *Runner) Run(ctx context.Context, opts RunOptions) (*Report, error) {
 	unlock, err := acquireLock(r.dbPath)
 	if err != nil {
@@ -213,7 +206,6 @@ func (r *Runner) Run(ctx context.Context, opts RunOptions) (*Report, error) {
 	}
 	return report, nil
 }
-
 func (r *Runner) handleSuccessRow(sourcePath string, prev *ledgerRow, report *Report) error {
 	_, _, err := r.store.Stat(prev.wikiPage)
 	if err == nil {
@@ -295,7 +287,6 @@ func (r *Runner) scan(report *Report) []scanEntry {
 	sort.Slice(entries, func(i, j int) bool { return entries[i].absPath < entries[j].absPath })
 	return entries
 }
-
 func (r *Runner) digestOne(parent context.Context, entry scanEntry, hash, schemaText, origin string, prev *ledgerRow, report *Report) {
 	budget := 5 * time.Minute
 	if r.cfg.LLM.TimeoutSeconds > 0 {
@@ -357,7 +348,6 @@ func (r *Runner) digestOne(parent context.Context, entry scanEntry, hash, schema
 	report.Digested++
 	report.PerFile = append(report.PerFile, FileResult{Path: entry.absPath, Action: actionDigested})
 }
-
 func (r *Runner) recordFailure(entry scanEntry, hash, origin string, prev *ledgerRow, report *Report, msg string, class failureClass) {
 	attempts := attemptsOf(prev)
 	if class == classPermanent {
@@ -386,7 +376,6 @@ func (r *Runner) recordFailure(entry scanEntry, hash, origin string, prev *ledge
 	report.Failed++
 	report.PerFile = append(report.PerFile, FileResult{Path: entry.absPath, Action: actionFailed, Error: msg})
 }
-
 func (r *Runner) sweepOrphans(ctx context.Context, report *Report, dryRun bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -492,7 +481,6 @@ func (r *Runner) sweepOrphans(ctx context.Context, report *Report, dryRun bool) 
 	}
 	return nil
 }
-
 func (r *Runner) reportSweepSourceError(report *Report, dir string, err error) {
 	slog.Warn("sweep: source dir snapshot failed, skipping", "dir", dir, "error", err)
 	report.SourceErrors++
@@ -523,7 +511,6 @@ func (r *Runner) snapshotDir(dir string) (sourceSnapshot, bool, error) {
 	}
 	return snapshot, true, nil
 }
-
 func orphanCandidates(rows []ledgerRow, snapshot sourceSnapshot) ([]ledgerRow, int) {
 	candidates := make([]ledgerRow, 0, len(rows))
 	survivors := 0
@@ -536,21 +523,18 @@ func orphanCandidates(rows []ledgerRow, snapshot sourceSnapshot) ([]ledgerRow, i
 	}
 	return candidates, survivors
 }
-
 func sameLedgerRow(left, right ledgerRow) bool {
 	return left.sourcePath == right.sourcePath &&
 		left.contentHash == right.contentHash &&
 		left.sourceDir == right.sourceDir &&
 		left.wikiPage == right.wikiPage
 }
-
 func archivedWikiPath(row ledgerRow) string {
 	base := filepath.Base(row.wikiPage)
 	ext := filepath.Ext(base)
 	name := strings.TrimSuffix(base, ext)
 	return "sources/_archived/" + name + "-" + row.contentHash[:8] + ext
 }
-
 func (r *Runner) pagePath(slug, absSourcePath string) (string, error) {
 	base := "sources/" + slug + ".md"
 	taken, err := r.ledger.wikiPageTakenByOther(base, absSourcePath)
@@ -562,7 +546,6 @@ func (r *Runner) pagePath(slug, absSourcePath string) (string, error) {
 	}
 	return base, nil
 }
-
 func (r *Runner) readSchema() (string, error) {
 	data, err := r.store.Read(r.cfg.SchemaPath())
 	if err != nil {
@@ -573,14 +556,12 @@ func (r *Runner) readSchema() (string, error) {
 	}
 	return string(data), nil
 }
-
 func attemptsOf(prev *ledgerRow) int {
 	if prev == nil {
 		return 0
 	}
 	return prev.attempts
 }
-
 func contentHash(data []byte) string {
 	h := sha256.Sum256(data)
 	return fmt.Sprintf("%x", h)
@@ -600,7 +581,6 @@ func hashFile(path string) (string, error) {
 	}
 	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
-
 func sourceErrorText(err error) string {
 	if !errors.Is(err, fs.ErrPermission) {
 		return err.Error()
@@ -611,12 +591,10 @@ func sourceErrorText(err error) string {
 	}
 	return msg
 }
-
 func hash8(data []byte) string {
 	h := sha256.Sum256(data)
 	return fmt.Sprintf("%x", h)[:8]
 }
-
 func containsType(types []string, ext string) bool {
 	for _, t := range types {
 		if t == ext {
@@ -625,7 +603,6 @@ func containsType(types []string, ext string) bool {
 	}
 	return false
 }
-
 func slugFor(absPath, hash string) string {
 	base := filepath.Base(absPath)
 	base = strings.TrimSuffix(base, filepath.Ext(base))
@@ -655,7 +632,6 @@ func slugFor(absPath, hash string) string {
 	}
 	return slug
 }
-
 func collapseDashes(s string) string {
 	var b strings.Builder
 	prevDash := false
@@ -694,6 +670,17 @@ func truncateNFDSafe(s string, maxBytes int) string {
 	}
 	return s[:nfcCut]
 }
+
+// ErrAlreadyRunning is returned by Run when another ingest holds the flock.
+// failureClass adjudicates whether a digest failure consumes a retry attempt.
+// Only permanent (digest-output) problems increment attempts; transient LLM
+// errors and infrastructure errors (write/index/ledger) are recorded as failed
+// without consuming an attempt, so the file retries on the next run.
+// DigestProfile returns the retry identity for a digest configuration.
+// ExtractionContractVersion is included because text-mode provider input is
+// produced by the local extractor rather than sent as a raw PDF.
+// hashFile streams the file into a sha256 hasher so full contents are never
+// retained in memory. Only the hex digest is kept per scan entry.
 
 func parsePage(content string) (map[string]any, string, bool) {
 	var fm map[string]any

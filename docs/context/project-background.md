@@ -132,27 +132,22 @@ The v2 refounding moved the canonical documents to English; the earlier Korean m
 - **launchd automation**: plist template + README setup for zero-touch scheduled ingest.
 - **`scope` removed** from `wiki_search` / `cogvault search` (0021 D5).
 
-### Later Phases Still Under Consideration
+### Later Phases — delivered or bounded
 
-- **Local LLM backend** (spike O3): implement the second `llm.Adapter` (ollama / llama.cpp / other) — the primary mitigation for the "Claude CLI changes" risk.
-- **Phone capture (S5)**: share-sheet URL → synced inbox folder → same pipeline; consume-and-archive semantics for dedicated inbox dirs (O5). Secondary priority.
-- **URL/web-article extraction**: fetch + extract before digest.
-- **Periodic digest (S6)**: `cogvault digest` writes a daily/weekly summary page.
-- **Markdown-source digestion**: digest raw vault/markdown notes so full-text search over source notes returns (restores the v1 coverage 0021 gave up).
-- **Watch mode**: revisit only if launchd schedule latency proves unacceptable (batch + launchd was chosen over a daemon, 0021 D2).
+The prior candidate list has been reconciled with the completed v2 work:
 
-### Carry-Overs That Remained Relevant After Refounding
-
-- **wiki_delete + git auto-commit**: deletion is unsafe without auto-commit; introduce them together.
-- **lint**: contradictions, orphan pages, broken links, frontmatter compliance; introduces `ResolveLink` + BuildCache when it lands.
-- **SSE transport**: remote access via Cloudflare Tunnel or a cloud deploy.
-- **wiki_write warnings**: frontmatter schema-validation feedback (warnings array).
-- **code-block wikilink exclusion**: state machine for ``` blocks / inline `.
-- **page-type expansion**: enforce entity/concept/synthesis schemas once real usage justifies it.
-
-### Longer-Horizon Ideas
-
-- Vector search (sqlite-vec / external embeddings), RRF hybrid search, ontology graph, multi-wiki support, an auto-generated read-only `_index.md` view.
+- **Delivered:** local LLM backend, URL extraction, periodic digest,
+  Markdown-source digestion, `wiki_delete` and opt-in Git history, lint,
+  remote transport and authorization, write warnings, code-block link
+  exclusion, page-type expansion, embedding search, hybrid fallback, graph,
+  multi-wiki configuration, and generated index view. Current behavior belongs
+  to `SPEC.md` and `DESIGN.md`; the completion index is [ROADMAP.md](../../ROADMAP.md).
+- **Partly delivered:** synced folders already provide a practical share-sheet
+  capture path. A dedicated share-sheet target or inbox consume-and-archive
+  semantics remains a future product decision only if that path proves
+  insufficient.
+- **Boundary, not backlog:** batch + launchd remains preferred to watch mode
+  unless measured schedule latency proves unacceptable ([0021](../decisions/0021-v2-refounding.md) D2).
 
 ## Risks and Pivot Paths
 
