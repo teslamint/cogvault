@@ -257,17 +257,19 @@ func TestAttentionRowsEmptyLedger(t *testing.T) {
 	}
 }
 
-func TestAttentionRowsOrdersByTimestampRegardlessOfInsertionOrder(t *testing.T) {
+func TestAttentionRowsOrdersByInsertionNotTimestamp(t *testing.T) {
 	l := newTestLedger(t)
 	const model = "current-model"
 
-	// Insert the later timestamp first per source_path to verify the query
-	// uses normalized timestamp ordering, not insertion (rowid) order.
+	// MAX(rowid) determines "latest" — insertion order, not timestamp.
+	// Insert success AFTER failed for the resolved path so MAX(rowid) picks
+	// success and that path does NOT appear in attention. Insert failed AFTER
+	// success for the attention path so MAX(rowid) picks failed.
 	seed := []ledgerRow{
-		{sourcePath: "/src/fractional-resolved.md", contentHash: "new", digestedAt: "2026-08-25T00:00:00.11Z", status: "success", llmModel: model},
 		{sourcePath: "/src/fractional-resolved.md", contentHash: "old", digestedAt: "2026-08-25T00:00:00.1Z", status: "failed", attempts: 3, llmModel: model},
-		{sourcePath: "/src/fractional-attention.md", contentHash: "new", digestedAt: "2026-08-25T00:00:01.11Z", status: "failed", attempts: 3, llmModel: model},
+		{sourcePath: "/src/fractional-resolved.md", contentHash: "new", digestedAt: "2026-08-25T00:00:00.11Z", status: "success", llmModel: model},
 		{sourcePath: "/src/fractional-attention.md", contentHash: "old", digestedAt: "2026-08-25T00:00:01.1Z", status: "success", llmModel: model},
+		{sourcePath: "/src/fractional-attention.md", contentHash: "new", digestedAt: "2026-08-25T00:00:01.11Z", status: "failed", attempts: 3, llmModel: model},
 	}
 	for _, row := range seed {
 		if err := l.upsert(row); err != nil {
@@ -280,7 +282,7 @@ func TestAttentionRowsOrdersByTimestampRegardlessOfInsertionOrder(t *testing.T) 
 		t.Fatalf("attentionRows: %v", err)
 	}
 	if len(got) != 1 || got[0].sourcePath != "/src/fractional-attention.md" || got[0].contentHash != "new" {
-		t.Fatalf("rows = %+v, want chronologically latest failed row only", got)
+		t.Fatalf("rows = %+v, want only the path whose last-inserted row is failed", got)
 	}
 }
 

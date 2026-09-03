@@ -39,17 +39,20 @@ const (
 // ErrAlreadyRunning is returned by Run when another ingest holds the flock.
 var ErrAlreadyRunning = errors.New("ingest already running")
 var defaultNotify func(title, body string) error
+
 // failureClass adjudicates whether a digest failure consumes a retry attempt.
 // Only permanent (digest-output) problems increment attempts; transient LLM
 // errors and infrastructure errors (write/index/ledger) are recorded as failed
 // without consuming an attempt, so the file retries on the next run.
 type failureClass int
+
 const (
 	classPermanent failureClass = iota // unparsable frontmatter / missing title
 	classTransient                     // llm.ErrTransient
 	classInfra                         // store.Write / idx.Add / ledger writes
 	classRefused                       // llm.ErrRefused
 )
+
 type RunOptions struct {
 	DryRun bool
 	Limit  int
@@ -75,6 +78,7 @@ type Runner struct {
 type TextExtractor interface {
 	Extract(context.Context, string) (string, error)
 }
+
 func New(cfg *config.Config, store storage.Storage, idx index.Index, llmAdapter llm.Adapter, dbPath string) (*Runner, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("ingest.New: nil config")
@@ -91,6 +95,7 @@ func New(cfg *config.Config, store storage.Storage, idx index.Index, llmAdapter 
 		readDir: os.ReadDir, notifyFunc: defaultNotify, withTimeout: context.WithTimeout,
 	}, nil
 }
+
 // DigestProfile returns the retry identity for a digest configuration.
 // ExtractionContractVersion is included because text-mode provider input is
 // produced by the local extractor rather than sent as a raw PDF.
@@ -217,6 +222,7 @@ func (r *Runner) handleSuccessRow(sourcePath string, prev *ledgerRow, report *Re
 	})
 	return err
 }
+
 type scanEntry struct {
 	absPath   string
 	sourceDir string
@@ -224,6 +230,7 @@ type scanEntry struct {
 	size      int64
 	mtime     time.Time
 }
+
 func (r *Runner) scan(report *Report) []scanEntry {
 	var entries []scanEntry
 	now := r.now()
@@ -483,7 +490,9 @@ func (r *Runner) reportSweepSourceError(report *Report, dir string, err error) {
 		Error:  sourceErrorText(err),
 	})
 }
+
 type sourceSnapshot map[string]struct{}
+
 func (r *Runner) snapshotDir(dir string) (sourceSnapshot, bool, error) {
 	entries, err := r.readDir(dir)
 	if err != nil {
@@ -557,6 +566,7 @@ func contentHash(data []byte) string {
 	h := sha256.Sum256(data)
 	return fmt.Sprintf("%x", h)
 }
+
 // hashFile streams the file into a sha256 hasher so full contents are never
 // retained in memory. Only the hex digest is kept per scan entry.
 func hashFile(path string) (string, error) {
@@ -638,6 +648,7 @@ func collapseDashes(s string) string {
 	}
 	return b.String()
 }
+
 // truncateNFDSafe truncates s (NFC) so its NFD byte representation does not
 // exceed maxBytes, without splitting a multi-byte character.
 func truncateNFDSafe(s string, maxBytes int) string {
@@ -659,6 +670,7 @@ func truncateNFDSafe(s string, maxBytes int) string {
 	}
 	return s[:nfcCut]
 }
+
 // ErrAlreadyRunning is returned by Run when another ingest holds the flock.
 // failureClass adjudicates whether a digest failure consumes a retry attempt.
 // Only permanent (digest-output) problems increment attempts; transient LLM
