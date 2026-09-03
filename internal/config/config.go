@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -24,6 +25,7 @@ type LLMConfig struct {
 	BaseURL          string `yaml:"base_url"`
 	EmbeddingModel   string `yaml:"embedding_model"`
 	EmbeddingBaseURL string `yaml:"embedding_base_url"`
+	MaxInputChars    int    `yaml:"max_input_chars"`
 	// TimeoutSeconds bounds one digest call. Zero means the per-backend
 	// default (5 minutes); negative is a config error.
 	TimeoutSeconds int `yaml:"timeout_seconds"`
@@ -291,8 +293,29 @@ func (c *Config) validate() error {
 	if c.Adapter != "obsidian" && c.Adapter != "markdown" {
 		return fmt.Errorf("adapter: %q not supported; use \"obsidian\" or \"markdown\"", c.Adapter)
 	}
-	if c.LLM.Backend != "claudecode" && c.LLM.Backend != "ollama" {
-		return fmt.Errorf("llm.backend: %q not supported; use \"claudecode\" or \"ollama\"", c.LLM.Backend)
+	if c.LLM.Backend != "claudecode" && c.LLM.Backend != "ollama" && c.LLM.Backend != "openai" {
+		return fmt.Errorf("llm.backend: %q not supported; use \"claudecode\", \"ollama\", or \"openai\"", c.LLM.Backend)
+	}
+	if c.LLM.Backend == "openai" {
+		if c.LLM.Model == "" {
+			return fmt.Errorf("llm.model: must not be empty for openai")
+		}
+		if c.LLM.BaseURL == "" {
+			return fmt.Errorf("llm.base_url: must not be empty for openai")
+		}
+		if err := validateOpenAIBaseURL(c.LLM.BaseURL); err != nil {
+			return err
+		}
+		if c.LLM.MaxInputChars <= 0 || c.LLM.MaxInputChars > 1000000 {
+			return fmt.Errorf("llm.max_input_chars: must be positive and at most 1000000")
+		}
+		for i, source := range c.Sources {
+			for _, typ := range source.Types {
+				if typ != "pdf" {
+					return fmt.Errorf("sources[%d].types: openai supports pdf sources only", i)
+				}
+			}
+		}
 	}
 	if c.LLM.TimeoutSeconds < 0 {
 		return fmt.Errorf("llm.timeout_seconds: must be positive; expected a value in seconds")
@@ -391,4 +414,20 @@ func containsString(items []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func validateOpenAIBaseURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "http" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("llm.base_url: must be an http loopback API root")
+	}
+	host := u.Hostname()
+	if strings.EqualFold(host, "localhost") {
+		return nil
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("llm.base_url: must be an http loopback API root")
+	}
+	return nil
 }

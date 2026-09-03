@@ -35,21 +35,18 @@ directories the ingest pipeline reads directly (0021).
   tools (read, write, delete, list, search, scan, parse).
 - CLI (§9): `init`, `search`, `serve`, `ingest`, plus `fetch`, `digest`,
   `synthesize`, `embed`, `similar`, `graph`, `index`, `lint`.
-- `internal/llm` adapter interface with a `claudecode` backend (`claude --print`).
-- Single-mode config/storage: absolute `wiki_dir` root, `sources[]`, absolute
-  `db_path` outside the synced folder.
+- `internal/llm` adapter interface with `claudecode` and `ollama` path-mode
+  backends, plus a local `openai` text-mode backend for extracted PDFs.
 - SQLite FTS5 full-text search (trigram, Korean-friendly).
 - launchd template + setup docs for zero-touch scheduled ingest.
 
 ### 1.3 Out of scope
 
-- Image OCR.
+- Native provider PDF/image attachments; local providers receive extracted text.
 - Dedicated phone-capture tooling: a share-sheet target, and consume-and-archive
-  semantics for inbox directories (project-background S5/O5). A folder the phone
-  syncs into is already usable as an ordinary `sources[].path`, which needs no
-  code and is not what this entry defers.
-- `pdftotext` text-extraction step (conditional fallback; **not activated** — O1
-  verified headless PDF reading works, see 0021 D6).
+  semantics for inbox directories. A folder the phone syncs into is already
+  usable as an ordinary `sources[].path`.
+- PDF chunking/map-reduce or partial summaries.
 - Watch mode / resident daemon (batch + launchd chosen instead).
 - General git auto-commit is opt-in, off by default (`git.auto_commit`, §3.1,
   0024). `wiki_delete` attempts to auto-commit its own deletion regardless of
@@ -126,15 +123,13 @@ sources:                # external directories the ingest pipeline reads. May be
   - path: string        # absolute (after leading ~/ expansion)
     types: [string]     # allowed extensions, lowercase, no leading dot (e.g. [pdf, md])
 llm:
-  backend: string       # default "claudecode". Allowed: "claudecode", "ollama".
-  model: string         # optional. Passed as --model to the LLM backend. Default: empty (backend default).
-  base_url: string      # optional, "ollama" backend only. Default: http://localhost:11434.
-  timeout_seconds: int  # optional. Per-digest-call bound for either backend. Default: 300. Negative rejected.
-  embedding_model: string    # optional. Required by `cogvault embed` (§9.8); enables embedding-ranked `similar` (§9.9).
-  embedding_base_url: string # optional. Default: http://localhost:11434. Rejected unless embedding_model is set.
-max_file_size_mb: int   # ingest file size cap in MB. Default: 32. Negative rejected.
-exclude: string[]       # scan + index exclusion, relative to wiki_dir. Default: [".obsidian", ".trash", "sources/_archived"]
-exclude_read: string[]  # read + scan + index exclusion, relative to wiki_dir. Default: []
+  backend: string       # default "claudecode". Allowed: "claudecode", "ollama", "openai".
+  model: string         # optional generally; required by "openai".
+  base_url: string      # ollama/openai API root; openai must be loopback http.
+  max_input_chars: int  # openai PDF text ceiling, 1..1000000; required by openai.
+  timeout_seconds: int  # optional. Per-digest-call bound. Default: 300. Negative rejected.
+  embedding_model: string    # optional. Required by `cogvault embed` (§9.8).
+  embedding_base_url: string # optional. Default: http://localhost:11434.
 adapter: string         # default "obsidian". Allowed: "obsidian", "markdown".
 consistency_interval: int  # min seconds between consistency checks. Default: 5.
 auth:                   # HTTP/SSE transport authorization (§8.1, §9.3). Ignored for stdio.
@@ -176,7 +171,10 @@ later (0001). Rejected:
 - A source that contains, is contained by, or equals `wiki_dir` (overlap).
 - `db_path` inside `wiki_dir`.
 - `db_path` that is a directory-like path.
-- `adapter` outside the allowed list; `llm.backend` other than `claudecode`.
+- `adapter` outside the allowed list; `llm.backend` outside
+  `claudecode`/`ollama`/`openai`. For `openai`: a missing or non-loopback
+  `base_url`, a missing `model`, a non-PDF `sources[].types` entry, or
+  `max_input_chars` outside 1..1000000.
 - `max_file_size_mb` negative (zero or omitted defaults to 32).
 - `auth.mode` outside `none`/`bearer`/`oauth`.
 - `auth.oauth.issuer` empty or not an absolute `https://` URL, when `auth.mode`
@@ -704,9 +702,12 @@ cogvault ingest [--config <path>] [--dry-run] [--limit N] [--scheduled]
 - `--limit N`: process at most N files (backlog batching / quota control).
 - `--scheduled`: set the ledger run origin to `scheduled` (used by the launchd
   job); otherwise the origin is `interactive`.
-- Requires `claude` on PATH; if absent: `claude CLI not found in PATH; install
-  Claude Code or add it to PATH`.
-- Prints the per-run report (§10.4) to stdout.
+- For `claudecode`, requires `claude` on PATH; if absent: `claude CLI not found
+  in PATH; install Claude Code or add it to PATH`.
+- For `openai`, requires `pdftotext`, `pdfinfo`, `pdftoppm`, `tesseract`, and
+  Tesseract `eng`/`kor` data. It then checks the configured loopback
+  `<base_url>/models` for the configured ready model. Any failure occurs before
+  Runner/ledger construction and is reported as a command error.
 - When `--dry-run` is not set and `git.auto_commit: write+ingest` (§3.1) and
   the run digested at least one file, commits the whole `wiki_dir` tree once
   (`git add -A -- .` + `git commit -m "wiki: ingest snapshot"`, run with
@@ -1071,7 +1072,8 @@ ingest_ledger(
   status TEXT,            -- success | failed | refused | superseded
   attempts INTEGER, last_error TEXT,
   run_origin TEXT,        -- scheduled | interactive
-  llm_model TEXT,
+  llm_model TEXT NOT NULL DEFAULT '',
+  digest_profile TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (source_path, content_hash)
 )
 ```
@@ -1081,8 +1083,11 @@ busy_timeout make the second connection safe). Type-excluded/oversized files are
 reported per run, not persisted. Source originals are never moved or deleted.
 Existing ledger rows are not migrated when refusal classification changes. A
 historical generic API failure already recorded as `refused` remains terminal
-until `llm.model` or source content changes, which activates the existing
-model/content-hash re-attempt gate.
+until its `digest_profile` or source content changes, which activates the
+retry gate. `digest_profile` encodes backend, model, canonical base URL,
+`max_input_chars`, and extraction-contract version; changing any part makes a
+prior failed or refused row retryable. A legacy row with an empty profile is
+retryable once under the current profile.
 
 ### 10.7 Behavior constants and promoted knobs
 
@@ -1137,8 +1142,9 @@ golang.org/x/sys                # unix.Flock for the ingest lock
 github.com/golang-jwt/jwt/v5    # JWT parsing/validation (oauth mode)
 ```
 
-The `claudecode` backend shells out to the `claude` CLI (Claude Code); it is a
-runtime dependency of `cogvault ingest`, not a Go module.
+The `claudecode` backend shells out to the `claude` CLI; the `ollama` and
+`openai` backends use HTTP. The `openai` PDF path additionally requires Poppler,
+Tesseract, and `eng`/`kor` language data at runtime.
 
 ---
 
@@ -1148,7 +1154,8 @@ runtime dependency of `cogvault ingest`, not a Go module.
 - Absolute `wiki_dir`/`db_path` accepted; leading `~/` expands; `~` mid-path
   literal. Relative after expansion → error. Source overlapping `wiki_dir` (either
   direction / equal) → error. `db_path` inside `wiki_dir` → error. Unknown key →
-  error. `llm.backend != claudecode` → error.
+  error. Backend must be `claudecode`, `ollama`, or `openai`; OpenAI requires a
+  loopback base URL, model, PDF-only sources, and `max_input_chars` in 1..1000000.
 
 ### Storage
 - Whole wiki root writable; `_schema.md` write → `ErrPermission`. `..`/absolute →

@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/teslamint/cogvault/internal/extract"
 	"github.com/teslamint/cogvault/internal/gitutil"
 	"github.com/teslamint/cogvault/internal/index"
 	"github.com/teslamint/cogvault/internal/ingest"
@@ -17,6 +19,29 @@ import (
 
 type reportNotifier interface {
 	Notify(*ingest.Report)
+}
+
+var ingestLookPath = lookupPDFPrerequisite
+var ingestCheckOpenAIReady = llm.CheckOpenAIReady
+
+func lookupPDFPrerequisite(name string) (string, error) {
+	if name != "eng" && name != "kor" {
+		return exec.LookPath(name)
+	}
+	bin, err := exec.LookPath("tesseract")
+	if err != nil {
+		return "", err
+	}
+	out, err := exec.Command(bin, "--list-langs").Output()
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(line) == name {
+			return name, nil
+		}
+	}
+	return "", fmt.Errorf("language data %q is not installed", name)
 }
 
 var runIngestNotify = notifyAfterRun
@@ -54,8 +79,16 @@ func runIngest(cmd *cobra.Command, args []string) error {
 		switch cfg.LLM.Backend {
 		case "ollama":
 			adpt = llm.NewOllama(cfg.LLM.BaseURL, cfg.LLM.Model, opts...)
+		case "openai":
+			if err := extract.ValidatePrerequisites(ingestLookPath); err != nil {
+				return err
+			}
+			if err := ingestCheckOpenAIReady(cmd.Context(), cfg.LLM.BaseURL, cfg.LLM.Model); err != nil {
+				return fmt.Errorf("openai readiness failed: %w", err)
+			}
+			adpt = llm.NewOpenAI(cfg.LLM.BaseURL, cfg.LLM.Model, opts...)
 		default:
-			binPath, err := exec.LookPath("claude")
+			binPath, err := ingestLookPath("claude")
 			if err != nil {
 				return fmt.Errorf("claude CLI not found in PATH; install Claude Code or add it to PATH")
 			}

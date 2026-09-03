@@ -26,17 +26,25 @@ import (
 var errPermanent = errors.New("permanent digest failure")
 
 type mockLLM struct {
-	mu       sync.Mutex
-	requests []llm.DigestRequest
-	fn       func(req llm.DigestRequest) (*llm.DigestResult, error)
+	mu        sync.Mutex
+	requests  []llm.DigestRequest
+	fn        func(req llm.DigestRequest) (*llm.DigestResult, error)
+	ctxFn     func(context.Context)
+	inputMode llm.InputMode
 }
 
-func (m *mockLLM) Digest(_ context.Context, req llm.DigestRequest) (*llm.DigestResult, error) {
+func (m *mockLLM) Digest(ctx context.Context, req llm.DigestRequest) (*llm.DigestResult, error) {
 	m.mu.Lock()
 	m.requests = append(m.requests, req)
+	ctxFn := m.ctxFn
 	m.mu.Unlock()
+	if ctxFn != nil {
+		ctxFn(ctx)
+	}
 	return m.fn(req)
 }
+
+func (m *mockLLM) InputMode() llm.InputMode { return m.inputMode }
 
 func (m *mockLLM) Name() string { return "mock" }
 
@@ -2673,5 +2681,264 @@ func TestDigestSourceExtPassedToLLM(t *testing.T) {
 	}
 	if got := m.requests[0].SourceExt; got != ".md" {
 		t.Errorf("SourceExt = %q, want %q", got, ".md")
+	}
+}
+
+type mockExtractor struct {
+	called  int
+	text    string
+	err     error
+	advance func()
+}
+
+func (m *mockExtractor) Extract(context.Context, string) (string, error) {
+	m.called++
+	if m.advance != nil {
+		m.advance()
+	}
+	return m.text, m.err
+}
+
+func TestRunProfileChangeRetriesExhaustedFailureAndNotifiesOncePerProfile(t *testing.T) {
+	for _, change := range []struct {
+		name  string
+		apply func(*config.LLMConfig)
+	}{
+		{name: "base URL", apply: func(c *config.LLMConfig) { c.BaseURL = "http://127.0.0.1:2/" }},
+		{name: "max input chars", apply: func(c *config.LLMConfig) { c.MaxInputChars = 200 }},
+	} {
+		t.Run(change.name, func(t *testing.T) {
+			m := &mockLLM{fn: func(llm.DigestRequest) (*llm.DigestResult, error) { return nil, errPermanent }}
+			h := newHarness(t, []string{"md"}, m)
+			h.runner.cfg.LLM.Backend = "openai"
+			h.runner.cfg.LLM.Model = "fixed-model"
+			h.runner.cfg.LLM.BaseURL = "http://127.0.0.1:1"
+			h.runner.cfg.LLM.MaxInputChars = 100
+			h.write(t, "broken.md", "content")
+			notifications := 0
+			h.runner.notifyFunc = func(string, string) error { notifications++; return nil }
+			oldProfile := DigestProfile(h.runner.cfg)
+			for i := 0; i < maxAttempts; i++ {
+				rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "test"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				h.runner.Notify(rep)
+			}
+			if notifications != 1 {
+				t.Fatalf("notifications before profile change = %d, want 1", notifications)
+			}
+			change.apply(&h.runner.cfg.LLM)
+			newProfile := DigestProfile(h.runner.cfg)
+			if oldProfile == newProfile {
+				t.Fatal("profile did not change")
+			}
+			rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "test"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rep.NewAttention) != 1 {
+				t.Fatalf("new attention = %+v, want one", rep.NewAttention)
+			}
+			h.runner.Notify(rep)
+			if notifications != 2 {
+				t.Fatalf("notifications after profile change = %d, want 2", notifications)
+			}
+			oldRows, err := AttentionRows(h.dbPath, "fixed-model", oldProfile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(oldRows) != 0 {
+				t.Fatalf("old-profile attention = %+v, want empty", oldRows)
+			}
+			newRows, err := AttentionRows(h.dbPath, "fixed-model", newProfile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(newRows) != 1 {
+				t.Fatalf("new-profile attention = %+v, want one", newRows)
+			}
+		})
+	}
+}
+
+func TestRunTextInputExtractsPDFAndSharesContext(t *testing.T) {
+	m := okLLM()
+	m.inputMode = llm.TextInput
+	h := newHarness(t, []string{"pdf"}, m)
+	h.write(t, "scan.pdf", "pdf bytes")
+	ex := &mockExtractor{text: "complete extracted text"}
+	h.runner.extractor = ex
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "test"})
+	if err != nil || rep.Digested != 1 {
+		t.Fatalf("Run: report=%+v err=%v", rep, err)
+	}
+	if ex.called != 1 || len(m.requests) != 1 || m.requests[0].SourceText != ex.text {
+		t.Fatalf("extractor=%d requests=%+v", ex.called, m.requests)
+	}
+}
+
+type movingDeadlineContext struct {
+	context.Context
+	remaining *time.Duration
+}
+
+func (c movingDeadlineContext) Deadline() (time.Time, bool) {
+	return time.Unix(0, 0).Add(*c.remaining), true
+}
+
+func TestDigestExtractionConsumesSharedDeadlineDeterministically(t *testing.T) {
+	m := okLLM()
+	m.inputMode = llm.TextInput
+	remaining := 5 * time.Second
+	var observed time.Duration
+	m.ctxFn = func(ctx context.Context) {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("digest context has no deadline")
+		}
+		observed = deadline.Sub(time.Unix(0, 0))
+	}
+	h := newHarness(t, []string{"pdf"}, m)
+	h.write(t, "scan.pdf", "pdf bytes")
+	h.runner.withTimeout = func(context.Context, time.Duration) (context.Context, context.CancelFunc) {
+		return movingDeadlineContext{Context: context.Background(), remaining: &remaining}, func() {}
+	}
+	// The extractor's work advances the deterministic remaining budget without sleeping.
+	h.runner.extractor = &mockExtractor{text: "complete extracted text", advance: func() { remaining -= 2 * time.Second }}
+	if _, err := h.runner.Run(context.Background(), RunOptions{Origin: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if observed != 3*time.Second {
+		t.Fatalf("remaining digest budget = %s, want 3s", observed)
+	}
+}
+
+func TestRunPathInputDoesNotInvokeExtractor(t *testing.T) {
+	m := okLLM()
+	h := newHarness(t, []string{"md"}, m)
+	h.write(t, "note.md", "# note")
+	ex := &mockExtractor{text: "must not be used"}
+	h.runner.extractor = ex
+	if _, err := h.runner.Run(context.Background(), RunOptions{Origin: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if ex.called != 0 {
+		t.Fatalf("extractor called %d times", ex.called)
+	}
+}
+
+func TestRunLegacyExhaustedRowRetriedOnceAndThenSkipped(t *testing.T) {
+	m := &mockLLM{fn: func(_ llm.DigestRequest) (*llm.DigestResult, error) {
+		return nil, errPermanent
+	}}
+	h := newHarness(t, []string{"md"}, m)
+	h.runner.cfg.LLM.Model = "current-model"
+	h.runner.cfg.LLM.Backend = "openai"
+	h.runner.cfg.LLM.BaseURL = "http://127.0.0.1:1"
+	src := h.write(t, "legacy.md", "content")
+	hash := contentHash([]byte("content"))
+
+	// Seed a legacy exhausted row: digestProfile="" (pre-migration), same model.
+	if err := h.runner.ledger.upsert(ledgerRow{
+		sourcePath:  src,
+		contentHash: hash,
+		sourceDir:   h.srcDir,
+		status:      "failed",
+		attempts:    maxAttempts,
+		lastError:   "digest: old failure",
+		runOrigin:   "scheduled",
+		llmModel:    "current-model",
+	}); err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+
+	// First Run: legacy row should be re-attempted (not skipped).
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "scheduled"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Skipped != 0 {
+		t.Fatalf("first run: skipped=%d, want 0 (legacy row should retry)", rep.Skipped)
+	}
+	if rep.Failed != 1 {
+		t.Fatalf("first run: failed=%d, want 1", rep.Failed)
+	}
+	if len(m.requests) != 1 {
+		t.Fatalf("first run: llm calls=%d, want 1", len(m.requests))
+	}
+
+	// Verify the row now carries the current profile.
+	row, found, err := h.runner.ledger.lookup(src, hash)
+	if err != nil || !found {
+		t.Fatalf("lookup: found=%v err=%v", found, err)
+	}
+	wantProfile := DigestProfile(h.runner.cfg)
+	if row.digestProfile != wantProfile {
+		t.Fatalf("digest_profile=%q, want %q", row.digestProfile, wantProfile)
+	}
+
+	// Second Run: now exhausted with the current profile, should be skipped.
+	m.mu.Lock()
+	m.requests = nil
+	m.mu.Unlock()
+	rep2, err := h.runner.Run(context.Background(), RunOptions{Origin: "scheduled"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep2.Skipped != 1 {
+		t.Fatalf("second run: skipped=%d, want 1 (now has current profile)", rep2.Skipped)
+	}
+	if len(m.requests) != 0 {
+		t.Fatalf("second run: llm calls=%d, want 0", len(m.requests))
+	}
+}
+
+func TestRunLegacyRefusedRowRetriedOnce(t *testing.T) {
+	m := &mockLLM{fn: func(_ llm.DigestRequest) (*llm.DigestResult, error) {
+		return nil, llm.ErrRefused
+	}}
+	h := newHarness(t, []string{"md"}, m)
+	h.runner.cfg.LLM.Model = "current-model"
+	h.runner.cfg.LLM.Backend = "openai"
+	h.runner.cfg.LLM.BaseURL = "http://127.0.0.1:1"
+	src := h.write(t, "legacy-refused.md", "content")
+	hash := contentHash([]byte("content"))
+
+	// Seed a legacy refused row: digestProfile="" (pre-migration), same model.
+	if err := h.runner.ledger.upsert(ledgerRow{
+		sourcePath:  src,
+		contentHash: hash,
+		sourceDir:   h.srcDir,
+		status:      "refused",
+		lastError:   "digest: old refusal",
+		runOrigin:   "scheduled",
+		llmModel:    "current-model",
+	}); err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+
+	// Run: legacy refused row should be re-attempted (not skipped).
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "scheduled"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Skipped != 0 {
+		t.Fatalf("skipped=%d, want 0 (legacy refused should retry)", rep.Skipped)
+	}
+	if rep.Refused != 1 {
+		t.Fatalf("refused=%d, want 1", rep.Refused)
+	}
+
+	// After retry the row carries the current profile; second run skips.
+	m.mu.Lock()
+	m.requests = nil
+	m.mu.Unlock()
+	rep2, err := h.runner.Run(context.Background(), RunOptions{Origin: "scheduled"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep2.Skipped != 1 {
+		t.Fatalf("second run: skipped=%d, want 1", rep2.Skipped)
 	}
 }

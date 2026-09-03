@@ -119,7 +119,7 @@ method — `Write`, `Delete`, and both ends of `Move` — for any path with a
 with `strings.EqualFold`. This sits *outside* the configurable exclude lists
 on purpose. It is not a visibility rule: `git add` executes the clean filter
 `.gitattributes` names, with the command line taken from `.git/config`, so a
-writable pair of those files turned the auto-commit path (§2.11) into
+writable pair of those files turned the auto-commit path (§2.12) into
 arbitrary command execution as the server process on the next ordinary
 write. Reproduced end-to-end before the fix. An operator editing
 `exclude`/`exclude_read` — which otherwise only affect search and listing —
@@ -177,17 +177,21 @@ direct `Add` calls pass zero size/mtime, CheckConsistency threads real values.
 ### 2.6 llm (new)
 
 ```go
-type DigestRequest struct { SourcePath, SchemaText, PageSlug, SourceExt string }
+type DigestRequest struct { SourcePath, SchemaText, PageSlug, SourceExt, SourceText string }
 type DigestResult  struct { PageContent string }
+type InputMode uint8 // PathInput or TextInput
 type Adapter interface {
     Digest(ctx context.Context, req DigestRequest) (*DigestResult, error)
     Name() string
+    InputMode() InputMode
 }
-var ErrTransient error   // wraps quota/rate-limit/timeout/transport/API failures
-var ErrRefused error     // anchored provider policy refusal; model-gated
+var ErrTransient error
+var ErrRefused error
 func NewClaudeCode(binPath, model string, opts ...Option) *ClaudeCode
-func NewOllama(baseURL, model string, opts ...Option) *Ollama   // second backend
-func WithTimeout(d time.Duration) Option                        // 0/negative => 5m default
+func NewOllama(baseURL, model string, opts ...Option) *Ollama
+func NewOpenAI(baseURL, model string, opts ...Option) *OpenAI
+func CheckOpenAIReady(ctx context.Context, baseURL, model string) error
+func WithTimeout(d time.Duration) Option
 ```
 
 **Responsibility**: define the digestion contract and two backends sharing the
@@ -246,7 +250,21 @@ handling because the diagnostic pipeline already bounds to 2,000 runes.
 
 A future local backend implements the same interface without touching `ingest`.
 
-### 2.7 ingest (new)
+### 2.7 extract (new)
+
+`PDFExtractor` owns bounded Poppler/Tesseract subprocesses. It first runs
+`pdftotext`; usable complete text skips OCR. Otherwise it preflights page count
+and per-page dimensions with `pdfinfo` (parsing both the whole-document
+`Page size:` and ranged `Page N size:` forms), rejects pages over the pixel
+cap, renders one page at a time to an owned temporary file with `pdftoppm
+-singlefile` (its `-png … -` stdout form emits nothing on some Poppler
+builds), enforces a rendered-image byte cap, and OCRs each image with
+`tesseract -l eng+kor`. The aggregate collector enforces `max_input_chars`
+and preserves page order.
+`ValidatePrerequisites` exposes the command and language names checked by the
+CLI before the OpenAI adapter or ingest ledger is constructed.
+
+### 2.8 ingest (new)
 
 ```go
 type Runner struct { /* cfg, store, idx, llm, dbPath, ledger, seams */ }
@@ -255,7 +273,7 @@ func New(cfg *config.Config, store storage.Storage, idx index.Index,
 func (r *Runner) Run(ctx context.Context, opts RunOptions) (*Report, error)
 func (r *Runner) Notify(report *Report)
 func (r *Runner) Close() error
-func AttentionRows(dbPath, model string) ([]AttentionRow, error)
+func AttentionRows(dbPath, model string, profile ...string) ([]AttentionRow, error)
 type RunOptions struct { DryRun bool; Limit int; Origin string }
 ```
 
@@ -302,7 +320,7 @@ DB file safe. DDL and transitions (`lookup`, `supersedePrevSuccess`, `upsert`) p
 SPEC §10.6.
 
 `AttentionRows` opens only the ledger connection. It selects the latest row
-for each source path with a fixed-width UTC nanosecond sort key. It returns
+for each source path using `MAX(rowid)`. It returns
 exhausted and refused rows for the current model. A missing database returns
 an empty result without creating files.
 
@@ -312,7 +330,7 @@ the adapter error into the per-file report error and, when the ledger write
 succeeds, ledger `last_error`; the adapter's eligibility, shape,
 canonicalization, and 2,000-rune gates run before that persistence boundary.
 
-### 2.8 mcp
+### 2.9 mcp
 
 `server.go`: registers seven tools (`wiki_read`, `wiki_write`, `wiki_delete`,
 `wiki_list`, `wiki_search`, `wiki_scan`, `wiki_parse`) via `registerTools`,
@@ -331,10 +349,10 @@ five are read-only, non-destructive. `IdempotentHint`/`OpenWorldHint` stay at
 "wiki root" instead of "vault". `handleWikiSearch` calls `idx.Search(query,
 limit)`. `handleWikiDelete` calls `store.Delete`, removes the path from the
 index if it was indexed, then unconditionally calls `gitAutoCommit`, a thin
-wrapper over `gitutil.Commit` (§2.11) that only chooses the pathspec and the
+wrapper over `gitutil.Commit` (§2.12) that only chooses the pathspec and the
 log wording; it best-effort `git add`s and `git commit`s the deletion when
 `wiki_dir` is a git repository — failures are logged, not returned as a tool
-error (§2.10 covers the authorization layer that gates this over the
+error (§2.11 covers the authorization layer that gates this over the
 network). "Unconditional" means the call always happens, not that it always
 commits: `git add` on a path git never tracked (e.g. under the default
 `git.auto_commit: off`, where `wiki_write` never committed it) fails with
@@ -344,30 +362,21 @@ only when `cfg.Git.CommitsOnWrite()` (default false) — this is the only
 conditional caller; `wiki_delete`'s call is unconditional and predates 0024.
 Instructions/`mapError`/write-then-index otherwise unchanged.
 
-### 2.9 cmd/cogvault
+### 2.10 cmd/cogvault
 
 Root persistent flag `--config` (default `config.DefaultConfigPath()`); the old
 vault flag is deleted. `wire.go`: `resolveConfigPath(cmd)` + `bootstrap(configPath)` →
-`config.Load` → adapter → `storage.NewFSStorage(cfg.WikiDir, cfg)` →
-`index.NewSQLiteIndex(cfg.WikiDir, cfg.DBPath, cfg)`. `init.go` is the two-step
-flow (SPEC §9.1). `ingest.go` (new): flags → `ingest.RunOptions`, `exec.LookPath`
-for `claude` → `llm.NewClaudeCode`, prints `report.String()`, nonzero exit only on
-run-level failure. When `cfg.Git.CommitsOnIngest()` (0024) and the run digested
-at least one file, `postIngestGitCommit` runs after `postIngestEmbed`: one
-`gitutil.Commit` (§2.11) doing `git add -A -- .` + `git commit -m "wiki:
-ingest snapshot"` over the whole `cfg.WikiDir` tree, best-effort — failures
-(including "nothing to commit", the expected outcome when a digest
-reproduces identical content) log and never fail the command.
-The `-- .` pathspec is load-bearing, not cosmetic: `git -C wikiDir add -A`
-resolves against the enclosing repository's root, not `wikiDir`, whenever
-`wikiDir` is a plain subdirectory of a larger repo rather than its own git
-root — a bare `-A` would stage and commit dirty files anywhere in that
-outer repo. `TestIngestGitCommit_NestedWikiDirDoesNotStageOutsideFiles`
-(`cmd/cogvault/ingest_git_commit_test.go`) pins this: it fails against a
-`-A`-without-pathspec regression. The lock, timeouts, and signal handling
-are `gitutil`'s, shared with `internal/mcp`: a scheduled ingest and a live
-`serve` commit into the same repository, so they must contend on one lock
-rather than race.
+`config.Load` → adapter → `storage.NewFSStorage` → `index.NewSQLiteIndex`. `init.go`
+is the two-step flow (SPEC §9.1). `ingest.go` preserves dry-run behavior and
+selects the backend: Claude and Ollama resolve path-mode adapters; OpenAI checks
+all Poppler/Tesseract prerequisites and loopback `/models` readiness before
+constructing `llm.NewOpenAI`. It then passes the adapter to `ingest.New`, prints
+`report.String()`, and returns nonzero only on run-level failure.
+When `cfg.Git.CommitsOnIngest()` and the run digested at least one file,
+`postIngestGitCommit` runs after `postIngestEmbed`, using the shared gitutil
+lock and best-effort whole-tree snapshot semantics documented in §2.12. The
+scheduled ingest and live serve paths therefore contend on one lock rather
+than race.
 
 `status.go` loads the config and calls `ingest.AttentionRows` directly. It does
 not bootstrap storage, the index, or the ingest runner. Human output uses local
@@ -406,7 +415,7 @@ configured `auth.oauth.audience` that disagrees with the advertised resource
 transport in `exactPathHandler` — mcp-go's `StreamableHTTPServer.ServeHTTP`
 ignores the path entirely when used as a bare `http.Handler` via
 `server.NewStreamableHTTPServer`, so this restores exact-path matching and
-404s elsewhere — and mounts everything through `httpauth.Mount` (§2.10). The
+404s elsewhere — and mounts everything through `httpauth.Mount` (§2.11). The
 `sse` transport keeps mcp-go's default `/sse` and `/message` paths —
 `--endpoint-path` deliberately does not apply to it — and points its message
 endpoint at `--public-url` when set, `http://<addr>` otherwise. `newHTTPServer`
@@ -417,7 +426,7 @@ slowloris-style client dribbling headers at this public endpoint;
 `WriteTimeout` is deliberately left unset, since it would apply to the whole
 connection and cut off long-lived SSE/Streamable HTTP event streams — the
 per-request bound those need instead lives in the httpauth middleware's
-socket-level read/write deadline (§2.10). `validatePublicURL` also rejects
+socket-level read/write deadline (§2.11). `validatePublicURL` also rejects
 userinfo (`user:pass@host`) in `--public-url`, alongside the query/fragment/
 trailing-slash checks, since it would otherwise leak into the advertised
 resource, the token `aud`, and the `WWW-Authenticate` challenge.
@@ -429,7 +438,7 @@ SSE/Streamable HTTP streams drain instead of dying with the process.
 `serveListener` is the listener-injected core tests drive; the signal path
 wraps it via `signal.NotifyContext`.
 
-### 2.10 httpauth (new)
+### 2.11 httpauth (new)
 
 ```go
 type Config struct {
@@ -517,7 +526,7 @@ No rejection path in this package logs a credential, a bearer token, or a raw
 JWT — `logRejection` records only a reason class and remote address.
 
 
-### 2.11 gitutil (new, 0024)
+### 2.12 gitutil (new, 0024)
 
 ```go
 var CommitTimeout = 10 * time.Second

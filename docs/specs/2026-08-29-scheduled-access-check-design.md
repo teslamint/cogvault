@@ -86,7 +86,7 @@ session because macOS may need to display a consent dialog.
 | `wiki_dir` may reside in a macOS-protected location. | `rg -n 'wiki_dir.*iCloud Drive' SPEC.md` | 2026-08-28T22:55:06Z | SPEC allows the wiki root under iCloud Drive. | `SPEC.md` |
 | The current command tree loads configuration through the root `--config` flag. | `sed -n '1,120p' cmd/cogvault/main.go` | 2026-08-28T22:55:06Z | Root defines the persistent flag and registers subcommands. | `cmd/cogvault/main.go` |
 | The active config does not name Documents or Pictures as a source. | `sed -n '/^sources:/,/^[^ -]/p' "$HOME/.config/cogvault/config.yaml"` | 2026-08-28T23:10:39Z | The only configured source is a directory under Downloads. | Local config; path category only, no personal value retained. |
-| Active configured paths are not on a mounted network volume. | `df -P <wiki_dir> <db_parent> <source>; mount | rg 'smbfs|afpfs|nfs|webdav|osxfuse|macfuse'` | 2026-08-28T23:16:06Z | All paths resolve to the local Data volume; no matching network mount is present. | Local mount table; sanitized summary only. |
+| Active configured paths are not on a mounted network volume. | `df -P <wiki_dir> <db_parent> <source>; mount \| rg 'smbfs\|afpfs\|nfs\|webdav\|osxfuse\|macfuse'` | 2026-08-28T23:16:06Z | All paths resolve to the local Data volume; no matching network mount is present. | Local mount table; sanitized summary only. |
 
 ## Architecture
 

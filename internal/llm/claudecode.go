@@ -66,6 +66,8 @@ func NewClaudeCode(binPath, model string, opts ...Option) *ClaudeCode {
 
 func (c *ClaudeCode) Name() string { return "claudecode" }
 
+func (c *ClaudeCode) InputMode() InputMode { return PathInput }
+
 func (c *ClaudeCode) Digest(ctx context.Context, req DigestRequest) (*DigestResult, error) {
 	res, err := c.digest(ctx, req)
 	if err != nil {

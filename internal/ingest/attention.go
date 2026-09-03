@@ -15,21 +15,23 @@ type AttentionRow struct {
 	Attempts    int    `json:"attempts"`
 }
 
-func AttentionRows(dbPath, model string) ([]AttentionRow, error) {
+func AttentionRows(dbPath, model string, profile ...string) ([]AttentionRow, error) {
 	if _, err := os.Stat(dbPath); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("ingest.AttentionRows stat %s: %w", dbPath, err)
 	}
-
 	l, err := openLedger(dbPath)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = l.close() }()
-
-	rows, err := l.attentionRows(model)
+	current := model
+	if len(profile) > 0 {
+		current = profile[0]
+	}
+	rows, err := l.attentionRows(model, current)
 	if err != nil {
 		return nil, err
 	}
@@ -39,14 +41,7 @@ func AttentionRows(dbPath, model string) ([]AttentionRow, error) {
 		if status == "failed" && row.attempts >= maxAttempts {
 			status = "exhausted"
 		}
-		result = append(result, AttentionRow{
-			Path:        row.sourcePath,
-			Status:      status,
-			Error:       row.lastError,
-			LastAttempt: row.digestedAt,
-			Model:       row.llmModel,
-			Attempts:    row.attempts,
-		})
+		result = append(result, AttentionRow{Path: row.sourcePath, Status: status, Error: row.lastError, LastAttempt: row.digestedAt, Model: row.llmModel, Attempts: row.attempts})
 	}
 	return result, nil
 }

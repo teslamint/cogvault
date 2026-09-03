@@ -5,8 +5,16 @@ import (
 	"errors"
 )
 
+type InputMode uint8
+
+const (
+	PathInput InputMode = iota
+	TextInput
+)
+
 type DigestRequest struct {
 	SourcePath string
+	SourceText string
 	SchemaText string
 	PageSlug   string
 	SourceExt  string
@@ -19,6 +27,7 @@ type DigestResult struct {
 type Adapter interface {
 	Digest(ctx context.Context, req DigestRequest) (*DigestResult, error)
 	Name() string
+	InputMode() InputMode
 }
 
 // ErrTransient marks failures worth retrying (quota/rate limit, timeout, CLI

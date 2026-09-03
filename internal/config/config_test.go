@@ -606,3 +606,45 @@ func TestGitAutoCommitInvalidRejected(t *testing.T) {
 		t.Errorf("error %q should say not supported", msg)
 	}
 }
+
+func TestOpenAIConfigValidation(t *testing.T) {
+	tests := []struct {
+		name  string
+		extra string
+		want  string
+	}{
+		{"missing model", "backend: openai\n    base_url: http://127.0.0.1:8888/v1\n    max_input_chars: 100", "model"},
+		{"missing base url", "backend: openai\n    model: m\n    max_input_chars: 100", "base_url"},
+		{"zero limit", "backend: openai\n    model: m\n    base_url: http://127.0.0.1:1/v1\n    max_input_chars: 0", "max_input_chars"},
+		{"too large", "backend: openai\n    model: m\n    base_url: http://127.0.0.1:1/v1\n    max_input_chars: 1000001", "max_input_chars"},
+		{"non-loopback", "backend: openai\n    model: m\n    base_url: https://example.com/v1\n    max_input_chars: 100", "base_url"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := writeConfigFile(t, "wiki_dir: /data/wiki\ndb_path: /state/db.db\nsources:\n  - path: /data/src\n    types: [pdf]\nllm:\n  "+strings.ReplaceAll(tt.extra, "\n    ", "\n  ")+"\n")
+			_, err := Load(p)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err=%v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestOpenAIConfigAcceptsMaximumAndPDFOnly(t *testing.T) {
+	p := writeConfigFile(t, "wiki_dir: /data/wiki\ndb_path: /state/db.db\nsources:\n  - path: /data/src\n    types: [.PDF]\nllm:\n  backend: openai\n  model: m\n  base_url: http://localhost:8888/v1/\n  max_input_chars: 1000000\n")
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LLM.MaxInputChars != 1000000 || cfg.Sources[0].Types[0] != "pdf" {
+		t.Fatalf("cfg=%+v", cfg)
+	}
+}
+
+func TestOpenAIConfigRejectsNonPDFSource(t *testing.T) {
+	p := writeConfigFile(t, "wiki_dir: /data/wiki\ndb_path: /state/db.db\nsources:\n  - path: /data/src\n    types: [pdf, md]\nllm:\n  backend: openai\n  model: m\n  base_url: http://localhost:8888/v1\n  max_input_chars: 100\n")
+	_, err := Load(p)
+	if err == nil || !strings.Contains(err.Error(), "pdf") {
+		t.Fatalf("err=%v", err)
+	}
+}

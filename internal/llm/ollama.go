@@ -52,6 +52,8 @@ func NewOllama(baseURL, model string, opts ...Option) *Ollama {
 
 func (o *Ollama) Name() string { return "ollama" }
 
+func (o *Ollama) InputMode() InputMode { return PathInput }
+
 func (o *Ollama) Digest(ctx context.Context, req DigestRequest) (*DigestResult, error) {
 	prompt := buildPrompt(req)
 

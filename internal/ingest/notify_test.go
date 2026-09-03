@@ -188,15 +188,17 @@ func TestRunAlreadyExhaustedDoesNotNotify(t *testing.T) {
 	h.runner.cfg.LLM.Model = "current-model"
 	src := h.write(t, "exhausted.md", "one")
 	hash := contentHash([]byte("one"))
+	currentProfile := DigestProfile(h.runner.cfg)
 	if err := h.runner.ledger.upsert(ledgerRow{
-		sourcePath:  src,
-		contentHash: hash,
-		sourceDir:   h.srcDir,
-		status:      "failed",
-		attempts:    maxAttempts,
-		lastError:   "digest: permanent failure",
-		runOrigin:   "scheduled",
-		llmModel:    "current-model",
+		sourcePath:    src,
+		contentHash:   hash,
+		sourceDir:     h.srcDir,
+		status:        "failed",
+		attempts:      maxAttempts,
+		lastError:     "digest: permanent failure",
+		runOrigin:     "scheduled",
+		llmModel:      "current-model",
+		digestProfile: currentProfile,
 	}); err != nil {
 		t.Fatalf("seed ledger: %v", err)
 	}
