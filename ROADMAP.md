@@ -1,7 +1,7 @@
 # Roadmap — cogvault
 
 Status: non-canonical forward-looking index
-Last updated: 2026-08-27
+Last updated: 2026-09-08
 
 `SPEC.md`, `DESIGN.md`, and accepted decisions own behavior, architecture, and
 boundaries. This file records only what remains selectable; it never creates
@@ -16,7 +16,8 @@ post-v2 tracker F1–F18 is closed. The delivered product includes:
 
 - one read-write `wiki_dir` plus read-only external `sources[]`;
 - scheduled batch ingest: scan → digest → validate → write → index → ledger;
-- Claude Code and local Ollama LLM backends, with classified failures;
+- Claude Code, Ollama, and loopback OpenAI-compatible LLM backends, with classified failures;
+- local PDF text extraction and OCR for the OpenAI-compatible backend;
 - MCP and CLI retrieval, lint, synthesis, graph, fetch, embedding, and similar
   search workflows;
 - remote HTTP/SSE access with bearer or OAuth authorization; and
@@ -43,16 +44,38 @@ No next feature has an approved spec. Select work from measured user friction,
 operational evidence, or an evidence-backed maintenance finding; write and
 approve a spec before implementation.
 
-Potential discovery themes, not commitments:
+The following candidates are not implementation commitments. Each requires
+evidence and an approved scope before implementation.
 
-- **Capture friction:** revisit a dedicated share-sheet target or inbox
-  consume-and-archive semantics only if the configured synced-folder pattern
-  proves insufficient.
-- **Retrieval quality:** consider full reciprocal-rank fusion only after a
-  second independent ranking signal produces measurable value beyond current
-  embedding + FTS fallback behavior.
-- **Operational hardening:** prioritize reproducible defects or uncovered
-  contracts on live paths over coverage percentage alone.
+| Candidate | Next action | Selection or completion evidence |
+|---|---|---|
+| Retrieval quality evaluation | Define representative queries, expected sources, and a baseline for current retrieval. | Record a repeatable score before selecting ranking changes. Consider reciprocal-rank fusion only when another independent signal adds measured value. |
+| Inbox consume-and-archive | Record user friction with the current synced-folder workflow. | Select only if that workflow proves insufficient. Resolve source ownership and archive semantics against the read-only source boundary first. |
+| F16 ingest regression coverage | Recheck coverage for CLI output overflow becoming a permanent ingest failure. | If uncovered, add a regression that verifies bounded attempts through ingest. Close with evidence if equivalent coverage already exists. |
+| F16 capture boundary review | Review the loss of the whole chunk that crosses the capture cap. | Record acceptance of the current limit, or justify a change with an observable failure and a regression test. |
+
+The two F16 candidates originate in the
+[F16 retrospective](docs/retros/2026-08-21-f16-bound-cli-capture-retro.md).
+F16 remains delivered; these are follow-up checks, not a reopened F1–F18 tracker.
+
+Existing ingest preflight already checks extraction tools, language data, and
+model readiness. A separate `doctor` command needs evidence of an unmet need.
+See [SPEC §9.4](SPEC.md#94-ingest).
+
+---
+
+## Operational evidence and shared workflow follow-ups
+
+These records retain ownership and status separately from product candidates.
+The [latest retrospective](docs/retros/2026-09-02-pdf-extraction-openai-adapter-retro.md)
+registered four process carry-forwards. All four are accounted for below.
+
+| Item | Owner | Status and next action |
+|---|---|---|
+| Consolidate temporary access-check evidence | cogvault operational records | Open. Combine the exact launch label, prompt observations, both runs, and cleanup into one transcript. Preserve original evidence references and claim boundaries. See the [access-check retrospective](docs/retros/2026-08-29-scheduled-access-check-retro.md). |
+| Local review fallback for stuck webhook reviews | compound-loop shipping | Transferred for implementation to [issue #35](https://github.com/teslamint/compound-loop/issues/35). Registration does not mean the workflow fix is complete. |
+| Run required probes before dependent implementation | compound-loop planning and implementing | Transferred for implementation to [issue #36](https://github.com/teslamint/compound-loop/issues/36). Registration does not mean the phase gate is complete. |
+| Project-owned decision policy guidance | Each consuming project owns policy; EntireContext provides optional guidance | Completed in [EntireContext PR #251](https://github.com/teslamint/entirecontext/pull/251) on 2026-09-08. Cogvault policy adoption remains an independent project choice. See the [ownership record](docs/research/2026-09-05-decision-verification-policy-ownership.md). |
 
 ---
 
