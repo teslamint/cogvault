@@ -1,6 +1,6 @@
 ---
 title: Bounded capture error separation
-status: draft
+status: approved
 date: 2026-09-09
 schema: spec/v1
 ---
