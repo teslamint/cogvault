@@ -49,13 +49,20 @@ func (r *Report) SumCheck() error {
 	return nil
 }
 
-func (r *Report) String() string {
+// Summary returns the counts line for the report, without a trailing newline.
+func (r *Report) Summary() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "scanned=%d digested=%d failed=%d refused=%d skipped=%d deferred=%d unchanged=%d archived=%d source-errors=%d",
 		r.Scanned, r.Digested, r.Failed, r.Refused, r.Skipped, r.Deferred, r.Unchanged, r.Archived, r.SourceErrors)
 	if r.NotExamined > 0 {
 		fmt.Fprintf(&b, " not-examined=%d", r.NotExamined)
 	}
+	return b.String()
+}
+
+func (r *Report) String() string {
+	var b strings.Builder
+	b.WriteString(r.Summary())
 	b.WriteByte('\n')
 	if r.SumMismatch != "" {
 		fmt.Fprintf(&b, "  !! %s\n", r.SumMismatch)
