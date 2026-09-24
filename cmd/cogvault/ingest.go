@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os/exec"
 	"strings"
@@ -23,6 +24,7 @@ type reportNotifier interface {
 
 var ingestLookPath = lookupPDFPrerequisite
 var ingestCheckOpenAIReady = llm.CheckOpenAIReady
+var ingestNow = time.Now
 
 func lookupPDFPrerequisite(name string) (string, error) {
 	if name != "eng" && name != "kor" {
@@ -58,80 +60,114 @@ func newIngestCmd() *cobra.Command {
 	return cmd
 }
 
-func runIngest(cmd *cobra.Command, args []string) error {
-	configPath, err := resolveConfigPath(cmd)
-	if err != nil {
-		return err
-	}
+// bracketIngestRun writes a timestamped start line, runs body, and writes a
+// timestamped end line from a defer. The defer also covers panics: it writes
+// result=panic and re-panics with the same value. One emitter covers every
+// return path inside body, including paths added later.
+func bracketIngestRun(w io.Writer, origin string, body func() (*ingest.Report, error)) (err error) {
+	fmt.Fprintf(w, "%s ingest start origin=%s\n", ingestNow().Format(time.RFC3339), origin)
 
-	cfg, store, idx, _, err := bootstrap(configPath)
-	if err != nil {
-		return err
-	}
-	defer idx.Close()
-
-	dryRun, _ := cmd.Flags().GetBool("dry-run")
-
-	var adpt llm.Adapter
-	if !dryRun {
-		timeout := time.Duration(cfg.LLM.TimeoutSeconds) * time.Second
-		opts := []llm.Option{llm.WithTimeout(timeout)}
-		switch cfg.LLM.Backend {
-		case "ollama":
-			adpt = llm.NewOllama(cfg.LLM.BaseURL, cfg.LLM.Model, opts...)
-		case "openai":
-			if err := extract.ValidatePrerequisites(ingestLookPath); err != nil {
-				return err
-			}
-			if err := ingestCheckOpenAIReady(cmd.Context(), cfg.LLM.BaseURL, cfg.LLM.Model); err != nil {
-				return fmt.Errorf("openai readiness failed: %w", err)
-			}
-			adpt = llm.NewOpenAI(cfg.LLM.BaseURL, cfg.LLM.Model, opts...)
-		default:
-			binPath, err := ingestLookPath("claude")
-			if err != nil {
-				return fmt.Errorf("claude CLI not found in PATH; install Claude Code or add it to PATH")
-			}
-			adpt = llm.NewClaudeCode(binPath, cfg.LLM.Model, opts...)
+	var report *ingest.Report
+	defer func() {
+		rec := recover()
+		result := "error"
+		switch {
+		case rec != nil:
+			result = "panic"
+		case err == nil:
+			result = "ok"
 		}
-	}
+		fmt.Fprintf(w, "%s ingest end origin=%s result=%s", ingestNow().Format(time.RFC3339), origin, result)
+		if report != nil {
+			fmt.Fprintf(w, " %s", report.Summary())
+		}
+		fmt.Fprintln(w)
+		if rec != nil {
+			panic(rec)
+		}
+	}()
 
-	runner, err := ingest.New(cfg, store, idx, adpt, cfg.DBPath)
-	if err != nil {
-		return err
-	}
-	defer runner.Close()
+	report, err = body()
+	return err
+}
 
+func runIngest(cmd *cobra.Command, args []string) error {
 	scheduled, _ := cmd.Flags().GetBool("scheduled")
 	origin := "interactive"
 	if scheduled {
 		origin = "scheduled"
 	}
-	limit, _ := cmd.Flags().GetInt("limit")
 
-	report, err := runner.Run(cmd.Context(), ingest.RunOptions{
-		DryRun: dryRun,
-		Limit:  limit,
-		Origin: origin,
-	})
-	if report != nil {
-		cmd.Print(report.String())
-	}
-	runIngestNotify(runner, report, scheduled, err)
-	if err != nil {
-		if errors.Is(err, ingest.ErrAlreadyRunning) {
-			return fmt.Errorf("ingest already running (lock held)")
+	return bracketIngestRun(cmd.ErrOrStderr(), origin, func() (*ingest.Report, error) {
+		configPath, err := resolveConfigPath(cmd)
+		if err != nil {
+			return nil, err
 		}
-		return err
-	}
 
-	if !dryRun && cfg.LLM.EmbeddingModel != "" && report != nil && report.Digested > 0 {
-		postIngestEmbed(cmd, idx, store, cfg.LLM.EmbeddingModel, cfg.LLM.EmbeddingBaseURL)
-	}
-	if !dryRun && cfg.Git.CommitsOnIngest() && report != nil && report.Digested > 0 {
-		postIngestGitCommit(cmd, cfg.WikiDir)
-	}
-	return nil
+		cfg, store, idx, _, err := bootstrap(configPath)
+		if err != nil {
+			return nil, err
+		}
+		defer idx.Close()
+
+		dryRun, _ := cmd.Flags().GetBool("dry-run")
+
+		var adpt llm.Adapter
+		if !dryRun {
+			timeout := time.Duration(cfg.LLM.TimeoutSeconds) * time.Second
+			opts := []llm.Option{llm.WithTimeout(timeout)}
+			switch cfg.LLM.Backend {
+			case "ollama":
+				adpt = llm.NewOllama(cfg.LLM.BaseURL, cfg.LLM.Model, opts...)
+			case "openai":
+				if err := extract.ValidatePrerequisites(ingestLookPath); err != nil {
+					return nil, err
+				}
+				if err := ingestCheckOpenAIReady(cmd.Context(), cfg.LLM.BaseURL, cfg.LLM.Model); err != nil {
+					return nil, fmt.Errorf("openai readiness failed: %w", err)
+				}
+				adpt = llm.NewOpenAI(cfg.LLM.BaseURL, cfg.LLM.Model, opts...)
+			default:
+				binPath, err := ingestLookPath("claude")
+				if err != nil {
+					return nil, fmt.Errorf("claude CLI not found in PATH; install Claude Code or add it to PATH")
+				}
+				adpt = llm.NewClaudeCode(binPath, cfg.LLM.Model, opts...)
+			}
+		}
+
+		runner, err := ingest.New(cfg, store, idx, adpt, cfg.DBPath)
+		if err != nil {
+			return nil, err
+		}
+		defer runner.Close()
+
+		limit, _ := cmd.Flags().GetInt("limit")
+
+		report, err := runner.Run(cmd.Context(), ingest.RunOptions{
+			DryRun: dryRun,
+			Limit:  limit,
+			Origin: origin,
+		})
+		if report != nil {
+			cmd.Print(report.String())
+		}
+		runIngestNotify(runner, report, scheduled, err)
+		if err != nil {
+			if errors.Is(err, ingest.ErrAlreadyRunning) {
+				return report, fmt.Errorf("ingest already running (lock held)")
+			}
+			return report, err
+		}
+
+		if !dryRun && cfg.LLM.EmbeddingModel != "" && report != nil && report.Digested > 0 {
+			postIngestEmbed(cmd, idx, store, cfg.LLM.EmbeddingModel, cfg.LLM.EmbeddingBaseURL)
+		}
+		if !dryRun && cfg.Git.CommitsOnIngest() && report != nil && report.Digested > 0 {
+			postIngestGitCommit(cmd, cfg.WikiDir)
+		}
+		return report, nil
+	})
 }
 
 func notifyAfterRun(notifier reportNotifier, report *ingest.Report, scheduled bool, runErr error) {
