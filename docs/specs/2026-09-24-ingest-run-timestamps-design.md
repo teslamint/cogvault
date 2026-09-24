@@ -1,6 +1,6 @@
 ---
 title: Ingest Run Timestamps
-status: draft
+status: approved
 date: 2026-09-24
 schema: spec/v1
 ---
