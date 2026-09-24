@@ -716,6 +716,21 @@ cogvault ingest [--config <path>] [--dry-run] [--limit N] [--scheduled]
 - `--limit N`: process at most N files (backlog batching / quota control).
 - `--scheduled`: set the ledger run origin to `scheduled` (used by the launchd
   job); otherwise the origin is `interactive`.
+- **Run timestamps on stderr**: every invocation that reaches the ingest
+  handler brackets its run with two lines on stderr:
+
+  ```
+  <RFC3339 local> ingest start origin=<scheduled|interactive>
+  <RFC3339 local> ingest end origin=<scheduled|interactive> result=<ok|error|panic>[ <summary counts>]
+  ```
+
+  Both timestamps use the local UTC offset. `result=ok` means the handler
+  returned nil; `result=error` means it returned a non-nil error;
+  `result=panic` means a panic escaped, and that panic still propagates.
+  `<summary counts>` is the stdout summary counts, and it appears only when a
+  report exists. The end line precedes the command error line. A flag-parse
+  error rejected before the handler runs writes neither line. Stdout and exit
+  codes are unchanged.
 - For `claudecode`, requires `claude` on PATH; if absent: `claude CLI not found
   in PATH; install Claude Code or add it to PATH`.
 - For `openai`, requires `pdftotext`, `pdfinfo`, `pdftoppm`, `tesseract`, and
