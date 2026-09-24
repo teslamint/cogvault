@@ -55,6 +55,15 @@ one load profile cooperated 5 times; it does not bound the margin against a
 load profile that hasn't occurred yet. *Avoid: validating a wall-clock test
 margin by repeated-run count alone.*
 
+## Discrimination axis
+
+The single dimension a test fixture varies in order to tell two implementations
+apart. It must be the dimension the contract actually constrains: fixtures that
+vary only the instant cannot separate two timestamp layouts that differ only at
+zero offset, and a fixture that never changes the constrained dimension passes
+for both correct and incorrect code. *Avoid: "test parameter", "input sweep" —
+those name the values, not the dimension being discriminated.*
+
 ## Responsible process
 
 The process macOS TCC attributes a protected access to, which is not always the

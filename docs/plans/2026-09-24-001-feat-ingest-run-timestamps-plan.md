@@ -2,7 +2,8 @@
 schema: plan/v1
 title: Ingest run timestamp lines
 type: feat
-status: approved
+status: done
+completed_by: 5e05184b2821ce8addfceac3816d3d8a6c23dc15
 date: 2026-09-24
 execution: code
 origin: docs/specs/2026-09-24-ingest-run-timestamps-design.md

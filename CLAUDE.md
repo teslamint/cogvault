@@ -39,6 +39,12 @@ Read these non-obvious invariants before editing:
    Owner: `SPEC.md` §3.1/§8.3/§8.8/§8.8.1/§9.4, `docs/decisions/0024-wiki-git-safety-net.md`, `docs/deployment/remote-mcp.md` (Security posture)
 7. `SPEC.md`, `DESIGN.md`, and accepted decisions override plans; `docs/plans/` are non-canonical working notes and may become stale.
    Owner: `docs/decisions/0012-agent-documentation-governance.md`
+8. An offset-bearing timestamp contract is not satisfied by `time.RFC3339`:
+   its `Z07:00` layout prints `Z` when the offset is zero, so a UTC host
+   violates a numeric-offset requirement while a KST dev machine passes.
+   Format with an explicit layout (`2006-01-02T15:04:05-07:00`) and make the
+   test fixture vary the zone, not just the instant.
+   Owner: `SPEC.md` §9.4, `docs/solutions/best-practices/rfc3339-utc-prints-z-not-numeric-offset.md`
 
 ## Documentation Map
 
