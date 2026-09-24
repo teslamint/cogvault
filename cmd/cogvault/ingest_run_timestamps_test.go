@@ -159,6 +159,73 @@ func TestIngestRunTimestampsLockHeld(t *testing.T) {
 	}
 }
 
+// TestIngestRunTimestampsRunErrorWithReport pins the end line when runner.Run
+// returns a non-nil report together with an error — the production shape of a
+// `_schema.md` read failure. The counts must appear on the end line and the
+// process must still fail.
+func TestIngestRunTimestampsRunErrorWithReport(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("chmod 0000 does not deny reads to root")
+	}
+	fakeClaudeOnPath(t)
+	fixedIngestClock(t, ingestTimestamp(t, 0), ingestTimestamp(t, 5))
+	configPath, _ := newIngestVault(t)
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	schemaPath := filepath.Join(cfg.WikiDir, cfg.SchemaPath())
+	if err := os.WriteFile(schemaPath, []byte("# schema\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(schemaPath, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(schemaPath, 0o644) })
+
+	stdout, stderr, err := executeCommand("ingest", "--config", configPath)
+	if err == nil {
+		t.Fatal("expected error when _schema.md is unreadable")
+	}
+	summary := strings.SplitN(stdout, "\n", 2)[0]
+	if summary == "" {
+		t.Fatal("expected the report summary on stdout")
+	}
+	want := "2026-09-24T01:00:00+09:00 ingest start origin=interactive\n" +
+		"2026-09-24T01:00:05+09:00 ingest end origin=interactive result=error " + summary + "\n"
+	if stderr != want {
+		t.Errorf("stderr mismatch\n got: %q\nwant: %q", stderr, want)
+	}
+}
+
+// TestBracketIngestRunUTCPrintsNumericOffset pins the required numeric offset
+// format: on a UTC host the timestamp must end in +00:00, not `Z`.
+func TestBracketIngestRunUTCPrintsNumericOffset(t *testing.T) {
+	fixedIngestClock(t,
+		time.Date(2026, 9, 24, 1, 0, 0, 0, time.UTC),
+		time.Date(2026, 9, 24, 1, 0, 5, 0, time.UTC),
+	)
+	var buf bytes.Buffer
+
+	if err := bracketIngestRun(&buf, "interactive", func() (*ingest.Report, error) {
+		return &ingest.Report{}, nil
+	}); err != nil {
+		t.Fatalf("bracketIngestRun returned %v", err)
+	}
+
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 bracket lines, got %d: %q", len(lines), buf.String())
+	}
+	if lines[0] != "2026-09-24T01:00:00+00:00 ingest start origin=interactive" {
+		t.Errorf("unexpected start line: %q", lines[0])
+	}
+	if want := "2026-09-24T01:00:05+00:00 ingest end origin=interactive result=ok "; !strings.HasPrefix(lines[1], want) {
+		t.Errorf("end line %q does not start with %q", lines[1], want)
+	}
+}
+
 func TestBracketIngestRunPanic(t *testing.T) {
 	fixedIngestClock(t, ingestTimestamp(t, 0), ingestTimestamp(t, 5))
 	var buf bytes.Buffer

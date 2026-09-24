@@ -22,6 +22,11 @@ type reportNotifier interface {
 	Notify(*ingest.Report)
 }
 
+// ingestRunTimeLayout is the timestamp format for the run bracket lines. It is
+// RFC3339 with an explicit numeric offset: time.RFC3339 prints "Z" on a UTC
+// host, but the run timestamps contract requires a numeric offset (+00:00).
+const ingestRunTimeLayout = "2006-01-02T15:04:05-07:00"
+
 var ingestLookPath = lookupPDFPrerequisite
 var ingestCheckOpenAIReady = llm.CheckOpenAIReady
 var ingestNow = time.Now
@@ -65,7 +70,7 @@ func newIngestCmd() *cobra.Command {
 // result=panic and re-panics with the same value. One emitter covers every
 // return path inside body, including paths added later.
 func bracketIngestRun(w io.Writer, origin string, body func() (*ingest.Report, error)) (err error) {
-	fmt.Fprintf(w, "%s ingest start origin=%s\n", ingestNow().Format(time.RFC3339), origin)
+	fmt.Fprintf(w, "%s ingest start origin=%s\n", ingestNow().Format(ingestRunTimeLayout), origin)
 
 	var report *ingest.Report
 	defer func() {
@@ -77,7 +82,7 @@ func bracketIngestRun(w io.Writer, origin string, body func() (*ingest.Report, e
 		case err == nil:
 			result = "ok"
 		}
-		fmt.Fprintf(w, "%s ingest end origin=%s result=%s", ingestNow().Format(time.RFC3339), origin, result)
+		fmt.Fprintf(w, "%s ingest end origin=%s result=%s", ingestNow().Format(ingestRunTimeLayout), origin, result)
 		if report != nil {
 			fmt.Fprintf(w, " %s", report.Summary())
 		}
