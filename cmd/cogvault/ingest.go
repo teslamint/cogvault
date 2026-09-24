@@ -3,12 +3,14 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/teslamint/cogvault/internal/config"
 	"github.com/teslamint/cogvault/internal/extract"
 	"github.com/teslamint/cogvault/internal/gitutil"
 	"github.com/teslamint/cogvault/internal/index"
@@ -21,8 +23,14 @@ type reportNotifier interface {
 	Notify(*ingest.Report)
 }
 
+// ingestRunTimeLayout is the timestamp format for the run bracket lines. It is
+// RFC3339 with an explicit numeric offset: time.RFC3339 prints "Z" on a UTC
+// host, but the run timestamps contract requires a numeric offset (+00:00).
+const ingestRunTimeLayout = "2006-01-02T15:04:05-07:00"
+
 var ingestLookPath = lookupPDFPrerequisite
 var ingestCheckOpenAIReady = llm.CheckOpenAIReady
+var ingestNow = time.Now
 
 func lookupPDFPrerequisite(name string) (string, error) {
 	if name != "eng" && name != "kor" {
@@ -58,15 +66,60 @@ func newIngestCmd() *cobra.Command {
 	return cmd
 }
 
+// bracketIngestRun writes a timestamped start line, runs body, and writes a
+// timestamped end line from a defer. The defer also covers panics: it writes
+// result=panic and re-panics with the same value. One emitter covers every
+// return path inside body, including paths added later.
+func bracketIngestRun(w io.Writer, origin string, body func() (*ingest.Report, error)) (err error) {
+	fmt.Fprintf(w, "%s ingest start origin=%s\n", ingestNow().Format(ingestRunTimeLayout), origin)
+
+	var report *ingest.Report
+	defer func() {
+		rec := recover()
+		result := "error"
+		switch {
+		case rec != nil:
+			result = "panic"
+		case err == nil:
+			result = "ok"
+		}
+		fmt.Fprintf(w, "%s ingest end origin=%s result=%s", ingestNow().Format(ingestRunTimeLayout), origin, result)
+		if report != nil {
+			fmt.Fprintf(w, " %s", report.Summary())
+		}
+		fmt.Fprintln(w)
+		if rec != nil {
+			panic(rec)
+		}
+	}()
+
+	report, err = body()
+	return err
+}
+
 func runIngest(cmd *cobra.Command, args []string) error {
+	scheduled, _ := cmd.Flags().GetBool("scheduled")
+	origin := "interactive"
+	if scheduled {
+		origin = "scheduled"
+	}
+
+	return bracketIngestRun(cmd.ErrOrStderr(), origin, func() (*ingest.Report, error) {
+		return executeIngest(cmd, origin, scheduled)
+	})
+}
+
+// executeIngest is the ingest command body. runIngest brackets it with the
+// timestamped start and end lines; every return here reaches that bracket.
+func executeIngest(cmd *cobra.Command, origin string, scheduled bool) (*ingest.Report, error) {
 	configPath, err := resolveConfigPath(cmd)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	cfg, store, idx, _, err := bootstrap(configPath)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer idx.Close()
 
@@ -74,39 +127,17 @@ func runIngest(cmd *cobra.Command, args []string) error {
 
 	var adpt llm.Adapter
 	if !dryRun {
-		timeout := time.Duration(cfg.LLM.TimeoutSeconds) * time.Second
-		opts := []llm.Option{llm.WithTimeout(timeout)}
-		switch cfg.LLM.Backend {
-		case "ollama":
-			adpt = llm.NewOllama(cfg.LLM.BaseURL, cfg.LLM.Model, opts...)
-		case "openai":
-			if err := extract.ValidatePrerequisites(ingestLookPath); err != nil {
-				return err
-			}
-			if err := ingestCheckOpenAIReady(cmd.Context(), cfg.LLM.BaseURL, cfg.LLM.Model); err != nil {
-				return fmt.Errorf("openai readiness failed: %w", err)
-			}
-			adpt = llm.NewOpenAI(cfg.LLM.BaseURL, cfg.LLM.Model, opts...)
-		default:
-			binPath, err := ingestLookPath("claude")
-			if err != nil {
-				return fmt.Errorf("claude CLI not found in PATH; install Claude Code or add it to PATH")
-			}
-			adpt = llm.NewClaudeCode(binPath, cfg.LLM.Model, opts...)
+		if adpt, err = newIngestAdapter(cmd, cfg); err != nil {
+			return nil, err
 		}
 	}
 
 	runner, err := ingest.New(cfg, store, idx, adpt, cfg.DBPath)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer runner.Close()
 
-	scheduled, _ := cmd.Flags().GetBool("scheduled")
-	origin := "interactive"
-	if scheduled {
-		origin = "scheduled"
-	}
 	limit, _ := cmd.Flags().GetInt("limit")
 
 	report, err := runner.Run(cmd.Context(), ingest.RunOptions{
@@ -120,9 +151,9 @@ func runIngest(cmd *cobra.Command, args []string) error {
 	runIngestNotify(runner, report, scheduled, err)
 	if err != nil {
 		if errors.Is(err, ingest.ErrAlreadyRunning) {
-			return fmt.Errorf("ingest already running (lock held)")
+			return report, fmt.Errorf("ingest already running (lock held)")
 		}
-		return err
+		return report, err
 	}
 
 	if !dryRun && cfg.LLM.EmbeddingModel != "" && report != nil && report.Digested > 0 {
@@ -131,7 +162,31 @@ func runIngest(cmd *cobra.Command, args []string) error {
 	if !dryRun && cfg.Git.CommitsOnIngest() && report != nil && report.Digested > 0 {
 		postIngestGitCommit(cmd, cfg.WikiDir)
 	}
-	return nil
+	return report, nil
+}
+
+// newIngestAdapter selects the digest backend and checks its prerequisites.
+func newIngestAdapter(cmd *cobra.Command, cfg *config.Config) (llm.Adapter, error) {
+	timeout := time.Duration(cfg.LLM.TimeoutSeconds) * time.Second
+	opts := []llm.Option{llm.WithTimeout(timeout)}
+	switch cfg.LLM.Backend {
+	case "ollama":
+		return llm.NewOllama(cfg.LLM.BaseURL, cfg.LLM.Model, opts...), nil
+	case "openai":
+		if err := extract.ValidatePrerequisites(ingestLookPath); err != nil {
+			return nil, err
+		}
+		if err := ingestCheckOpenAIReady(cmd.Context(), cfg.LLM.BaseURL, cfg.LLM.Model); err != nil {
+			return nil, fmt.Errorf("openai readiness failed: %w", err)
+		}
+		return llm.NewOpenAI(cfg.LLM.BaseURL, cfg.LLM.Model, opts...), nil
+	default:
+		binPath, err := ingestLookPath("claude")
+		if err != nil {
+			return nil, fmt.Errorf("claude CLI not found in PATH; install Claude Code or add it to PATH")
+		}
+		return llm.NewClaudeCode(binPath, cfg.LLM.Model, opts...), nil
+	}
 }
 
 func notifyAfterRun(notifier reportNotifier, report *ingest.Report, scheduled bool, runErr error) {
