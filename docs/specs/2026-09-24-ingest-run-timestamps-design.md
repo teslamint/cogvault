@@ -183,8 +183,13 @@ fixed clock that returns distinct start and end times:
 
 ## Risks
 
-- A scheduled run killed by launchd (SIGKILL) writes no end line. A start line
-  with no following end line signals that case. Residual; not mitigated.
+- A scheduled run killed by launchd (SIGKILL) writes no end line. The reverse
+  does not hold: a start line with no end line can also mean the run is still
+  in progress, or another abnormal exit, or lost stderr output. First check
+  `launchctl print gui/<uid>/com.teslamint.cogvault.ingest` for `state = running`.
+  If the job has exited and no end line exists, investigate an abnormal exit or
+  missing log output; the log alone cannot identify the cause. Residual; not
+  mitigated.
 - Unbounded log growth: 2 extra lines per hour is about 17,520 lines per year.
   Residual; rotation is out of scope.
 - A consumer that parses stderr would see new lines. None was found in the repo
