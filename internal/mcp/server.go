@@ -108,7 +108,7 @@ func wikiListTool() mcp.Tool {
 
 func wikiSearchTool() mcp.Tool {
 	return mcp.NewTool("wiki_search",
-		mcp.WithDescription("Full-text search across indexed files. Returns matching files with snippets."),
+		mcp.WithDescription("Full-text search across indexed files. Returns snippets and usage_terms summaries with declared scope, where, level, conditions, evidence reference, and review status. unverified means unknown or pending review; recorded is not legal permission."),
 		mcp.WithString("query", mcp.Required(), mcp.Description("Search query")),
 		mcp.WithNumber("limit", mcp.Description("Max results (default 10, max 100)")),
 		mcp.WithReadOnlyHintAnnotation(true),

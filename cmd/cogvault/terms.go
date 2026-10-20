@@ -1,0 +1,55 @@
+package main
+
+import (
+	"encoding/json"
+
+	"github.com/spf13/cobra"
+	"github.com/teslamint/cogvault/internal/config"
+	"github.com/teslamint/cogvault/internal/storage"
+	"github.com/teslamint/cogvault/internal/terms"
+)
+
+func newTermsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "terms <path>",
+		Short: "Inspect recorded usage terms and review status, not legal permission",
+		Args:  cobra.ExactArgs(1),
+		RunE:  runTerms,
+	}
+}
+
+func runTerms(cmd *cobra.Command, args []string) error {
+	configPath, err := resolveConfigPath(cmd)
+	if err != nil {
+		return err
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return err
+	}
+	// Deliberately avoid bootstrap: inspection must not open or repair a DB.
+	store := storage.NewFSStorage(cfg.WikiDir, cfg)
+	data, err := store.Read(args[0])
+	if err != nil {
+		return err
+	}
+	fm, _, parseErr := terms.Parse(data)
+	status, reasons := terms.Inspect(fm["usage_terms"])
+	if parseErr != nil {
+		status = "unverified"
+		reasons = []string{"invalid YAML frontmatter; usage_terms could not be read"}
+	}
+	result := struct {
+		Path    string   `json:"path"`
+		Status  string   `json:"status"`
+		Record  any      `json:"record"`
+		Reasons []string `json:"reasons"`
+		Notice  string   `json:"notice"`
+	}{
+		Path: args[0], Status: status, Record: fm["usage_terms"], Reasons: reasons,
+		Notice: "recorded means a complete human record, not permission or a legal determination. Evidence truth and applicability require human review. URLs, free access, and subscriptions do not establish permission.",
+	}
+	enc := json.NewEncoder(cmd.OutOrStdout())
+	enc.SetIndent("", "  ")
+	return enc.Encode(result)
+}

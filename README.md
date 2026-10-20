@@ -33,6 +33,18 @@ The vault concept from v1 is gone: `wiki_dir` is the single storage root, and
 `sources` are plain directories the ingest pipeline reads directly. See
 [docs/decisions/0021-v2-refounding.md](docs/decisions/0021-v2-refounding.md).
 
+### Inspect usage terms
+
+`cogvault terms <wiki-relative-path> --config <path>` displays recorded
+conditions and evidence. Missing or incomplete records remain `unverified`;
+`recorded` means record completeness, not legal permission.
+Automatic ingest preserves supplied conditions and evidence while resetting only
+review status. All Markdown writes reject overwrites that drop existing terms.
+CLI `search` and MCP `wiki_search` display the same applicability, Where, Level,
+conditions, evidence reference, and review status for each result. Unknown
+fields remain explicitly unverified; neither interface declares legal permission.
+See [the review workflow and isolated fictional demo](docs/usage-terms.md).
+
 ## Requirements
 
 - macOS (the launchd automation is macOS-specific; the CLI itself is portable).

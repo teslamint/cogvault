@@ -20,6 +20,7 @@ import (
 	"github.com/teslamint/cogvault/internal/gitutil"
 	"github.com/teslamint/cogvault/internal/index"
 	"github.com/teslamint/cogvault/internal/storage"
+	"github.com/teslamint/cogvault/internal/terms"
 )
 
 func mapError(err error, path string) *mcp.CallToolResult {
@@ -230,7 +231,22 @@ func handleWikiSearch(cfg *config.Config, store storage.Storage, idx index.Index
 		if err != nil {
 			return mapError(err, ""), nil
 		}
-		return newToolResultJSONText(results)
+		type searchResult struct {
+			index.Result
+			UsageTerms terms.Summary `json:"usage_terms"`
+		}
+		enriched := make([]searchResult, len(results))
+		for i, result := range results {
+			content, readErr := store.Read(result.Path)
+			var sharing terms.Summary
+			if readErr != nil {
+				sharing = terms.UnavailableSummary()
+			} else {
+				sharing = terms.Summarize(content)
+			}
+			enriched[i] = searchResult{Result: result, UsageTerms: sharing}
+		}
+		return newToolResultJSONText(enriched)
 	}
 }
 
