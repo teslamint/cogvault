@@ -1,7 +1,7 @@
 # Roadmap — cogvault
 
 Status: non-canonical forward-looking index
-Last updated: 2026-09-08
+Last updated: 2026-09-09
 
 `SPEC.md`, `DESIGN.md`, and accepted decisions own behavior, architecture, and
 boundaries. This file records only what remains selectable; it never creates
@@ -72,7 +72,7 @@ registered four process carry-forwards. All four are accounted for below.
 
 | Item | Owner | Status and next action |
 |---|---|---|
-| Consolidate temporary access-check evidence | cogvault operational records | Open. Combine the exact launch label, prompt observations, both runs, and cleanup into one transcript. Preserve original evidence references and claim boundaries. See the [access-check retrospective](docs/retros/2026-08-29-scheduled-access-check-retro.md). |
+| Consolidate temporary access-check evidence | cogvault operational records | Complete on 2026-09-09. The [new ceremony](docs/research/2026-09-09-access-check-live-evidence.md) records two successful runs, operator-confirmed no-popup observation, and independent cleanup checks for one label. The [historical U4 record](docs/research/2026-09-09-access-check-u4-operational-record.md) retains its original label mismatch. |
 | Local review fallback for stuck webhook reviews | compound-loop shipping | Transferred for implementation to [issue #35](https://github.com/teslamint/compound-loop/issues/35). Registration does not mean the workflow fix is complete. |
 | Run required probes before dependent implementation | compound-loop planning and implementing | Transferred for implementation to [issue #36](https://github.com/teslamint/compound-loop/issues/36). Registration does not mean the phase gate is complete. |
 | Project-owned decision policy guidance | Each consuming project owns policy; EntireContext provides optional guidance | Completed in [EntireContext PR #251](https://github.com/teslamint/entirecontext/pull/251) on 2026-09-08. Cogvault policy adoption remains an independent project choice. See the [ownership record](docs/research/2026-09-05-decision-verification-policy-ownership.md). |

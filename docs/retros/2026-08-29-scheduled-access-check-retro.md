@@ -100,3 +100,13 @@
 - compound invocation: `Documentation complete — docs/solutions/runtime-errors/launchd-output-marker-after-process-exit.md`
 
 Retrospective complete — docs/retros/2026-08-29-scheduled-access-check-retro.md
+
+## Evidence reconciliation — 2026-09-09
+
+The [consolidated U4 record](../research/2026-09-09-access-check-u4-operational-record.md) preserves the original observations and source hashes.
+The execution/cleanup artifact and access-check prompt supplement identify different temporary labels.
+T5's association of those observations with one ceremony is therefore unsupported by the inspected source artifacts.
+Consolidation is complete; same-label prompt and cleanup proof remains open. No new runtime ceremony was performed.
+
+Subsequently, a [new ceremony](../research/2026-09-09-access-check-live-evidence.md) on 2026-09-09 supplied execution, operator prompt observation, and cleanup for one label.
+This closes the operational carry-forward without asserting that the historical labels matched.
