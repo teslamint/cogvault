@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/adrg/frontmatter"
@@ -54,12 +55,9 @@ func Encode(metadata map[string]any, body []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("encode usage terms metadata: %w", err)
 	}
-	result := make([]byte, 0, len(encoded)+len(body)+8)
-	result = append(result, "---\n"...)
-	result = append(result, encoded...)
-	result = append(result, "---\n"...)
-	result = append(result, body...)
-	return result, nil
+	delimiter := []byte("---\n")
+	// slices.Concat checks the combined length instead of overflowing it.
+	return slices.Concat(delimiter, encoded, delimiter, body), nil
 }
 
 // Automatic selects the first supplied usage_terms record and marks it unverified.
