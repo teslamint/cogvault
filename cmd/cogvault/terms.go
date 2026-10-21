@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"github.com/spf13/cobra"
 	"github.com/teslamint/cogvault/internal/config"
@@ -46,10 +47,35 @@ func runTerms(cmd *cobra.Command, args []string) error {
 		Reasons []string `json:"reasons"`
 		Notice  string   `json:"notice"`
 	}{
-		Path: args[0], Status: status, Record: fm["usage_terms"], Reasons: reasons,
+		Path: args[0], Status: status, Record: jsonValue(fm["usage_terms"]), Reasons: reasons,
 		Notice: "recorded means a complete human record, not permission or a legal determination. Evidence truth and applicability require human review. URLs, free access, and subscriptions do not establish permission.",
 	}
 	enc := json.NewEncoder(cmd.OutOrStdout())
 	enc.SetIndent("", "  ")
 	return enc.Encode(result)
+}
+
+// jsonValue stringifies YAML mapping keys; Go 1.26 encoding/json rejects map[any]any.
+func jsonValue(value any) any {
+	switch v := value.(type) {
+	case map[any]any:
+		out := make(map[string]any, len(v))
+		for key, item := range v {
+			out[fmt.Sprint(key)] = jsonValue(item)
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for key, item := range v {
+			out[key] = jsonValue(item)
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, item := range v {
+			out[i] = jsonValue(item)
+		}
+		return out
+	}
+	return value
 }
