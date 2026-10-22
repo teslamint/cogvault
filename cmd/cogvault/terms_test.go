@@ -88,6 +88,18 @@ func TestTermsInspection(t *testing.T) {
 	}
 }
 
+func TestTermsRejectsYAMLKeysThatShareText(t *testing.T) {
+	configPath, wikiDir, _ := testVault(t)
+	content := "---\nusage_terms:\n  conditions:\n    1: first fictional notice\n    1.0: second fictional notice\n---\n"
+	if err := os.WriteFile(filepath.Join(wikiDir, "example.md"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stdout, _, err := executeCommand("terms", "example.md", "--config", configPath)
+	if err == nil || !strings.Contains(err.Error(), `"1"`) {
+		t.Fatalf("terms: output=%q error=%v, want key collision error", stdout, err)
+	}
+}
+
 func TestTermsRespectsStorageBoundary(t *testing.T) {
 	configPath, wikiDir, _ := testVault(t)
 	outside := filepath.Join(filepath.Dir(wikiDir), "outside.md")
