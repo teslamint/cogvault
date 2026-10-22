@@ -30,6 +30,8 @@
 - 필수 frontmatter: `title`, `type: source`, `source_path`, `ingested_at`
 - 선택 frontmatter: `category` (`article` | `legal` | `reference`)
 - 필수 섹션: ## 요약, ## 핵심 포인트, ## 관련 페이지
+- 명시적 이용 조건·근거는 `usage_terms`에 보존한다. 자동 ingest는 `status`만 `unverified`로 바꾸며 사람 검토를 주장하지 않는다.
+- URL·무료 공개·구독으로 허용을 추정하지 않는다. 불명확하면 미확인. `recorded`도 법적 허용 판정이 아니다.
 
 ### entity
 인물·조직·제품 등. 권장: `type: entity`, `entity_type` (person/org/product/project).

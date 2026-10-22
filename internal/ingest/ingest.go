@@ -17,8 +17,6 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/adrg/frontmatter"
-
 	"github.com/teslamint/cogvault/internal/config"
 	cverr "github.com/teslamint/cogvault/internal/errors"
 	"github.com/teslamint/cogvault/internal/extract"
@@ -26,6 +24,7 @@ import (
 	"github.com/teslamint/cogvault/internal/llm"
 	"github.com/teslamint/cogvault/internal/schema"
 	"github.com/teslamint/cogvault/internal/storage"
+	"github.com/teslamint/cogvault/internal/terms"
 
 	"golang.org/x/sys/unix"
 	"golang.org/x/text/unicode/norm"
@@ -295,6 +294,7 @@ func (r *Runner) digestOne(parent context.Context, entry scanEntry, hash, schema
 	ctx, cancel := r.withTimeout(parent, budget)
 	defer cancel()
 	sourceText := ""
+	source := map[string]any{}
 	if r.llm.InputMode() == llm.TextInput {
 		var err error
 		sourceText, err = r.extractor.Extract(ctx, entry.absPath)
@@ -304,6 +304,22 @@ func (r *Runner) digestOne(parent context.Context, entry scanEntry, hash, schema
 				class = classTransient
 			}
 			r.recordFailure(entry, hash, origin, prev, report, "extract: "+err.Error(), class)
+			return
+		}
+		source, _, err = terms.Parse([]byte(sourceText))
+		if err != nil {
+			r.recordFailure(entry, hash, origin, prev, report, "source: "+err.Error(), classPermanent)
+			return
+		}
+	} else if ext := filepath.Ext(entry.absPath); strings.EqualFold(ext, ".md") || strings.EqualFold(ext, ".markdown") {
+		content, err := os.ReadFile(entry.absPath)
+		if err != nil {
+			r.recordFailure(entry, hash, origin, prev, report, "source: "+sourceErrorText(err), classPermanent)
+			return
+		}
+		source, _, err = terms.Parse(content)
+		if err != nil {
+			r.recordFailure(entry, hash, origin, prev, report, "source: "+err.Error(), classPermanent)
 			return
 		}
 	}
@@ -319,7 +335,7 @@ func (r *Runner) digestOne(parent context.Context, entry scanEntry, hash, schema
 		r.recordFailure(entry, hash, origin, prev, report, "digest: "+err.Error(), class)
 		return
 	}
-	fm, title, ok := parsePage(res.PageContent)
+	fm, title, body, ok := parsePage(res.PageContent)
 	if !ok {
 		r.recordFailure(entry, hash, origin, prev, report, "validate: page missing frontmatter or title", classPermanent)
 		return
@@ -329,7 +345,44 @@ func (r *Runner) digestOne(parent context.Context, entry scanEntry, hash, schema
 		r.recordFailure(entry, hash, origin, prev, report, "ledger: "+err.Error(), classInfra)
 		return
 	}
-	if err := r.store.Write(page, []byte(res.PageContent)); err != nil {
+	previousPage, err := r.ledger.previousWikiPage(entry.absPath)
+	if err != nil {
+		r.recordFailure(entry, hash, origin, prev, report, "ledger: "+err.Error(), classInfra)
+		return
+	}
+	if previousPage == "" {
+		previousPage = page
+	}
+	previous := map[string]any{}
+	existing, err := r.store.Read(previousPage)
+	if err == nil {
+		previous, _, err = terms.Parse(existing)
+		if err != nil {
+			r.recordFailure(entry, hash, origin, prev, report, "read previous page: "+err.Error(), classInfra)
+			return
+		}
+	} else if !errors.Is(err, cverr.ErrNotFound) {
+		r.recordFailure(entry, hash, origin, prev, report, "read previous page: "+err.Error(), classInfra)
+		return
+	}
+	fm = terms.Automatic(source, previous, fm)
+	if !validUsageTermsRecord(source) || !validUsageTermsRecord(fm) {
+		r.recordFailure(entry, hash, origin, prev, report, "validate: malformed usage terms record", classPermanent)
+		return
+	}
+	saved, err := terms.Encode(fm, body)
+	if err != nil {
+		r.recordFailure(entry, hash, origin, prev, report, "validate: usage terms normalization: "+err.Error(), classPermanent)
+		return
+	}
+	if previousPage != page && len(existing) > 0 {
+		if err := terms.CheckOverwrite(existing, saved); err != nil {
+			r.recordFailure(entry, hash, origin, prev, report, "write: "+err.Error(), classInfra)
+			return
+		}
+	}
+	res.PageContent = string(saved)
+	if err := r.store.Write(page, saved); err != nil {
 		r.recordFailure(entry, hash, origin, prev, report, "write: "+err.Error(), classInfra)
 		return
 	}
@@ -682,21 +735,29 @@ func truncateNFDSafe(s string, maxBytes int) string {
 // hashFile streams the file into a sha256 hasher so full contents are never
 // retained in memory. Only the hex digest is kept per scan entry.
 
-func parsePage(content string) (map[string]any, string, bool) {
-	var fm map[string]any
-	_, err := frontmatter.Parse(strings.NewReader(content), &fm)
+func parsePage(content string) (map[string]any, string, []byte, bool) {
+	fm, body, err := terms.Parse([]byte(content))
 	if err != nil || len(fm) == 0 {
-		return nil, "", false
+		return nil, "", nil, false
 	}
 	titleVal, ok := fm["title"]
 	if !ok {
-		return nil, "", false
+		return nil, "", nil, false
 	}
 	title := strings.TrimSpace(fmt.Sprint(titleVal))
 	if title == "" {
-		return nil, "", false
+		return nil, "", nil, false
 	}
-	return fm, title, true
+	return fm, title, body, true
+}
+
+func validUsageTermsRecord(metadata map[string]any) bool {
+	record, ok := metadata["usage_terms"]
+	if !ok {
+		return true
+	}
+	_, ok = record.(map[string]any)
+	return ok
 }
 
 func buildMeta(fm map[string]any, title string) map[string]string {

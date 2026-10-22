@@ -3,7 +3,6 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -42,17 +41,6 @@ func TestSlugFromURLTruncatesOnRuneBoundary(t *testing.T) {
 	}
 	if !utf8ValidString(got) {
 		t.Fatalf("slug is not valid UTF-8: %q", got)
-	}
-}
-
-func TestFormatFetchedContentQuotesURL(t *testing.T) {
-	body := []byte("hello")
-	got := formatFetchedContent("https://example.com/a b#c", body)
-	if !strings.Contains(got, `source_url: "https://example.com/a b#c"`) {
-		t.Fatalf("source_url not quoted:\n%s", got)
-	}
-	if !strings.HasSuffix(got, "hello") {
-		t.Fatalf("body missing:\n%s", got)
 	}
 }
 
@@ -105,7 +93,7 @@ func TestRunFetchRejectsInvalidUTF8(t *testing.T) {
 	}
 }
 
-func TestRunFetchSavesAndQuotesFrontmatter(t *testing.T) {
+func TestRunFetchSavesSourceURL(t *testing.T) {
 	configPath, _, _ := testVault(t)
 	srcDir := t.TempDir()
 
@@ -126,14 +114,6 @@ func TestRunFetchSavesAndQuotesFrontmatter(t *testing.T) {
 	matches, _ := filepath.Glob(filepath.Join(srcDir, "web-a-b*.md"))
 	if len(matches) != 1 {
 		t.Fatalf("glob = %v, want one capture file", matches)
-	}
-	data, err := os.ReadFile(matches[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
-	if !strings.Contains(content, `source_url: "`) {
-		t.Fatalf("frontmatter source_url not quoted:\n%s", content)
 	}
 	// Frontmatter must parse: reuse the repo's own parser.
 	src, err := markdown.New().Parse(srcDir, filepath.Base(matches[0]), false)

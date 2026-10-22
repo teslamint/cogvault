@@ -128,6 +128,17 @@ func (l *ledger) wikiPageTakenByOther(wikiPage, sourcePath string) (bool, error)
 	}
 	return n > 0, nil
 }
+func (l *ledger) previousWikiPage(sourcePath string) (string, error) {
+	var page string
+	err := l.db.QueryRow(`SELECT wiki_page FROM ingest_ledger WHERE source_path=? AND status IN ('success','superseded') AND wiki_page<>'' ORDER BY rowid DESC LIMIT 1`, sourcePath).Scan(&page)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("ingest.ledger.previousWikiPage %s: %w", sourcePath, err)
+	}
+	return page, nil
+}
 func (l *ledger) supersedePrevSuccess(sourcePath string) error {
 	_, err := l.db.Exec(`UPDATE ingest_ledger SET status='superseded' WHERE source_path=? AND status='success'`, sourcePath)
 	if err != nil {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/teslamint/cogvault/internal/config"
+	"github.com/teslamint/cogvault/internal/terms"
 )
 
 func newFetchCmd() *cobra.Command {
@@ -103,7 +105,17 @@ func runFetch(cmd *cobra.Command, args []string) error {
 	}
 	outPath := filepath.Join(srcDir, name)
 
-	content := formatFetchedContent(rawURL, body)
+	content, err := formatFetchedContent(rawURL, body)
+	if err != nil {
+		return fmt.Errorf("capture usage terms: %w", err)
+	}
+	if existing, err := os.ReadFile(outPath); err == nil {
+		if err := terms.CheckOverwrite(existing, []byte(content)); err != nil {
+			return fmt.Errorf("capture usage terms: %w", err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read existing capture: %w", err)
+	}
 	// Temp-file + rename: a crash mid os.WriteFile leaves a partial capture
 	// in the source directory; atomic replacement prevents that.
 	tmp := outPath + ".tmp"
@@ -160,14 +172,20 @@ func truncateRunes(s string, n int) string {
 	return string(runes[:n])
 }
 
-func formatFetchedContent(sourceURL string, body []byte) string {
-	var b strings.Builder
-	b.WriteString("---\n")
-	// Quoted: a URL containing " #" would otherwise start a YAML comment
-	// and truncate the value at parse time.
-	fmt.Fprintf(&b, "source_url: %q\n", sourceURL)
-	fmt.Fprintf(&b, "fetched_at: %s\n", time.Now().UTC().Format("2006-01-02"))
-	b.WriteString("---\n\n")
-	b.Write(body)
-	return b.String()
+func formatFetchedContent(sourceURL string, body []byte) (string, error) {
+	metadata := map[string]any{
+		"source_url": sourceURL,
+		"fetched_at": time.Now().UTC().Format("2006-01-02"),
+	}
+	supplied, _, parseErr := terms.Parse(body)
+	if parseErr == nil {
+		if _, exists := supplied["usage_terms"]; exists {
+			// Expose the declaration without trusting its review claims.
+			metadata = terms.Automatic(supplied, nil, metadata)
+		}
+	}
+	// Capture stays byte-preserving even when the response begins with
+	// malformed YAML or a Markdown horizontal rule.
+	encoded, err := terms.Encode(metadata, body)
+	return string(encoded), err
 }
