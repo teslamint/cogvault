@@ -78,9 +78,14 @@ func wikiDeleteTool() mcp.Tool {
 	)
 }
 
+// synthesisSaveHint is appended to the read-side tool descriptions so the
+// Q&A → wiki feedback loop reaches clients that ignore server instructions:
+// a model that answers from several pages is told to file the answer back.
+const synthesisSaveHint = " If you answer a question by combining several wiki pages, save that answer with wiki_write as a new page under synthesis/ whose frontmatter has `type: synthesis` and a `sources:` list of the pages used. Skip one-off lookups."
+
 func wikiReadTool() mcp.Tool {
 	return mcp.NewTool("wiki_read",
-		mcp.WithDescription("Read a file from the wiki root. Returns the file content as text."),
+		mcp.WithDescription("Read a file from the wiki root. Returns the file content as text."+synthesisSaveHint),
 		mcp.WithString("path", mcp.Required(), mcp.Description("Wiki root-relative file path")),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
@@ -108,7 +113,7 @@ func wikiListTool() mcp.Tool {
 
 func wikiSearchTool() mcp.Tool {
 	return mcp.NewTool("wiki_search",
-		mcp.WithDescription("Full-text search across indexed files. Returns snippets and usage_terms summaries with declared scope, where, level, conditions, evidence reference, and review status. unverified means unknown or pending review; recorded is not legal permission."),
+		mcp.WithDescription("Full-text search across indexed files. Returns snippets and usage_terms summaries with declared scope, where, level, conditions, evidence reference, and review status. unverified means unknown or pending review; recorded is not legal permission."+synthesisSaveHint),
 		mcp.WithString("query", mcp.Required(), mcp.Description("Search query")),
 		mcp.WithNumber("limit", mcp.Description("Max results (default 10, max 100)")),
 		mcp.WithReadOnlyHintAnnotation(true),

@@ -845,6 +845,28 @@ func TestToolAnnotations(t *testing.T) {
 	}
 }
 
+// TestReadToolsCarrySynthesisSaveHint pins the advertised descriptions of the
+// tools a model uses while answering from the wiki, so the save-back nudge
+// for the Q&A feedback loop cannot be dropped silently.
+func TestReadToolsCarrySynthesisSaveHint(t *testing.T) {
+	store := &mockStorage{
+		readFn: func(path string) ([]byte, error) {
+			return nil, fmt.Errorf("read: %w", cverr.ErrNotFound)
+		},
+	}
+	s := NewServer("/vault", testCfg(), store, &mockIndex{}, &mockAdapter{})
+	tools := s.ListTools()
+	for _, name := range []string{"wiki_search", "wiki_read"} {
+		st, ok := tools[name]
+		if !ok {
+			t.Fatalf("%s not registered", name)
+		}
+		if !strings.HasSuffix(st.Tool.Description, synthesisSaveHint) {
+			t.Errorf("%s description lacks synthesis save hint: %q", name, st.Tool.Description)
+		}
+	}
+}
+
 // --- gitAutoCommit (0024) ---
 
 // initTestGitRepo creates a git repository at dir with a local (not global)

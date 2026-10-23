@@ -370,6 +370,11 @@ silently ignored by the handler, not rejected. Every tool also declares
 and `wiki_delete` are the only two marked non-read-only/destructive; the other
 five are read-only, non-destructive. `IdempotentHint`/`OpenWorldHint` stay at
 `mcp.NewTool`'s library defaults and are not part of this contract.
+`wiki_search` and `wiki_read` descriptions end with `synthesisSaveHint`, which
+tells the model to save a multi-page answer under `synthesis/` with
+`type: synthesis` and `sources:`. It repeats the schema's Q&A feedback-loop
+rule at the point of use, because some clients do not surface server
+instructions to the model.
 
 `tools.go`: `wiki_search` drops the `scope` parameter; tool descriptions say
 "wiki root" instead of "vault". `handleWikiSearch` calls `idx.Search(query,
