@@ -262,6 +262,11 @@ exit code or result. Extend PATH with the node directory in the plist if the
 noise bothers you (see O1 spike finding 2 in
 [docs/research/o1-headless-pdf-verification.md](docs/research/o1-headless-pdf-verification.md)).
 
+The template passes `--run-log-dir ~/Library/Logs/cogvault/runs` (expanded).
+Each run that digests, fails, gets a new refusal, archives, hits a source-error,
+or ends in an error writes its own `ingest.<start>.<pid>.err.log` there, with a
+timestamp on every line. Runs with nothing to do create no file. The ledger
+keeps only the latest state per file, so these files are the per-run history.
 
 `~/bin/cogvault` also backs the `com.teslamint.cogvault` `serve` job. A running
 `serve` process keeps using the pre-install image, so restart that job after an

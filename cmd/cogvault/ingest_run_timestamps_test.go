@@ -208,7 +208,7 @@ func TestBracketIngestRunUTCPrintsNumericOffset(t *testing.T) {
 	)
 	var buf bytes.Buffer
 
-	if err := bracketIngestRun(&buf, "interactive", func() (*ingest.Report, error) {
+	if err := bracketIngestRun(&buf, "interactive", "", func(func(ingest.FileResult)) (*ingest.Report, error) {
 		return &ingest.Report{}, nil
 	}); err != nil {
 		t.Fatalf("bracketIngestRun returned %v", err)
@@ -237,7 +237,7 @@ func TestBracketIngestRunPanic(t *testing.T) {
 				t.Errorf("expected panic value %q to propagate, got: %v", "boom", rec)
 			}
 		}()
-		_ = bracketIngestRun(&buf, "interactive", func() (*ingest.Report, error) {
+		_ = bracketIngestRun(&buf, "interactive", "", func(func(ingest.FileResult)) (*ingest.Report, error) {
 			panic("boom")
 		})
 	}()

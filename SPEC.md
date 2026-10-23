@@ -733,7 +733,7 @@ the server keeps running.
 ### 9.4 ingest
 
 ```
-cogvault ingest [--config <path>] [--dry-run] [--limit N] [--scheduled]
+cogvault ingest [--config <path>] [--dry-run] [--limit N] [--scheduled] [--run-log-dir <dir>]
 ```
 
 - `--dry-run`: list what would be digested; write nothing (no LLM/store/index/
@@ -756,6 +756,24 @@ cogvault ingest [--config <path>] [--dry-run] [--limit N] [--scheduled]
   report exists. The end line precedes the command error line. A flag-parse
   error rejected before the handler runs writes neither line. Stdout and exit
   codes are unchanged.
+- **Per-run log file**: `--run-log-dir <dir>` (absolute; a relative value is a
+  command error before the start line) writes one file per run,
+  `<dir>/ingest.<start>.<pid>.err.log`. `<start>` is the start time in ISO 8601
+  basic format with a numeric offset (`20260924T134018+0900`); `<pid>` is the
+  ingest process ID. The file holds the run's start line, then one line per
+  state-change event as it happens, then the end line. The start and end lines
+  are identical to the stderr bracket lines. An event line is
+  `<RFC3339 local> <action> <path>[  <error>]` for `digested`, `failed`, a new
+  `refused`, `archived`, and `source-error`. It is not written for `skipped`,
+  `deferred`, `exhausted`, unchanged, already-refused, or `would-*` results. A
+  run that ends with `result=error` or `result=panic` adds
+  `<end timestamp> ingest error: <error>` or `<end timestamp> ingest panic:
+  <value>` after the end line. The file is created on the first event, or at
+  the end of a run that is not `result=ok`; an `ok` run with no events creates
+  no file. Each line is written unbuffered, so a killed run keeps its earlier
+  lines and has no end line. Files are mode 0600 and are never deleted by
+  cogvault. A failure to create or write the file logs a warning and does not
+  change the run result or exit code.
 - For `claudecode`, requires `claude` on PATH; if absent: `claude CLI not found
   in PATH; install Claude Code or add it to PATH`.
 - For `openai`, requires `pdftotext`, `pdfinfo`, `pdftoppm`, `tesseract`, and
@@ -1309,7 +1327,9 @@ Tesseract, and `eng`/`kor` language data at runtime.
 - `init` two-step (first run scaffolds + guidance; second run builds wiki/schema/
   db); idempotent. Missing config → error naming the path. `ingest --dry-run`
   lists pending; lock held → nonzero already-running; missing `claude` → clear
-  error. `serve` init failure → exit 1.
+  error. `serve` init failure → exit 1. `ingest --run-log-dir` records only
+  state-change events with timestamps, creates no file for a quiet `ok` run,
+  records the run error or panic, and never fails the run on a log write error.
 
 ### Integration (U9)
 - Backlog run → N pages/rows/`success`. Incremental run digests only the new file

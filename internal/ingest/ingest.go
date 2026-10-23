@@ -56,6 +56,11 @@ type RunOptions struct {
 	DryRun bool
 	Limit  int
 	Origin string
+	// OnEvent, when set, receives each per-file result that records a state
+	// change or a new error (digested, failed, a new refusal, archived,
+	// source-error), synchronously as it happens. Skipped, deferred,
+	// exhausted, unchanged, already-refused, and would-* results are not sent.
+	OnEvent func(FileResult)
 }
 type Runner struct {
 	cfg       *config.Config
@@ -140,7 +145,7 @@ func (r *Runner) Run(ctx context.Context, opts RunOptions) (*Report, error) {
 		return nil, err
 	}
 	defer unlock()
-	report := &Report{}
+	report := &Report{onEvent: opts.OnEvent}
 	if err := ctx.Err(); err != nil {
 		return report, fmt.Errorf("ingest.Run: %w", err)
 	}
@@ -214,7 +219,7 @@ func (r *Runner) handleSuccessRow(sourcePath string, prev *ledgerRow, report *Re
 		return err
 	}
 	report.Failed++
-	report.PerFile = append(report.PerFile, FileResult{
+	report.addEvent(FileResult{
 		Path:   sourcePath,
 		Action: actionFailed,
 		Error:  "stat wiki page: " + err.Error(),
@@ -239,7 +244,7 @@ func (r *Runner) scan(report *Report) []scanEntry {
 		dirEntries, err := os.ReadDir(dir)
 		if err != nil {
 			report.SourceErrors++
-			report.PerFile = append(report.PerFile, FileResult{Path: dir, Action: actionSourceError, Error: sourceErrorText(err)})
+			report.addEvent(FileResult{Path: dir, Action: actionSourceError, Error: sourceErrorText(err)})
 			continue
 		}
 		for _, de := range dirEntries {
@@ -399,7 +404,7 @@ func (r *Runner) digestOne(parent context.Context, entry scanEntry, hash, schema
 		return
 	}
 	report.Digested++
-	report.PerFile = append(report.PerFile, FileResult{Path: entry.absPath, Action: actionDigested})
+	report.addEvent(FileResult{Path: entry.absPath, Action: actionDigested})
 }
 func (r *Runner) recordFailure(entry scanEntry, hash, origin string, prev *ledgerRow, report *Report, msg string, class failureClass) {
 	attempts := attemptsOf(prev)
@@ -423,11 +428,11 @@ func (r *Runner) recordFailure(entry scanEntry, hash, origin string, prev *ledge
 	}
 	if class == classRefused {
 		report.Refused++
-		report.PerFile = append(report.PerFile, FileResult{Path: entry.absPath, Action: actionRefused, Error: msg})
+		report.addEvent(FileResult{Path: entry.absPath, Action: actionRefused, Error: msg})
 		return
 	}
 	report.Failed++
-	report.PerFile = append(report.PerFile, FileResult{Path: entry.absPath, Action: actionFailed, Error: msg})
+	report.addEvent(FileResult{Path: entry.absPath, Action: actionFailed, Error: msg})
 }
 func (r *Runner) sweepOrphans(ctx context.Context, report *Report, dryRun bool) error {
 	if err := ctx.Err(); err != nil {
@@ -528,7 +533,7 @@ func (r *Runner) sweepOrphans(ctx context.Context, report *Report, dryRun bool) 
 		}
 
 		report.Archived++
-		report.PerFile = append(report.PerFile, FileResult{
+		report.addEvent(FileResult{
 			Path: row.sourcePath, Action: actionArchived,
 		})
 	}
@@ -537,7 +542,7 @@ func (r *Runner) sweepOrphans(ctx context.Context, report *Report, dryRun bool) 
 func (r *Runner) reportSweepSourceError(report *Report, dir string, err error) {
 	slog.Warn("sweep: source dir snapshot failed, skipping", "dir", dir, "error", err)
 	report.SourceErrors++
-	report.PerFile = append(report.PerFile, FileResult{
+	report.addEvent(FileResult{
 		Path:   dir,
 		Action: actionSourceError,
 		Error:  sourceErrorText(err),

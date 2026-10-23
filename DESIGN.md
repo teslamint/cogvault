@@ -727,7 +727,7 @@ resolveConfigPath → Load → bootstrap(store/index/adapter) → CheckConsisten
 | `httpauth/metadata.go` | Protected Resource Metadata handler |
 | `httpauth/oauth.go` | OAuthValidator (JWT validation via golang-jwt/jwt/v5) |
 | `httpauth/jwks.go` | JWKSCache (OIDC discovery + JWKS fetch, key decode) |
-| `cmd/cogvault/*` | cobra CLI: `--config`, init/search/serve/ingest/status/access-check; `ingest` brackets each run with timestamped stderr lines via one deferred emitter (`recover` → `result=panic`); clock seam `ingestNow` |
+| `cmd/cogvault/*` | cobra CLI: `--config`, init/search/serve/ingest/status/access-check; `ingest` brackets each run with timestamped stderr lines via one deferred emitter (`recover` → `result=panic`); clock seam `ingestNow`. `--run-log-dir` adds a per-run file (`ingest_run_log.go`) fed by `ingest.RunOptions.OnEvent`, which `internal/ingest` calls synchronously at each state-change result; seam `ingestPID` |
 | `Makefile` | build/install with `CODESIGN_IDENTITY` (default `-`, ad-hoc) and `CODESIGN_IDENTIFIER` (default `dev.tmint.cogvault`) applied to the build artifact and install destination; test, clean |
 | `scripts/install-signed.sh` | select one Developer ID identity, install, verify the installed identifier, and restart the loaded ingest job |
 | `schema/schema.go` + `default_schema.md` | `go:embed` default schema |

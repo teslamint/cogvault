@@ -38,6 +38,17 @@ type Report struct {
 	SumMismatch  string
 	PerFile      []FileResult
 	NewAttention []FileResult
+
+	onEvent func(FileResult)
+}
+
+// addEvent appends a state-changing result and forwards it to
+// RunOptions.OnEvent.
+func (r *Report) addEvent(f FileResult) {
+	r.PerFile = append(r.PerFile, f)
+	if r.onEvent != nil {
+		r.onEvent(f)
+	}
 }
 
 func (r *Report) SumCheck() error {

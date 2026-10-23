@@ -26,6 +26,10 @@
         <string>--config</string>
         <string>/Users/USERNAME/.config/cogvault/config.yaml</string>
         <string>--scheduled</string>
+        <!-- One timestamped log file per run that changed state or failed;
+             quiet runs create no file. Must be absolute. -->
+        <string>--run-log-dir</string>
+        <string>/Users/USERNAME/Library/Logs/cogvault/runs</string>
     </array>
 
     <key>StartInterval</key>

@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -63,15 +64,26 @@ func newIngestCmd() *cobra.Command {
 	cmd.Flags().Bool("dry-run", false, "list files that would be digested without writing")
 	cmd.Flags().Int("limit", 0, "max files to digest this run (0 = no limit)")
 	cmd.Flags().Bool("scheduled", false, "mark this run as scheduled (used by the launchd plist)")
+	cmd.Flags().String("run-log-dir", "", "absolute directory for one log file per ingest run (empty = off)")
 	return cmd
 }
 
 // bracketIngestRun writes a timestamped start line, runs body, and writes a
 // timestamped end line from a defer. The defer also covers panics: it writes
 // result=panic and re-panics with the same value. One emitter covers every
-// return path inside body, including paths added later.
-func bracketIngestRun(w io.Writer, origin string, body func() (*ingest.Report, error)) (err error) {
-	fmt.Fprintf(w, "%s ingest start origin=%s\n", ingestNow().Format(ingestRunTimeLayout), origin)
+// return path inside body, including paths added later. When runLogDir is
+// set, the same lines plus each state-change event also go to the run's own
+// log file (see runLog).
+func bracketIngestRun(w io.Writer, origin, runLogDir string, body func(onEvent func(ingest.FileResult)) (*ingest.Report, error)) (err error) {
+	started := ingestNow()
+	startLine := fmt.Sprintf("%s ingest start origin=%s", started.Format(ingestRunTimeLayout), origin)
+	fmt.Fprintln(w, startLine)
+
+	perRun := newRunLog(runLogDir, started, startLine)
+	var onEvent func(ingest.FileResult)
+	if perRun != nil {
+		onEvent = func(f ingest.FileResult) { perRun.event(ingestNow(), f) }
+	}
 
 	var report *ingest.Report
 	defer func() {
@@ -83,17 +95,26 @@ func bracketIngestRun(w io.Writer, origin string, body func() (*ingest.Report, e
 		case err == nil:
 			result = "ok"
 		}
-		fmt.Fprintf(w, "%s ingest end origin=%s result=%s", ingestNow().Format(ingestRunTimeLayout), origin, result)
+		ended := ingestNow().Format(ingestRunTimeLayout)
+		endLine := fmt.Sprintf("%s ingest end origin=%s result=%s", ended, origin, result)
 		if report != nil {
-			fmt.Fprintf(w, " %s", report.Summary())
+			endLine += " " + report.Summary()
 		}
-		fmt.Fprintln(w)
+		fmt.Fprintln(w, endLine)
+		detail := ""
+		switch {
+		case rec != nil:
+			detail = fmt.Sprintf("%s ingest panic: %v", ended, rec)
+		case err != nil:
+			detail = fmt.Sprintf("%s ingest error: %v", ended, err)
+		}
+		perRun.finish(endLine, result == "ok", detail)
 		if rec != nil {
 			panic(rec)
 		}
 	}()
 
-	report, err = body()
+	report, err = body(onEvent)
 	return err
 }
 
@@ -103,15 +124,19 @@ func runIngest(cmd *cobra.Command, args []string) error {
 	if scheduled {
 		origin = "scheduled"
 	}
+	runLogDir, _ := cmd.Flags().GetString("run-log-dir")
+	if runLogDir != "" && !filepath.IsAbs(runLogDir) {
+		return fmt.Errorf("--run-log-dir must be an absolute path: %q", runLogDir)
+	}
 
-	return bracketIngestRun(cmd.ErrOrStderr(), origin, func() (*ingest.Report, error) {
-		return executeIngest(cmd, origin, scheduled)
+	return bracketIngestRun(cmd.ErrOrStderr(), origin, runLogDir, func(onEvent func(ingest.FileResult)) (*ingest.Report, error) {
+		return executeIngest(cmd, origin, scheduled, onEvent)
 	})
 }
 
 // executeIngest is the ingest command body. runIngest brackets it with the
 // timestamped start and end lines; every return here reaches that bracket.
-func executeIngest(cmd *cobra.Command, origin string, scheduled bool) (*ingest.Report, error) {
+func executeIngest(cmd *cobra.Command, origin string, scheduled bool, onEvent func(ingest.FileResult)) (*ingest.Report, error) {
 	configPath, err := resolveConfigPath(cmd)
 	if err != nil {
 		return nil, err
@@ -141,9 +166,10 @@ func executeIngest(cmd *cobra.Command, origin string, scheduled bool) (*ingest.R
 	limit, _ := cmd.Flags().GetInt("limit")
 
 	report, err := runner.Run(cmd.Context(), ingest.RunOptions{
-		DryRun: dryRun,
-		Limit:  limit,
-		Origin: origin,
+		DryRun:  dryRun,
+		Limit:   limit,
+		Origin:  origin,
+		OnEvent: onEvent,
 	})
 	if report != nil {
 		cmd.Print(report.String())
