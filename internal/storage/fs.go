@@ -3,14 +3,16 @@ package storage
 import (
 	"errors"
 	"fmt"
-	"github.com/teslamint/cogvault/internal/adapter"
-	"github.com/teslamint/cogvault/internal/config"
-	cverr "github.com/teslamint/cogvault/internal/errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/teslamint/cogvault/internal/adapter"
+	"github.com/teslamint/cogvault/internal/config"
+	cverr "github.com/teslamint/cogvault/internal/errors"
+	"github.com/teslamint/cogvault/internal/terms"
 )
 
 type FSStorage struct {
@@ -64,6 +66,17 @@ func (fs *FSStorage) Write(path string, data []byte) error {
 
 	if cleaned == filepath.Clean(fs.cfg.SchemaPath()) {
 		return fmt.Errorf("storage.Write %s: %w", path, cverr.ErrPermission)
+	}
+
+	if strings.EqualFold(filepath.Ext(cleaned), ".md") {
+		existing, readErr := os.ReadFile(absPath)
+		if readErr == nil {
+			if err := terms.CheckOverwrite(existing, data); err != nil {
+				return fmt.Errorf("storage.Write %s: %w", path, err)
+			}
+		} else if !errors.Is(readErr, os.ErrNotExist) {
+			return fmt.Errorf("storage.Write %s: read existing Markdown: %w", path, readErr)
+		}
 	}
 
 	// TOCTOU: a race window exists between resolvePath (symlink check) and

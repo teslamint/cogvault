@@ -299,6 +299,11 @@ surfaces, not direct retention reads.
 - `_schema.md` → `ErrPermission`.
 - Intermediate directories auto-created; existing files overwritten.
 - Index reflection is eventual (§5.7).
+- Before replacing an existing Markdown page, reject omission or emptying of
+  its explicit `usage_terms` purpose, conditions, scope, where, level, or evidence fields.
+  The original bytes remain unchanged on rejection. This applies to every
+  storage caller, including MCP and generated-output commands; no silent
+  content rewrite is performed behind the index caller.
 
 ### 5.5 Move
 
@@ -542,7 +547,7 @@ Non-recursive; title/type/category from the `GetMeta` cache. Errors: `ErrNotFoun
 ### 8.5 wiki_search
 
 `query: string` (required), `limit: int` (optional, default 10) →
-`[{path, title, type, category, snippet, score}]`. Empty result is not an error.
+`[{path, title, type, category, snippet, score, usage_terms}]`. Empty result is `[]`, not an error.
 
 - **No `scope` parameter** (removed in v2). The input schema does not advertise
   `scope`. `internal/mcp/server.go`'s `noExtra` wrapper sets
@@ -555,6 +560,17 @@ Non-recursive; title/type/category from the `GetMeta` cache. Errors: `ErrNotFoun
 - `snippet`: short excerpt around the match, or empty.
 - `score`: sort-only `float64`; only relative order within one response is
   meaningful.
+- `usage_terms` is the shared search summary: `scope`, `where`, `level`,
+  `conditions`, `evidence: {reference}`, review `status`, and `reasons`.
+  Missing, blank, or non-text summary values use the explicit string
+  `"unverified"`; it means unknown, never unrestricted permission.
+- The summary reads each result through storage permissions. An unreadable or
+  malformed page gets an entirely unverified summary and a reason; other results
+  still return. No evidence URL, original source, or LLM is accessed.
+- Review status uses the same inspection as `terms` (§9.15). `recorded` is not
+  a shareability verdict, and missing Where/Level remain unknown on older records.
+  Long evidence quotes and reviewer details remain available via `wiki_parse`.
+  Summary `scope` describes applicability; it does not restore the removed query parameter.
 
 ### 8.6 wiki_scan
 
@@ -635,10 +651,11 @@ page leaves no trace at all.
 Every command takes `--config <path>` (default `~/.config/cogvault/config.yaml`).
 launchd invokes `cogvault ingest --config <path>` explicitly (no useful cwd).
 
-Every command except `fetch`, `status`, and `access-check` opens the index and
+Every command except `fetch`, `status`, `access-check`, and `terms` opens the index and
 runs a forced consistency check first (§2.3). A check error warns on stderr and
 does not stop the command. `fetch` reads the config only; it never opens the
 index or the wiki. `status` loads the config and the ingest ledger only.
+`terms` loads the config and reads one wiki page through storage; it opens no DB.
 
 ### 9.1 init (two-step)
 
@@ -665,6 +682,14 @@ cogvault search [--config <path>] <terms>
 ```
 
 No `--scope` flag (removed in v2).
+
+Each result keeps its path, title, type/category, and snippet, then displays
+applicability, Where, Level, How (`conditions`), evidence reference, and review
+status. Unknown summary values display as `미확인`; review reasons are shown when
+present. A notice states that `recorded` is not legal permission.
+CLI and MCP use the same `internal/terms` inspection and summary. Search order,
+limits, and query matching are unchanged; no sharing-allowed filter or automatic
+license-to-permission mapping is added. The index schema is unchanged.
 
 ### 9.3 serve
 
@@ -776,11 +801,15 @@ cogvault fetch [--config <path>] [--source-dir <dir>] [--name <file>] <url>
   the UTF-8 gate) is rejected with `unsupported Content-Type`, and a body
   that is not valid UTF-8 is rejected — binary media must not become a
   `.md` capture.
-- Writes YAML frontmatter (`source_url` **quoted**, `fetched_at` as a UTC
-  date) followed by the raw response body. No HTML-to-text extraction happens
-  here; the LLM digest step handles the markup. The file is written to a
-  temp name and renamed into place, so a crash cannot leave a partial
-  capture.
+- Adds YAML `source_url` (retaining the exact URL value) and UTC `fetched_at`.
+  A parseable explicit `usage_terms` declaration is copied into the capture
+  header as unverified data, not accepted as a human review or legal conclusion;
+  remote reviewer/date claims are removed from that copied record.
+  The complete response body remains byte-identical, including original or
+  malformed frontmatter. No HTML extraction happens here.
+- Before replacing an existing capture, apply the same terms-loss check as
+  storage (§5.4). On rejection the old file is unchanged. Successful writes use
+  a temp name and rename, so a crash cannot leave a partial capture.
 
 ### 9.6 digest
 
@@ -970,6 +999,63 @@ This result covers only the configured paths and operations above. It does not
 prove that macOS stored a TCC decision. It does not prove that a complete ingest
 will run without prompts. It does not prove access to unconfigured Documents,
 Pictures, Photos Library, or network shares.
+
+### 9.15 terms
+
+```
+cogvault terms <wiki-relative-path> [--config <path>]
+```
+
+Read one page through storage and output JSON: `path`, effective `status`,
+original `record`, `reasons`, and `notice`. This command does not write pages,
+open a DB, call an LLM, or fetch evidence. Storage read restrictions apply.
+Read/config errors return a command error. An unverified record is a successful
+inspection, not a command error.
+
+The page's optional `usage_terms` YAML mapping contains:
+
+| Field | Contract |
+|---|---|
+| `status` | `unverified` or `recorded` |
+| `purpose` | Non-empty string describing the intended use |
+| `conditions` | Non-empty string preserving permissions, restrictions, and obligations |
+| `scope` | Optional applicability description, preserved when supplied |
+| `where` | Optional text naming the declared sharing audience or destination |
+| `level` | Optional text describing permitted portion or transformation, not an ordinal grade |
+| `evidence.reference` | Non-empty string locating the terms or permission evidence |
+| `evidence.quote` | Non-empty string containing the relevant evidence text |
+| `reviewed_by` | Non-empty string naming the human reviewer |
+| `reviewed_at` | Valid `YYYY-MM-DD` text; quoted or unquoted date scalars retain their text |
+
+`recorded` means a complete human record, **not permission or a legal determination**.
+Missing, malformed, incomplete, invalid-date, unknown-status, and explicitly
+unverified records have effective status `unverified`, with reasons.
+Invalid YAML frontmatter also yields `unverified`.
+The inspector checks structure only. A human must assess evidence truth,
+scope, authenticity, ambiguity, and conflicts for the intended use.
+Leave ambiguous or conflicting evidence explicitly `unverified`.
+URLs, free access, and subscriptions alone do not establish permission.
+
+Review status and terms data are independent. An unverified record may contain
+explicit permission, restrictions, and evidence; those values must not be erased.
+For automatic ingest, select the structured input record first, an existing
+wiki record second, and a generated candidate third. Preserve its purpose,
+conditions, scope, and evidence before storage and indexing. Set status to
+`unverified` and remove automatic reviewer/date claims; do not claim legal clearance.
+Path-input Markdown and extracted-text inputs use the same selection rule.
+Regeneration without new input terms retains the previous declaration but
+requires review again. An explicit new input declaration may replace field
+values but must retain populated protected fields or provide non-empty
+replacements for them (§5.4). Conflicting declarations are not automatically
+combined or legally resolved.
+Absent records remain `{status: unverified}` without fabricated conditions.
+Malformed supplied records fail rather than silently discarding evidence.
+Untouched existing pages are not migrated. Existing MCP `wiki_read` and
+`wiki_parse` expose the stored record; search snippets are not terms decisions.
+
+The isolated example workflow is documented in
+`docs/usage-terms.md`. All example terms are fictional validation settings,
+not evidence for rights to real material.
 
 ---
 

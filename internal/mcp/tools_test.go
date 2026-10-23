@@ -489,7 +489,8 @@ func TestHandleWikiSearch(t *testing.T) {
 				return []index.Result{{Path: "test.md", Title: "Test", Score: 1.5}}, nil
 			},
 		}
-		handler := handleWikiSearch(testCfg(), &mockStorage{}, idx, &mockAdapter{})
+		store := &mockStorage{readFn: func(string) ([]byte, error) { return nil, cverr.ErrNotFound }}
+		handler := handleWikiSearch(testCfg(), store, idx, &mockAdapter{})
 		result, err := handler(context.Background(), makeReq(map[string]any{"query": "test"}))
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -527,7 +528,8 @@ func TestHandleWikiSearch(t *testing.T) {
 				return []index.Result{{Path: "test.md"}}, nil
 			},
 		}
-		handler := handleWikiSearch(testCfg(), &mockStorage{}, idx, &mockAdapter{})
+		store := &mockStorage{readFn: func(string) ([]byte, error) { return nil, cverr.ErrNotFound }}
+		handler := handleWikiSearch(testCfg(), store, idx, &mockAdapter{})
 		result, err := handler(context.Background(), makeReq(map[string]any{"query": "test"}))
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)

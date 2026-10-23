@@ -27,14 +27,15 @@ cmd/cogvault/main.go
 
 all packages ──▶ errors/, config/
 mcp/, cmd/     ──▶ gitutil/
+storage/, ingest/, cmd/ ──▶ terms/
 ```
 
 Unidirectional, no cycles. Two new packages in v2: `internal/llm` and
 `internal/ingest`. `ingest` composes `storage` (wiki writes), `index` (Add),
 `llm` (Digest), and `config`, and additionally reads source files directly.
 
-`internal/gitutil` (0024) is a third leaf package alongside `errors/` and
-`config/`: it imports nothing from cogvault, so both `internal/mcp`
+`internal/gitutil` (0024) is a leaf package: it imports nothing from cogvault,
+so both `internal/mcp`
 (per-file auto-commits) and `cmd/cogvault` (the post-ingest whole-tree
 snapshot) both depend on it without either depending on the other for it.
 `cmd/cogvault` does import `internal/mcp` — the point is that sharing a
@@ -43,6 +44,11 @@ treated "cmd depends on mcp, not the reverse" as a reason to duplicate the
 commit logic, which instead produced two copies that drifted apart and would
 have needed every
 concurrency and signal fix applied twice.
+
+`internal/terms` is another leaf package shared by storage, ingest, and CLI
+capture/inspection. It owns metadata decoding, text-preserving encoding,
+automatic review-state reset, and structural evidence-loss checks. It does not
+open storage, access a DB, call an LLM, or decide legal permission.
 
 ---
 
@@ -112,6 +118,11 @@ and calls `os.Rename`; used by the ingest orphan sweep to archive pages.
 source and destination. For allowed paths, missing source returns `ErrNotFound`
 before destination occupancy is checked, and an occupied destination returns an
 error that wraps `os.ErrExist`. Single global write mutex retained (0006).
+`Write` checks an existing Markdown page with `terms.CheckOverwrite` under that
+same mutex, after path/permission checks and before mutation. Dropping non-empty
+purpose, conditions, scope, where, level, or evidence is rejected rather than silently merged.
+Callers therefore index exactly the bytes they successfully write. Broken
+metadata without a parseable declaration remains repairable.
 
 `isGitControlled` (0024, third correction pass) hard-rejects every mutating
 method — `Write`, `Delete`, and both ends of `Move` — for any path with a
@@ -306,6 +317,21 @@ the configured model and are skipped only while both model and content hash are
 unchanged; either change permits a re-attempt. Historical refused rows are not
 reclassified or migrated.
 
+After validation, `digestOne` preserves a structured source `usage_terms` record
+independently of LLM output. Source metadata takes precedence over existing wiki
+metadata, which takes precedence over a generated candidate. The leaf package
+`internal/terms` copies the selected record, resets only review status to
+`unverified`, and removes reviewer/date claims. Conditions and evidence remain.
+Source Markdown and extracted source text use the same parser. Missing source
+terms on regeneration retain the existing declaration. Both storage and indexing
+receive the same encoded bytes; serialization errors retain the permanent class.
+No input terms are inferred from URLs, access price, or unrelated licenses.
+The ledger resolves the previous successful/superseded page by source identity,
+not the new content hash or destination slug. Cross-destination writes also
+check the prior record for loss, covering hash-derived slugs.
+The shared parser handles UTF-8 BOMs like the Markdown adapters and retains
+date/timestamp scalar text so evidence is not reformatted into a different instant.
+
 `Run` adds a `NewAttention` entry when the current run first reaches an
 exhausted or refused state. `Notify` formats those entries for best-effort
 delivery after a successful scheduled run. The Darwin notifier passes the
@@ -381,6 +407,22 @@ than race.
 `status.go` loads the config and calls `ingest.AttentionRows` directly. It does
 not bootstrap storage, the index, or the ingest runner. Human output uses local
 timestamps. JSON preserves the stored canonical UTC timestamp.
+
+`terms.go` loads config and constructs `FSStorage` directly, without `bootstrap`.
+It reads exactly one wiki path through the existing storage boundary. YAML
+frontmatter is parsed with the existing frontmatter library and YAML v3 decoder.
+The inspector checks record completeness and date syntax only (SPEC §9.15).
+It neither opens SQLite nor calls an LLM, fetches evidence, or writes pages.
+Existing MCP read/parse operations expose the same page metadata without a new tool.
+
+CLI `search` and MCP `wiki_search` enrich each index result by reading its page
+through storage. `terms.Summarize` projects applicability, Where, Level,
+conditions, evidence reference, and review state using the same `terms.Inspect`
+as detailed inspection. Failed reads discard partial bytes and produce an
+entirely unverified summary. The CLI renders text; MCP adds `usage_terms` to
+the existing JSON result array. Query/ranking/limit behavior is unchanged.
+This adds one storage read per result instead of adding index columns or a DB
+migration; no latency benchmark is claimed. Full evidence stays in detailed reads.
 
 `access_check.go` loads the config without calling `bootstrap`. It probes only
 `wiki_dir`, the `db_path` parent, and configured `sources[]`. Write probes use a
