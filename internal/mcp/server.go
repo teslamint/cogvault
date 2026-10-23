@@ -22,6 +22,7 @@ const (
 func NewServer(root string, cfg *config.Config, store storage.Storage, idx index.Index, adpt adapter.Adapter) *server.MCPServer {
 	s := server.NewMCPServer(serverName, serverVersion,
 		server.WithInstructions(schemaInstructions(cfg, store)),
+		server.WithToolHandlerMiddleware(callLogMiddleware),
 	)
 	registerTools(s, root, cfg, store, idx, adpt)
 	return s
