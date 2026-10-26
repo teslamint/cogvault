@@ -16,6 +16,9 @@ import (
 const (
 	openAIReadyTimeout = 10 * time.Second
 	openAIResponseCap  = 1 << 20
+	// openAIMaxTokens bounds one page. Observed pages used 600-1,300 tokens;
+	// an unbounded reasoning model generated 40,000 tokens without a page.
+	openAIMaxTokens = 4096
 )
 
 type OpenAI struct {
@@ -59,7 +62,9 @@ func (o *OpenAI) Digest(ctx context.Context, req DigestRequest) (*DigestResult, 
 			{"role": "system", "content": req.SchemaText + "\n\nOutput ONLY a markdown wiki page (no preamble)."},
 			{"role": "user", "content": "Source path: " + req.SourcePath + "\nPage slug: " + req.PageSlug + "\nSource text:\n" + req.SourceText},
 		},
-		"stream": false,
+		"stream":           false,
+		"reasoning_effort": "none",
+		"max_tokens":       openAIMaxTokens,
 	}
 	data, err := json.Marshal(body)
 	if err != nil {
@@ -100,7 +105,8 @@ func (o *OpenAI) Digest(ctx context.Context, req DigestRequest) (*DigestResult, 
 	}
 	var result struct {
 		Choices []struct {
-			Message struct {
+			FinishReason string `json:"finish_reason"`
+			Message      struct {
 				Content string `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
@@ -109,6 +115,10 @@ func (o *OpenAI) Digest(ctx context.Context, req DigestRequest) (*DigestResult, 
 		return nil, fmt.Errorf("llm.Digest %s: parse response: %w", req.SourcePath, err)
 	}
 	for _, choice := range result.Choices {
+		if choice.FinishReason == "length" {
+			// Deterministic for the same input and cap, so it must consume an attempt.
+			return nil, fmt.Errorf("llm.Digest %s: output reached max_tokens %d", req.SourcePath, openAIMaxTokens)
+		}
 		if page := strings.TrimSpace(stripFence(choice.Message.Content)); page != "" {
 			return &DigestResult{PageContent: page}, nil
 		}

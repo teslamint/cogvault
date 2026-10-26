@@ -1092,6 +1092,7 @@ scan source dir (top level only, Lstat: skip dirs/symlinks)
       → classify policy refusal across eligible final result, stderr, and permitted plain stdout
       → otherwise select a safe diagnostic: eligible result → stderr → plain stdout → process error
   → validate page frontmatter from bytes (non-empty map + title)
+  → set `ingested_at` to the run's local date (YYYY-MM-DD), replacing any model value
   → collision-aware page path under sources/
   → storage.Write → index.Add → ledger: success
 (digest/validation/storage/index failure → attempt ledger status `failed` or `refused` + classified error)
@@ -1277,7 +1278,9 @@ github.com/golang-jwt/jwt/v5    # JWT parsing/validation (oauth mode)
 
 The `claudecode` backend shells out to the `claude` CLI; the `ollama` and
 `openai` backends use HTTP. The `openai` PDF path additionally requires Poppler,
-Tesseract, and `eng`/`kor` language data at runtime.
+Tesseract, and `eng`/`kor` language data at runtime. Each `openai` digest request
+sends `reasoning_effort: "none"` and `max_tokens: 4096`; a response with
+`finish_reason: "length"` is a permanent failure.
 
 ---
 

@@ -371,6 +371,8 @@ func (r *Runner) digestOne(parent context.Context, entry scanEntry, hash, schema
 		return
 	}
 	fm = terms.Automatic(source, previous, fm)
+	// Models invent this date (observed: today's date from a stale prompt, or the document's own date).
+	fm["ingested_at"] = r.now().Format("2006-01-02")
 	if !validUsageTermsRecord(source) || !validUsageTermsRecord(fm) {
 		r.recordFailure(entry, hash, origin, prev, report, "validate: malformed usage terms record", classPermanent)
 		return

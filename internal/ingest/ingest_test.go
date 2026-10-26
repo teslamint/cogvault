@@ -23,6 +23,31 @@ import (
 	"github.com/teslamint/cogvault/internal/storage"
 )
 
+func TestRunSetsIngestedAtFromRunClock(t *testing.T) {
+	m := &mockLLM{fn: func(req llm.DigestRequest) (*llm.DigestResult, error) {
+		return &llm.DigestResult{PageContent: "---\ntitle: T\ntype: source\ningested_at: 2024-01-15\n---\n\nbody\n"}, nil
+	}}
+	h := newHarness(t, []string{"md"}, m)
+	// 01:30 KST is 2026-10-25 in UTC, so this distinguishes the local date SPEC §10.1 names.
+	now := time.Date(2026, 10, 26, 1, 30, 0, 0, time.FixedZone("KST", 9*3600))
+	h.runner.now = func() time.Time { return now }
+	src := h.write(t, "dated.md", "content")
+	// The injected clock also drives the settle gate; keep the file older than it.
+	if err := os.Chtimes(src, now.Add(-time.Hour), now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.runner.Run(context.Background(), RunOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	page, err := h.store.Read("sources/dated.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(page), "ingested_at: \"2026-10-26\"") {
+		t.Fatalf("page frontmatter:\n%s", page)
+	}
+}
+
 var errPermanent = errors.New("permanent digest failure")
 
 type mockLLM struct {

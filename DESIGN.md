@@ -232,6 +232,19 @@ errors are transient, and the response is fence-stripped with the same
 `stripFence` as claudecode so ```-wrapped model output is not a permanent
 parse failure.
 
+`openai` POSTs `<base_url>/chat/completions` (non-streaming) with the schema as
+the system message and the extracted source text as the user message. It sends
+`reasoning_effort: "none"` and `max_tokens: 4096`: with reasoning enabled, a
+local reasoning model (Strata `iq3_s`) generated up to 40,000 tokens without a
+page, past both Strata's 300 s gateway wall (HTTP 502, transient) and the digest
+budget. `finish_reason: "length"` is permanent, because the same input and cap
+truncate again. HTTP classification matches `ollama`, plus an unloaded-model
+4xx message is transient.
+
+Ingest, not the adapter, writes `ingested_at` from the run clock after
+validation; models were observed inventing it from stale prompt dates or the
+document's own date.
+
 `isRefusalText` canonicalizes each candidate, then accepts only a candidate
 beginning `policy refusal:`, or the anchored case-insensitive provider grammar
 `^api error:\s*(?:refused\b|safeguards flagged\b|fable 5(?:'s|’s) safeguards flagged\b)`.

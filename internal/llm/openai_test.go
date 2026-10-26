@@ -93,6 +93,25 @@ func TestOpenAIDigestPostsCompleteTextAndMetadata(t *testing.T) {
 	if strings.Contains(s, "Read the PDF file at path") {
 		t.Fatalf("request contains path-read instruction: %s", s)
 	}
+	// Unbounded reasoning ran past Strata's 300 s gateway wall and produced no page.
+	if got["reasoning_effort"] != "none" {
+		t.Fatalf("reasoning_effort=%v", got["reasoning_effort"])
+	}
+	if n, ok := got["max_tokens"].(float64); !ok || n <= 0 {
+		t.Fatalf("max_tokens=%v", got["max_tokens"])
+	}
+}
+
+func TestOpenAIDigestTruncatedOutputPermanent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"finish_reason":"length","message":{"content":"---\ntitle: Cut\n---\n\n## 요약\n\nhalf"}}]}`))
+	}))
+	defer srv.Close()
+	res, err := NewOpenAI(srv.URL, "m").Digest(context.Background(), DigestRequest{SourceText: "x"})
+	if err == nil || errors.Is(err, ErrTransient) {
+		t.Fatalf("res=%v err=%v; want permanent error", res, err)
+	}
 }
 
 func TestOpenAIHTTPClassification(t *testing.T) {
