@@ -17,6 +17,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/teslamint/cogvault/internal/adapter/obsidian"
 	"github.com/teslamint/cogvault/internal/config"
 	cverr "github.com/teslamint/cogvault/internal/errors"
 	"github.com/teslamint/cogvault/internal/extract"
@@ -25,6 +26,7 @@ import (
 	"github.com/teslamint/cogvault/internal/schema"
 	"github.com/teslamint/cogvault/internal/storage"
 	"github.com/teslamint/cogvault/internal/terms"
+	"github.com/teslamint/cogvault/internal/wikilink"
 
 	"golang.org/x/sys/unix"
 	"golang.org/x/text/unicode/norm"
@@ -78,6 +80,9 @@ type Runner struct {
 	readDir      func(string) ([]os.DirEntry, error)
 	notifyFunc   func(title, body string) error
 	withTimeout  func(context.Context, time.Duration) (context.Context, context.CancelFunc)
+	// listPages returns every wiki page path; ingest resolves model-written
+	// [[links]] against it.
+	listPages func() ([]string, error)
 }
 type TextExtractor interface {
 	Extract(context.Context, string) (string, error)
@@ -91,13 +96,26 @@ func New(cfg *config.Config, store storage.Storage, idx index.Index, llmAdapter 
 	if err != nil {
 		return nil, err
 	}
-	return &Runner{
+	r := &Runner{
 		cfg: cfg, store: store, idx: idx, llm: llmAdapter,
 		extractor: extract.NewPDFExtractor(cfg.LLM.MaxInputChars, extract.Commands{}),
 		ledger:    l, dbPath: dbPath, settleWindow: settleWindow,
 		maxFileSize: int64(cfg.MaxFileSizeMB) << 20, now: time.Now,
 		readDir: os.ReadDir, notifyFunc: defaultNotify, withTimeout: context.WithTimeout,
-	}, nil
+	}
+	r.listPages = r.scanWikiPages
+	return r, nil
+}
+
+// scanWikiPages lists wiki pages. Both adapters scan the same way, so the
+// obsidian scanner serves either configured adapter.
+func (r *Runner) scanWikiPages() ([]string, error) {
+	var pages []string
+	err := obsidian.New().Scan(r.cfg.WikiDir, r.cfg.AllExcluded(), func(path string) error {
+		pages = append(pages, path)
+		return nil
+	})
+	return pages, err
 }
 
 // DigestProfile returns the retry identity for a digest configuration.
@@ -373,6 +391,20 @@ func (r *Runner) digestOne(parent context.Context, entry scanEntry, hash, schema
 	fm = terms.Automatic(source, previous, fm)
 	// Models invent this date (observed: today's date from a stale prompt, or the document's own date).
 	fm["ingested_at"] = r.now().Format("2006-01-02")
+	// The model cannot see the page list, so it invents link targets. Keep the
+	// links that resolve and turn the rest into plain display text.
+	pages, err := r.listPages()
+	if err != nil {
+		r.recordFailure(entry, hash, origin, prev, report, "scan wiki: "+err.Error(), classInfra)
+		return
+	}
+	resolver := wikilink.NewSet(pages)
+	resolver.Add(page)
+	stripped, dropped := wikilink.StripUnresolved(string(body), resolver)
+	if len(dropped) > 0 {
+		body = []byte(stripped)
+		slog.Info("ingest: unlinked targets missing from wiki", "page", page, "count", len(dropped))
+	}
 	if !validUsageTermsRecord(source) || !validUsageTermsRecord(fm) {
 		r.recordFailure(entry, hash, origin, prev, report, "validate: malformed usage terms record", classPermanent)
 		return

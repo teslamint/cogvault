@@ -399,30 +399,6 @@ func TestParseCodeBlockExclusion(t *testing.T) {
 	}
 }
 
-func TestCodeSpans(t *testing.T) {
-	tests := []struct {
-		name  string
-		body  string
-		want  int
-		check func([][2]int) bool
-	}{
-		{"fenced block", "before\n```\n[[x]]\n```\nafter", 1, nil},
-		{"inline code", "text `[[x]]` more", 1, nil},
-		{"double backtick", "text ``[[x]]`` more", 1, nil},
-		{"no code", "plain [[x]] text", 0, nil},
-		{"unclosed fence", "```\n[[x]]\nno close", 1, nil},
-		{"tilde fence", "~~~\n[[x]]\n~~~", 1, nil},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			spans := codeSpans(tt.body)
-			if len(spans) != tt.want {
-				t.Errorf("codeSpans() = %v, want %d spans", spans, tt.want)
-			}
-		})
-	}
-}
-
 func TestParseDeduplication(t *testing.T) {
 	root := t.TempDir()
 	mustWriteFile(t, filepath.Join(root, "test.md"), "---\n---\n[[same]] and [[same]] again")

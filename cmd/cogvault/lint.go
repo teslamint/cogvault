@@ -3,10 +3,10 @@ package main
 import (
 	"errors"
 	"fmt"
-	"path/filepath"
-	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/teslamint/cogvault/internal/wikilink"
 )
 
 func newLintCmd() *cobra.Command {
@@ -51,6 +51,11 @@ func runLint(cmd *cobra.Command, args []string) error {
 
 	var issues []lintIssue
 	linked := map[string]bool{}
+	pages := make([]string, 0, len(allPages))
+	for page := range allPages {
+		pages = append(pages, page)
+	}
+	resolver := wikilink.NewSet(pages)
 
 	for page := range allPages {
 		src, parseErr := adpt.Parse(cfg.WikiDir, page, false)
@@ -84,7 +89,7 @@ func runLint(cmd *cobra.Command, args []string) error {
 		}
 
 		for _, link := range src.Links {
-			target := resolveWikilink(link, allPages)
+			target := resolver.Resolve(link)
 			if target != "" {
 				linked[target] = true
 			} else {
@@ -129,23 +134,3 @@ func runLint(cmd *cobra.Command, args []string) error {
 // errLintIssuesFound carries no count: the report on stdout already has it, and
 // --strict is defined to change only the exit code.
 var errLintIssuesFound = errors.New("lint: issues found")
-
-func resolveWikilink(link string, allPages map[string]bool) string {
-	candidates := []string{
-		link + ".md",
-		filepath.Join("sources", link+".md"),
-		link,
-	}
-	for _, c := range candidates {
-		if allPages[c] {
-			return c
-		}
-	}
-	for page := range allPages {
-		base := strings.TrimSuffix(filepath.Base(page), ".md")
-		if strings.EqualFold(base, link) {
-			return page
-		}
-	}
-	return ""
-}

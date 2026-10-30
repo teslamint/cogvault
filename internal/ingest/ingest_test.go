@@ -48,6 +48,36 @@ func TestRunSetsIngestedAtFromRunClock(t *testing.T) {
 	}
 }
 
+// TestRunUnlinksTargetsMissingFromWiki pins SPEC §10.1: the model cannot see
+// the wiki's page list, so it invents [[links]]. Ingest keeps links that
+// resolve and turns the rest into their display text before saving.
+func TestRunUnlinksTargetsMissingFromWiki(t *testing.T) {
+	m := &mockLLM{fn: func(req llm.DigestRequest) (*llm.DigestResult, error) {
+		return &llm.DigestResult{PageContent: "---\ntitle: T\ntype: source\n---\n\n## 관련 페이지\n- [[keep]]\n- [[invented-page|만든 이름]]\n- [[" + req.PageSlug + "]]\n"}, nil
+	}}
+	h := newHarness(t, []string{"md"}, m)
+	if err := h.store.Write("concept/keep.md", []byte("---\ntitle: Keep\n---\n")); err != nil {
+		t.Fatal(err)
+	}
+	h.write(t, "linked.md", "content")
+	if _, err := h.runner.Run(context.Background(), RunOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	page, err := h.store.Read("sources/linked.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(page)
+	for _, want := range []string{"- [[keep]]\n", "- 만든 이름\n", "- [[linked]]\n"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("saved page missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "invented-page") {
+		t.Errorf("unresolved link kept:\n%s", got)
+	}
+}
+
 var errPermanent = errors.New("permanent digest failure")
 
 type mockLLM struct {

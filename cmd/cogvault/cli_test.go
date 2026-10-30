@@ -20,6 +20,7 @@ import (
 	cogmcp "github.com/teslamint/cogvault/internal/mcp"
 	"github.com/teslamint/cogvault/internal/schema"
 	"golang.org/x/sys/unix"
+	"golang.org/x/text/unicode/norm"
 )
 
 func executeCommand(args ...string) (stdout, stderr string, err error) {
@@ -1109,6 +1110,23 @@ func TestLintStrictSucceedsOnCleanWiki(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "no issues found") {
 		t.Fatalf("expected a clean report, got: %q", stdout)
+	}
+}
+
+// TestLintResolvesDecomposedHangulFileNames pins the NFC fix: iCloud and
+// macOS can store Hangul file names decomposed (NFD) while pages link with the
+// composed (NFC) form. Both name the same page, so lint must not call it broken.
+func TestLintResolvesDecomposedHangulFileNames(t *testing.T) {
+	configPath, wikiDir, _ := testVault(t)
+	if _, _, err := executeCommand("init", "--config", configPath); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	writeLintPage(t, wikiDir, norm.NFD.String("성염색체.md"), "성염색체", "see [[a]]")
+	writeLintPage(t, wikiDir, "a.md", "A", "see "+norm.NFC.String("[[성염색체]]"))
+
+	stdout, _, err := executeCommand("lint", "--config", configPath, "--strict")
+	if err != nil {
+		t.Fatalf("lint --strict: %v (output: %q)", err, stdout)
 	}
 }
 

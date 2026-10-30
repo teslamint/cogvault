@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+
+	"github.com/teslamint/cogvault/internal/wikilink"
 )
 
 func newGraphCmd() *cobra.Command {
@@ -49,10 +51,10 @@ func runGraph(cmd *cobra.Command, args []string) error {
 
 	var nodes []graphNode
 	var edges []graphEdge
-	allPages := map[string]bool{}
+	var pages []string
 
 	if err := adpt.Scan(cfg.WikiDir, cfg.AllExcluded(), func(path string) error {
-		allPages[path] = true
+		pages = append(pages, path)
 		title := path
 		typ := ""
 		if meta, metaErr := idx.GetMeta(path); metaErr == nil && meta != nil {
@@ -67,13 +69,14 @@ func runGraph(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("scan wiki: %w", err)
 	}
 
+	resolver := wikilink.NewSet(pages)
 	for _, node := range nodes {
 		src, parseErr := adpt.Parse(cfg.WikiDir, node.Path, false)
 		if parseErr != nil {
 			continue
 		}
 		for _, link := range src.Links {
-			target := resolveWikilink(link, allPages)
+			target := resolver.Resolve(link)
 			if target != "" {
 				edges = append(edges, graphEdge{Source: node.Path, Target: target})
 			}

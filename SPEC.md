@@ -462,8 +462,8 @@ Source {
 - Frontmatter via `adrg/frontmatter`; on failure, empty frontmatter + whole body.
 - Title: frontmatter `title` > first `#` heading > filename.
 - Wikilinks stored bracket-free: `[[t]]`, `[[t|d]]`, `[[t#h]]` → Links `"t"`;
-  `![[f]]`, `![[f|s]]` → Attachments `"f"`. Code-block wikilinks not excluded
-  (false positives allowed in Phase 1).
+  `![[f]]`, `![[f|s]]` → Attachments `"f"`. Wikilinks inside fenced or inline
+  code are excluded.
 
 ---
 
@@ -518,7 +518,9 @@ Source {
 `bytes` = `len(content)`. For `.md` paths, `warnings` lists frontmatter problems
 (missing frontmatter or `title`; a `type: source` page missing `source_path` or
 `ingested_at`; a `sources/` page whose `type` is not `source`; a `source_path`
-under `claude-chat-attachment/`). Warnings never block the write. Side effect:
+under `claude-chat-attachment/`) and one `unresolved wikilink: [[t]]` per
+distinct non-embed link target that resolves to no page (§9.12 resolution; the
+written page itself counts). Warnings never block the write. Side effect:
 best-effort index reflection. When `git.auto_commit` is `write` or
 `write+ingest` (§3.1, default `off`), also auto-commits the write
 (`git add` + `git commit -m "wiki: write <path>"`) when `wiki_dir` is a git
@@ -947,7 +949,10 @@ Reports, one line per issue as `<kind> <path> <message>`:
   lint-clean, which is what makes `--strict` usable from the first run.
 - `broken-link` — a `[[wikilink]]` that resolves to no page. Resolution tries
   `<link>.md`, `sources/<link>.md`, and `<link>` verbatim, then falls back to a
-  case-insensitive match on any page's basename.
+  case-insensitive match on any page's basename. Names compare in Unicode NFC
+  form, so a link and a file name that differ only in Hangul composition (NFC
+  vs. NFD, as macOS and iCloud may store names) match. `graph`, ingest
+  (§10.1), and `wiki_write` (§8.3) use the same resolution.
 - `orphan` — no incoming links. `_schema.md`, `_index.md`, and every
   `type: source` page are exempt, since source pages are expected to be reached
   through search rather than links.
@@ -1096,6 +1101,8 @@ scan source dir (top level only, Lstat: skip dirs/symlinks)
       → otherwise select a safe diagnostic: eligible result → stderr → plain stdout → process error
   → validate page frontmatter from bytes (non-empty map + title)
   → set `ingested_at` to the run's local date (YYYY-MM-DD), replacing any model value
+  → replace each non-embed `[[link]]` that resolves to no wiki page (§9.12; the
+    page being written counts) with its display text; a wiki scan error is an infra failure
   → collision-aware page path under sources/
   → storage.Write → index.Add → ledger: success
 (digest/validation/storage/index failure → attempt ledger status `failed` or `refused` + classified error)

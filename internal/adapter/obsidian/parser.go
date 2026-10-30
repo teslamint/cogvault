@@ -13,10 +13,10 @@ import (
 
 	"github.com/teslamint/cogvault/internal/adapter"
 	cverr "github.com/teslamint/cogvault/internal/errors"
+	"github.com/teslamint/cogvault/internal/wikilink"
 )
 
 var (
-	wikilinkRe  = regexp.MustCompile(`\[\[([^\]\n]+)\]\]`)
 	inlineTagRe = regexp.MustCompile(`(?:^|\s)#([a-zA-Z\p{L}][\w\p{L}/\-]*)`)
 	dataviewRe  = regexp.MustCompile(`(?m)^(\w+)::\s*(.+)$`)
 )
@@ -81,94 +81,20 @@ func (a *ObsidianAdapter) Parse(root, relPath string, includeContent bool) (*ada
 	return src, nil
 }
 
-func codeSpans(body string) [][2]int {
-	var spans [][2]int
-	lines := strings.Split(body, "\n")
-	offset := 0
-	inFence := false
-	fenceStart := 0
-
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if !inFence && (strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~")) {
-			inFence = true
-			fenceStart = offset
-		} else if inFence && (strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~")) {
-			spans = append(spans, [2]int{fenceStart, offset + len(line)})
-			inFence = false
-		}
-		offset += len(line) + 1
-	}
-	if inFence {
-		spans = append(spans, [2]int{fenceStart, len(body)})
-	}
-
-	for i := 0; i < len(body); i++ {
-		if body[i] != '`' || inCodeSpan(i, spans) {
-			continue
-		}
-		ticks := 1
-		for i+ticks < len(body) && body[i+ticks] == '`' {
-			ticks++
-		}
-		start := i
-		end := strings.Index(body[i+ticks:], strings.Repeat("`", ticks))
-		if end < 0 {
-			break
-		}
-		end += i + ticks + ticks
-		spans = append(spans, [2]int{start, end})
-		i = end - 1
-	}
-	return spans
-}
-
-func inCodeSpan(pos int, spans [][2]int) bool {
-	for _, s := range spans {
-		if pos >= s[0] && pos < s[1] {
-			return true
-		}
-	}
-	return false
-}
-
 func extractWikilinks(body string) ([]string, []string) {
-	matches := wikilinkRe.FindAllStringSubmatchIndex(body, -1)
-	spans := codeSpans(body)
 	linkSeen := map[string]bool{}
 	attachSeen := map[string]bool{}
 	var links, attachments []string
 
-	for _, loc := range matches {
-		matchStart := loc[0]
-		if inCodeSpan(matchStart, spans) {
-			continue
-		}
-		captured := body[loc[2]:loc[3]]
-
-		target := captured
-		if idx := strings.Index(target, "|"); idx >= 0 {
-			target = target[:idx]
-		}
-		if idx := strings.Index(target, "#"); idx >= 0 {
-			target = target[:idx]
-		}
-		target = strings.TrimSpace(target)
-		if target == "" {
-			continue
-		}
-
-		isEmbed := matchStart > 0 && body[matchStart-1] == '!'
-		if isEmbed {
-			if !attachSeen[target] {
-				attachments = append(attachments, target)
-				attachSeen[target] = true
+	for _, m := range wikilink.Find(body) {
+		if m.Embed {
+			if !attachSeen[m.Target] {
+				attachments = append(attachments, m.Target)
+				attachSeen[m.Target] = true
 			}
-		} else {
-			if !linkSeen[target] {
-				links = append(links, target)
-				linkSeen[target] = true
-			}
+		} else if !linkSeen[m.Target] {
+			links = append(links, m.Target)
+			linkSeen[m.Target] = true
 		}
 	}
 

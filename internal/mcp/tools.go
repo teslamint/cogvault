@@ -21,6 +21,7 @@ import (
 	"github.com/teslamint/cogvault/internal/index"
 	"github.com/teslamint/cogvault/internal/storage"
 	"github.com/teslamint/cogvault/internal/terms"
+	"github.com/teslamint/cogvault/internal/wikilink"
 )
 
 func mapError(err error, path string) *mcp.CallToolResult {
@@ -96,6 +97,7 @@ func handleWikiWrite(root string, cfg *config.Config, store storage.Storage, idx
 		var warnings []string
 		if strings.HasSuffix(strings.ToLower(path), ".md") {
 			warnings = validateFrontmatter(path, content)
+			warnings = append(warnings, unresolvedLinkWarnings(root, cfg, adpt, path, content)...)
 		}
 		if warnings == nil {
 			warnings = []string{}
@@ -109,6 +111,34 @@ func handleWikiWrite(root string, cfg *config.Config, store storage.Storage, idx
 		}
 		return mcp.NewToolResultJSON(result)
 	}
+}
+
+// unresolvedLinkWarnings reports each [[link]] in content that names no wiki
+// page. It scans the wiki only when content has a page link.
+func unresolvedLinkWarnings(root string, cfg *config.Config, adpt adapter.Adapter, path, content string) []string {
+	hasLink := false
+	for _, m := range wikilink.Find(content) {
+		if !m.Embed {
+			hasLink = true
+			break
+		}
+	}
+	if !hasLink {
+		return nil
+	}
+	resolver := wikilink.NewSet(nil)
+	if err := adpt.Scan(root, cfg.AllExcluded(), func(p string) error {
+		resolver.Add(p)
+		return nil
+	}); err != nil {
+		return []string{"could not check wikilinks: " + err.Error()}
+	}
+	resolver.Add(path)
+	var warnings []string
+	for _, target := range wikilink.Unresolved(content, resolver) {
+		warnings = append(warnings, "unresolved wikilink: [["+target+"]]")
+	}
+	return warnings
 }
 
 func handleWikiDelete(root string, store storage.Storage, idx index.Index) server.ToolHandlerFunc {

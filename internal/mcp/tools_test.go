@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -388,6 +389,46 @@ func TestHandleWikiWriteWarnings(t *testing.T) {
 	}
 	if len(resp.Warnings) == 0 {
 		t.Fatal("expected warnings for content without frontmatter")
+	}
+}
+
+// TestHandleWikiWriteWarnsOnUnresolvedLinks pins SPEC §6.2: a written page that
+// links to a page absent from the wiki gets one warning per missing target.
+// The write itself still succeeds.
+func TestHandleWikiWriteWarnsOnUnresolvedLinks(t *testing.T) {
+	store := &mockStorage{writeFn: func(string, []byte) error { return nil }}
+	idx := &mockIndex{addFn: func(string, string, map[string]string) error { return nil }}
+	adpt := &mockAdapter{
+		parseFn: func(string, string, bool) (*adapter.Source, error) {
+			return &adapter.Source{Frontmatter: map[string]any{}}, nil
+		},
+		scanFn: func(_ string, _ []string, fn func(string) error) error {
+			for _, p := range []string{"concept/keep.md", "notes/new.md"} {
+				if err := fn(p); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}
+
+	handler := handleWikiWrite("/vault", testCfg(), store, idx, adpt)
+	result, err := handler(context.Background(), makeReq(map[string]any{
+		"path":    "notes/new.md",
+		"content": "---\ntitle: New\ntype: concept\n---\n[[keep]] [[new]] [[gone]] [[gone|again]]\n",
+	}))
+	if err != nil || result.IsError {
+		t.Fatalf("write must succeed: err=%v result=%+v", err, result)
+	}
+	var resp struct {
+		Warnings []string `json:"warnings"`
+	}
+	if err := json.Unmarshal(callToolJSON(t, result), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	want := []string{"unresolved wikilink: [[gone]]"}
+	if !reflect.DeepEqual(resp.Warnings, want) {
+		t.Fatalf("warnings = %v, want %v", resp.Warnings, want)
 	}
 }
 

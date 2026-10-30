@@ -144,9 +144,13 @@ command to run.
 
 ### 2.4 adapter/obsidian
 
-Unchanged from v1 (`scanner.go` + `parser.go`; frontmatter, wikilink, tag,
-dataview extraction). It parses wiki pages under `wiki_dir`. `ResolveLink` still
-absent (v0.3 with Lint).
+Unchanged from v1 (`scanner.go` + `parser.go`; frontmatter, tag, dataview
+extraction). It parses wiki pages under `wiki_dir`. Wikilink finding and
+resolution live in `internal/wikilink`, shared by the obsidian parser, `lint`,
+`graph`, ingest, and `wiki_write`, so all of them agree on what a broken link
+is. Resolution compares names in Unicode NFC form because iCloud and macOS can
+store Hangul file names decomposed (NFD). Ingest lists wiki pages with the
+obsidian scanner whatever adapter is configured; both adapters scan identically.
 
 ### 2.5 index/sqlite
 
@@ -724,6 +728,7 @@ resolveConfigPath → Load → bootstrap(store/index/adapter) → CheckConsisten
 | `storage/storage.go` | interface + ListEntry + `Stat` |
 | `storage/fs.go` | filesystem (single wiki root), security, mutex |
 | `adapter/obsidian/*` | Scan, frontmatter/wikilink/tag/dataview parse |
+| `wikilink/wikilink.go` | wikilink finding (code spans skipped), NFC-normalized page resolution, unresolved-link stripping |
 | `adapter/markdown/parser.go` | standard-markdown fallback |
 | `index/index.go` | interface + Result + FileMeta + NormalizeCategory |
 | `index/sqlite.go` | FTS5, file_meta (+size/mtime/category), user_version=3, stat-gated CheckConsistency, busy_timeout |
