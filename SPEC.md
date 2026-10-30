@@ -515,7 +515,10 @@ Source {
 ### 8.3 wiki_write
 
 `path: string`, `content: string` (required) → `{status:"written", path, bytes, warnings:[]}`.
-`bytes` = `len(content)`; `warnings` always empty in Phase 1. Side effect:
+`bytes` = `len(content)`. For `.md` paths, `warnings` lists frontmatter problems
+(missing frontmatter or `title`; a `type: source` page missing `source_path` or
+`ingested_at`; a `sources/` page whose `type` is not `source`; a `source_path`
+under `claude-chat-attachment/`). Warnings never block the write. Side effect:
 best-effort index reflection. When `git.auto_commit` is `write` or
 `write+ingest` (§3.1, default `off`), also auto-commits the write
 (`git add` + `git commit -m "wiki: write <path>"`) when `wiki_dir` is a git

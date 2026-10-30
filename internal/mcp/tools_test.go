@@ -321,22 +321,34 @@ func TestHandleWikiWrite(t *testing.T) {
 func TestValidateFrontmatter(t *testing.T) {
 	tests := []struct {
 		name    string
+		path    string
 		content string
 		want    []string
 	}{
-		{"no frontmatter", "# Title\nBody", []string{"missing YAML frontmatter"}},
-		{"empty frontmatter", "---\n---\nBody", []string{"missing frontmatter field: title"}},
-		{"title present", "---\ntitle: X\n---\nBody", nil},
-		{"source missing fields", "---\ntitle: X\ntype: source\n---\n", []string{
+		{"no frontmatter", "notes/p.md", "# Title\nBody", []string{"missing YAML frontmatter"}},
+		{"empty frontmatter", "notes/p.md", "---\n---\nBody", []string{"missing frontmatter field: title"}},
+		{"title present", "notes/p.md", "---\ntitle: X\n---\nBody", nil},
+		{"source missing fields", "notes/p.md", "---\ntitle: X\ntype: source\n---\n", []string{
 			"source page missing field: source_path",
 			"source page missing field: ingested_at",
 		}},
-		{"source complete", "---\ntitle: X\ntype: source\nsource_path: a.pdf\ningested_at: 2026-08-08\n---\n", nil},
-		{"non-source type", "---\ntitle: X\ntype: entity\n---\n", nil},
+		{"source complete", "notes/p.md", "---\ntitle: X\ntype: source\nsource_path: a.pdf\ningested_at: 2026-08-08\n---\n", nil},
+		{"non-source type", "notes/p.md", "---\ntitle: X\ntype: entity\n---\n", nil},
+		// sources/ path rules
+		{"sources/ without type:source warns", "sources/p.md", "---\ntitle: X\ntype: synthesis\n---\n", []string{
+			"sources/ page should have type: source (got synthesis)",
+		}},
+		{"sources/ with type:source and complete fm ok", "sources/p.md", "---\ntitle: X\ntype: source\nsource_path: /a.pdf\ningested_at: 2026-08-08\n---\n", nil},
+		{"sources/ chat-attachment warns", "sources/p.md", "---\ntitle: X\ntype: source\nsource_path: claude-chat-attachment/foo.pdf\ningested_at: 2026-08-08\n---\n", []string{
+			"source_path refers to a chat attachment that cannot be re-read: claude-chat-attachment/foo.pdf",
+		}},
+		{"sources/ missing type warns twice", "sources/p.md", "---\ntitle: X\n---\n", []string{
+			"sources/ page should have type: source (got )",
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := validateFrontmatter(tt.content)
+			got := validateFrontmatter(tt.path, tt.content)
 			if len(got) != len(tt.want) {
 				t.Fatalf("warnings = %v, want %v", got, tt.want)
 			}

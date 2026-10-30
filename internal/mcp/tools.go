@@ -95,7 +95,7 @@ func handleWikiWrite(root string, cfg *config.Config, store storage.Storage, idx
 
 		var warnings []string
 		if strings.HasSuffix(strings.ToLower(path), ".md") {
-			warnings = validateFrontmatter(content)
+			warnings = validateFrontmatter(path, content)
 		}
 		if warnings == nil {
 			warnings = []string{}
@@ -314,7 +314,10 @@ func handleWikiParse(root string, adpt adapter.Adapter) server.ToolHandlerFunc {
 	}
 }
 
-func validateFrontmatter(content string) []string {
+// validateFrontmatter checks content for required frontmatter fields and returns
+// a list of warning strings. path is the wiki-relative path being written;
+// it is used to apply sources/-specific rules.
+func validateFrontmatter(path, content string) []string {
 	if !strings.HasPrefix(strings.TrimSpace(content), "---") {
 		return []string{"missing YAML frontmatter"}
 	}
@@ -332,9 +335,20 @@ func validateFrontmatter(content string) []string {
 	}
 
 	typ, _ := fm["type"].(string)
+
+	// sources/ pages must have type: source so downstream tools can distinguish
+	// auto-ingest output from agent-authored pages.
+	if strings.HasPrefix(path, "sources/") && typ != "source" {
+		warnings = append(warnings, "sources/ page should have type: source (got "+typ+")")
+	}
+
 	if typ == "source" {
-		if _, ok := fm["source_path"]; !ok {
+		sp, _ := fm["source_path"].(string)
+		if sp == "" {
 			warnings = append(warnings, "source page missing field: source_path")
+		} else if strings.HasPrefix(sp, "claude-chat-attachment/") {
+			// Ephemeral chat-attachment paths cannot be re-read or verified.
+			warnings = append(warnings, "source_path refers to a chat attachment that cannot be re-read: "+sp)
 		}
 		if _, ok := fm["ingested_at"]; !ok {
 			warnings = append(warnings, "source page missing field: ingested_at")
