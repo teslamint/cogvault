@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/golang-jwt/jwt/v5"
 	"io"
 	"log/slog"
 	"net/http"
@@ -405,6 +406,58 @@ func TestNoCredentialLogging(t *testing.T) {
 	}
 	if strings.Contains(logged, "Bearer "+correctToken) || strings.Contains(logged, "Bearer wrongtoken") {
 		t.Fatalf("log output contains a raw Authorization header value: %q", logged)
+	}
+}
+
+// TestOAuthRejectionLogsCause pins that an oauth-mode invalid_credential
+// rejection logs which validation check failed, so an operator can tell an
+// expired token from an audience, issuer, signature, or key-lookup failure.
+func TestOAuthRejectionLogsCause(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		wantCause string
+	}{
+		{"expired", fmt.Errorf("%w: %w", jwt.ErrTokenInvalidClaims, jwt.ErrTokenExpired), "token_expired"},
+		{"not yet valid", fmt.Errorf("%w: %w", jwt.ErrTokenInvalidClaims, jwt.ErrTokenNotValidYet), "token_not_yet_valid"},
+		{"audience", fmt.Errorf("%w: %w", jwt.ErrTokenInvalidClaims, jwt.ErrTokenInvalidAudience), "invalid_audience"},
+		{"issuer", fmt.Errorf("%w: %w", jwt.ErrTokenInvalidClaims, jwt.ErrTokenInvalidIssuer), "invalid_issuer"},
+		{"signature", fmt.Errorf("%w: %w", jwt.ErrTokenSignatureInvalid, errors.New("crypto")), "invalid_signature"},
+		{"key lookup", fmt.Errorf("%w: %w", jwt.ErrTokenUnverifiable, errors.New("no signing key found for kid \"k\"")), "key_unavailable"},
+		{"malformed", fmt.Errorf("%w: bad segment", jwt.ErrTokenMalformed), "malformed_token"},
+		{"other", errors.New("something else"), "other"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			prevLogger := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+			t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+			cfg := Config{
+				Mode:             "oauth",
+				Validator:        stubValidator{err: tt.err},
+				PublicURL:        "https://mcp.example.com",
+				MaxBodyBytes:     1024,
+				MaxStreamSeconds: 30,
+			}
+			var ran bool
+			h := Middleware(cfg)(sentinelHandler(&ran))
+			req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader("{}"))
+			req.Header.Set("Authorization", "Bearer sometoken")
+			h.ServeHTTP(httptest.NewRecorder(), req)
+
+			logged := buf.String()
+			if !strings.Contains(logged, "reason=invalid_credential") {
+				t.Fatalf("log = %q, want reason=invalid_credential", logged)
+			}
+			if !strings.Contains(logged, "cause="+tt.wantCause+" ") && !strings.HasSuffix(strings.TrimSpace(logged), "cause="+tt.wantCause) {
+				t.Fatalf("log = %q, want cause=%s", logged, tt.wantCause)
+			}
+			if strings.Contains(logged, "sometoken") || strings.Contains(logged, "kid") {
+				t.Fatalf("log leaks token or validator detail: %q", logged)
+			}
+		})
 	}
 }
 
