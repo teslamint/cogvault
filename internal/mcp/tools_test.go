@@ -47,6 +47,7 @@ type mockStorage struct {
 	writeFn  func(path string, data []byte) error
 	listFn   func(prefix string) ([]storage.ListEntry, error)
 	existsFn func(path string) (bool, error)
+	isFileFn func(path string) (bool, error)
 	statFn   func(path string) (int64, time.Time, error)
 }
 
@@ -57,6 +58,16 @@ func (m *mockStorage) Move(src, dst string) error                      { return 
 func (m *mockStorage) List(prefix string) ([]storage.ListEntry, error) { return m.listFn(prefix) }
 func (m *mockStorage) Exists(path string) (bool, error)                { return m.existsFn(path) }
 func (m *mockStorage) SameFile(a, b string) (bool, error)              { return a == b, nil }
+func (m *mockStorage) IsFile(path string) (bool, error) {
+	if m.isFileFn != nil {
+		return m.isFileFn(path)
+	}
+	if m.existsFn != nil {
+		return m.existsFn(path)
+	}
+	return false, nil
+}
+
 func (m *mockStorage) Stat(path string) (int64, time.Time, error) {
 	if m.statFn == nil {
 		return 0, time.Time{}, nil

@@ -1683,6 +1683,9 @@ func (c *countingStorage) Exists(path string) (bool, error) {
 func (c *countingStorage) SameFile(a, b string) (bool, error) {
 	return c.inner.SameFile(a, b)
 }
+func (c *countingStorage) IsFile(path string) (bool, error) {
+	return c.inner.IsFile(path)
+}
 func (c *countingStorage) Move(src, dst string) error {
 	return c.inner.Move(src, dst)
 }
@@ -1718,6 +1721,9 @@ func (f *failingStorage) Exists(path string) (bool, error) {
 }
 func (f *failingStorage) SameFile(a, b string) (bool, error) {
 	return f.inner.SameFile(a, b)
+}
+func (f *failingStorage) IsFile(path string) (bool, error) {
+	return f.inner.IsFile(path)
 }
 func (f *failingStorage) Delete(path string) error {
 	return f.inner.Delete(path)

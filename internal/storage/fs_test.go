@@ -55,6 +55,37 @@ func TestReadWriteAndExists(t *testing.T) {
 	}
 }
 
+func TestIsFile(t *testing.T) {
+	root := t.TempDir()
+	store := newTestStorage(t, root, &config.Config{
+		ExcludeRead: []string{"private"},
+	})
+	mustWriteFile(t, filepath.Join(root, "sources", "paper.md"), "paper")
+	mustMkdirAll(t, filepath.Join(root, "sources", "x.md"))
+	mustWriteFile(t, filepath.Join(root, "private", "secret.md"), "secret")
+
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{path: "sources/paper.md", want: true},
+		{path: "sources/x.md", want: false},
+		{path: "sources/missing.md", want: false},
+		{path: "private/secret.md", want: false},
+	} {
+		got, err := store.IsFile(tc.path)
+		if err != nil {
+			t.Errorf("IsFile(%q) error = %v", tc.path, err)
+		} else if got != tc.want {
+			t.Errorf("IsFile(%q) = %t, want %t", tc.path, got, tc.want)
+		}
+	}
+
+	if _, err := store.IsFile("../x.md"); !errors.Is(err, cverr.ErrTraversal) {
+		t.Fatalf("IsFile traversal error = %v, want ErrTraversal", err)
+	}
+}
+
 func TestWriteOverwrite(t *testing.T) {
 	root := t.TempDir()
 	store := newTestStorage(t, root, &config.Config{})
