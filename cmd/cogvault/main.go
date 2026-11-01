@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/teslamint/cogvault/internal/version"
 )
 
 func newRootCmd() *cobra.Command {
@@ -13,6 +14,7 @@ func newRootCmd() *cobra.Command {
 		Short:         "personal knowledge pipeline: ingest sources, serve a searchable wiki over MCP",
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		Version:       version.String(),
 	}
 	cmd.PersistentFlags().String("config", "", "path to config file (default ~/.config/cogvault/config.yaml)")
 	cmd.AddCommand(newInitCmd())

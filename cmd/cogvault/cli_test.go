@@ -1294,3 +1294,13 @@ func TestLaunchdPATHKeepsStandardHomebrewAndClaudeDirs(t *testing.T) {
 		}
 	}
 }
+
+func TestVersionFlag(t *testing.T) {
+	stdout, _, err := executeCommand("--version")
+	if err != nil {
+		t.Fatalf("--version: %v", err)
+	}
+	if !strings.HasPrefix(stdout, "cogvault version ") {
+		t.Fatalf("--version output = %q, want prefix %q", stdout, "cogvault version ")
+	}
+}

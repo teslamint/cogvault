@@ -11,16 +11,16 @@ import (
 	"github.com/teslamint/cogvault/internal/index"
 	"github.com/teslamint/cogvault/internal/schema"
 	"github.com/teslamint/cogvault/internal/storage"
+	"github.com/teslamint/cogvault/internal/version"
 )
 
 const (
-	serverName    = "cogvault"
-	serverVersion = "0.1.0"
-	maxSchemaLen  = 2000
+	serverName   = "cogvault"
+	maxSchemaLen = 2000
 )
 
 func NewServer(root string, cfg *config.Config, store storage.Storage, idx index.Index, adpt adapter.Adapter) *server.MCPServer {
-	s := server.NewMCPServer(serverName, serverVersion,
+	s := server.NewMCPServer(serverName, version.String(),
 		server.WithInstructions(schemaInstructions(cfg, store)),
 		server.WithToolHandlerMiddleware(callLogMiddleware),
 	)
