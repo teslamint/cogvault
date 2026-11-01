@@ -520,12 +520,14 @@ Source {
 `ingested_at`; a `sources/` page whose `type` is not `source`; a `source_path`
 under `claude-chat-attachment/`) and one `unresolved wikilink: [[t]]` per
 distinct non-embed link target that resolves to no page (§9.12 resolution; the
-written page itself counts). Warnings never block the write. Side effect:
-best-effort index reflection. When `git.auto_commit` is `write` or
-`write+ingest` (§3.1, default `off`), also auto-commits the write
-(`git add` + `git commit -m "wiki: write <path>"`) when `wiki_dir` is a git
-repository; a failed `git add`/`git commit` is logged, not returned as a
-tool error, and is bounded as described in §8.8.1 (0024).
+written page itself counts). Evidence diagnostics are appended after these
+existing warnings as `[EVIDnnn] claim-id: message; fix: hint` (omitting
+`claim-id: ` when empty). These warnings never block the write; status remains
+`written` (§11.1). Side effect: best-effort index reflection. When
+`git.auto_commit` is `write` or `write+ingest` (§3.1, default `off`), also
+auto-commits the write (`git add` + `git commit -m "wiki: write <path>"`) when
+`wiki_dir` is a git repository; a failed `git add`/`git commit` is logged, not
+returned as a tool error, and is bounded as described in §8.8.1 (0024).
 
 Paths git reads as configuration are rejected with `ErrPermission`,
 independently of `exclude`/`exclude_read`: any path containing a `.git`,
@@ -552,7 +554,7 @@ Non-recursive; title/type/category from the `GetMeta` cache. Errors: `ErrNotFoun
 ### 8.5 wiki_search
 
 `query: string` (required), `limit: int` (optional, default 10) →
-`[{path, title, type, category, snippet, score, usage_terms}]`. Empty result is `[]`, not an error.
+`[{path, title, type, category, snippet, score, usage_terms, research_evidence}]`. Empty result is `[]`, not an error.
 
 - **No `scope` parameter** (removed in v2). The input schema does not advertise
   `scope`. `internal/mcp/server.go`'s `noExtra` wrapper sets
@@ -576,6 +578,20 @@ Non-recursive; title/type/category from the `GetMeta` cache. Errors: `ErrNotFoun
   a shareability verdict, and missing Where/Level remain unknown on older records.
   Long evidence quotes and reviewer details remain available via `wiki_parse`.
   Summary `scope` describes applicability; it does not restore the removed query parameter.
+- `research_evidence` is a per-result summary with `status` `absent`,
+  `recorded`, or `unavailable`; `claim_count`; `claims` (up to 3 in document
+  order, each with `id`, `kind`, `checks` and `gaps` kind lists capped at 4
+  each, and `limitation` capped at 200 runes); and `truncated`. It does not
+  resolve source refs. More than 3 claims, more than 4 check/gap kinds in a
+  claim, or a limitation longer than 200 runes sets `truncated`.
+- No field yields `absent`. A page read failure yields `unavailable` with
+  reason `page could not be read`; frontmatter YAML failure yields
+  `frontmatter could not be parsed`; EVID001 yields `unsupported
+  research_evidence version`; any EVID002 or EVID003 yields
+  `research_evidence structure is invalid`. Otherwise the status is `recorded`,
+  including records with EVID004, EVID005, or EVID007 warnings.
+- The `research_evidence` record is self-reported structured evidence, not
+  fact-checking or legal judgment.
 
 ### 8.6 wiki_scan
 
@@ -936,10 +952,10 @@ cogvault index [--config <path>]
 ### 9.12 lint
 
 ```
-cogvault lint [--config <path>] [--strict]
+cogvault lint [--config <path>] [--strict] [--json]
 ```
 
-Reports, one line per issue as `<kind> <path> <message>`:
+Reports, one line per issue as `<kind> <path> <message>` in text mode:
 
 - `parse` — the page could not be parsed.
 - `frontmatter` — missing `title`, missing `type`, or, for `type: source`
@@ -956,12 +972,49 @@ Reports, one line per issue as `<kind> <path> <message>`:
 - `orphan` — no incoming links. `_schema.md`, `_index.md`, and every
   `type: source` page are exempt, since source pages are expected to be reached
   through search rather than links.
+- `evidence` — one diagnostic for a present `research_evidence` field per
+  validator finding. Pages without the field are never reported. Text messages
+  keep the `<kind> <path> <message>` format and omit diagnostic IDs.
+
+| ID | Severity | Trigger |
+| --- | --- | --- |
+| EVID001 | error | Field is present but is not a mapping with `version` exactly integer `1`; sole diagnostic for the page. |
+| EVID002 | error | Missing/non-array `claims`; non-mapping claim; missing/empty/non-string claim `id` or `text`; missing/empty/non-string claim `kind`; duplicate claim `id` on second and later occurrences. |
+| EVID003 | error | Present `checks` or `gaps` not arrays; non-mapping item; missing/empty/non-string/out-of-set check or gap kind; claim kind outside its closed set. |
+| EVID004 | warning | Sources absent, empty, non-array; non-mapping source; invalid/missing ref; unsafe or malformed ref; referenced path is not an existing regular file (a directory is not found). |
+| EVID005 | warning | Check result missing/empty, or required locator missing/empty for `fulltext`, `table`, or `replication`. |
+| EVID006 | reserved | Never emitted. |
+| EVID007 | warning | Gap detail or next_step missing/empty. |
+
+Enums are closed: claim `kind` is `empirical`, `causal`, or `normative`;
+check `kind` is `bibliography`, `fulltext`, `table`, or `replication`; gap
+`kind` is `source_unavailable`, `verification_pending`, `replication_pending`,
+`applicability_unknown`, or `additional_evidence_needed`. Required string
+values must be YAML strings whose trimmed value is non-empty. Unknown keys
+inside the record are ignored. `version` must be YAML integer `1` (not `"1"`
+or `1.0`).
+
+References must be exact wiki-root-relative `.md` paths. Reject leading/trailing
+whitespace, absolute/drive/backslash forms, `\\`, `://`, wikilink delimiters,
+`#`, non-`.md` suffixes, non-canonical `path.Clean` forms, and any `..`
+segment. Existence is checked at the supplied exact path, without basename
+resolution or adding `sources/`; filesystem lookup determines case and
+normalization behavior. A nil existence checker skips only the existence
+check. Invalid check/gap items and non-mapping items do not get downstream
+EVID005/EVID007 findings; a non-mapping claim has no further findings, and a
+non-mapping source gets one EVID004. A claim with missing ID is still checked
+with empty claim ID.
+
+`--json` writes exactly one JSON object `{"issues":[...]}` to stdout (empty
+issues are `[]`, never null), with no summary line. Each issue has `kind`,
+`path`, `message`, `id`, `claim_id`, `severity`, and `fix_hint`; non-evidence
+issues use empty strings for the last four fields. Evidence issue `message`
+contains the diagnostic message only; fix hint is a separate field. All issues
+are stably ordered by Path, Kind, ClaimID, ID, then Message. `--strict` changes
+only the exit code in either mode.
 
 - Prints `lint: no issues found` when clean, otherwise the issue lines and
-  `N issue(s) found`.
-- `--strict` makes findings fail the command. It changes **only** the exit
-  code: stdout is byte-identical with and without it, so a script can add the
-  flag without re-parsing anything.
+  `N issue(s) found` in text mode.
 - **Exit codes**: without `--strict`, always 0 — `lint` reports, it does not
   gate, and that default does not change because the command shipped exiting 0
   and a caller may depend on it. With `--strict`: nonzero when any issue was
@@ -1260,7 +1313,31 @@ The default schema (embedded via `go:embed`) defines source-page frontmatter
 provenance rules (`[TODO: source needed]`, `[UNCERTAIN]`). Optional frontmatter:
 `category` (`article` | `legal` | `reference`), classified by the LLM during
 digestion via the `buildPrompt` instruction (not schema-dependent). The ingest
-digestion prompt embeds these rules so generated pages conform.
+digestion prompt embeds these rules so generated pages conform. MCP initialize
+instructions append server-owned evidence guidance after the schema text; the
+2,000-rune cap applies only to the schema portion, not the appended guidance.
+
+### 11.1 Optional research evidence
+
+Any page may include an optional `research_evidence` frontmatter mapping. Version
+1 has required integer `version: 1` and a required `claims` array. Each claim
+requires non-empty string `id`, `text`, and `kind`, and a non-empty `sources`
+array. Claim kinds are the closed set `empirical`, `causal`, `normative`.
+Sources are objects requiring `ref`; `locator` is optional. A ref is an exact
+wiki-root-relative `.md` path; case and normalization follow filesystem lookup.
+Optional claim fields are `checks` (array of objects with required kind and
+result, optional locator), `gaps` (array of objects with required kind, detail,
+next_step), and string `limitation`. Check kinds are `bibliography`,
+`fulltext`, `table`, `replication`; gap kinds are `source_unavailable`,
+`verification_pending`, `replication_pending`, `applicability_unknown`,
+`additional_evidence_needed`. `locator` is required and non-empty for
+`fulltext`, `table`, and `replication` checks. Unknown keys anywhere within
+the record are ignored.
+
+This record is self-reported structured evidence, not a fact-check or legal
+judgment. `wiki_write` reports findings as non-blocking warnings (§8.3), lint
+reports diagnostics (§9.12), and search returns a bounded summary (§8.5).
+Search does not resolve refs.
 
 ---
 
@@ -1341,6 +1418,20 @@ sends `reasoning_effort: "none"` and `max_tokens: 4096`; a response with
 ### MCP
 - Round-trip; sentinel mapping; write-then-search; list title/type = GetMeta;
   parse include_content; `wiki_search` schema has no `scope`.
+
+### Research evidence
+- Optional `research_evidence` frontmatter validates version integer `1`, required
+  fields, closed enums, exact-path refs, ignored unknown keys, and EVID001–EVID007
+  diagnostics including skip rules. Check write warning ordering/format and that
+  evidence findings never block writes.
+- Search summaries cover absent/recorded/unavailable states and reasons, caps
+  (3 claims, 4 check/gap kinds each, 200-rune limitation), `claim_count`,
+  `truncated`, read failures, and no ref resolution.
+- Lint reports only present fields, checks diagnostic severities, deterministic
+  ordering across all issue kinds, text messages without IDs, exact JSON shape
+  and empty-array encoding; `--strict` changes only exit status.
+- MCP initialize appends server-owned evidence guidance after schema text, with
+  the schema rune cap independent of that appended guidance.
 
 ### CLI
 - `init` two-step (first run scaffolds + guidance; second run builds wiki/schema/

@@ -1113,6 +1113,149 @@ func TestLintStrictSucceedsOnCleanWiki(t *testing.T) {
 	}
 }
 
+func TestLintResearchEvidenceDiagnosticsAndJSON(t *testing.T) {
+	configPath, wikiDir, _ := testVault(t)
+	if _, _, err := executeCommand("init", "--config", configPath); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	content := "---\ntitle: Evidence\ntype: note\nresearch_evidence:\n  version: 1\n  claims:\n    - id: claim-1\n      text: A claim\n      kind: empirical\n      sources:\n        - ref: sources/missing.md\n      checks:\n        - kind: bibliography\n---\n"
+	if err := os.WriteFile(filepath.Join(wikiDir, "evidence.md"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	textOut, _, err := executeCommand("lint", "--config", configPath)
+	if err != nil {
+		t.Fatalf("lint: %v", err)
+	}
+	if !strings.Contains(textOut, "evidence") || !strings.Contains(textOut, "claim-1:") || strings.Contains(textOut, "EVID") {
+		t.Fatalf("unexpected text evidence report: %q", textOut)
+	}
+	if evidenceLines := strings.Count(textOut, "evidence       "); evidenceLines != 2 {
+		t.Fatalf("expected two text evidence diagnostics corresponding to EVID004/EVID005; got %d in %q", evidenceLines, textOut)
+	}
+
+	jsonOut, _, err := executeCommand("lint", "--config", configPath, "--json")
+	if err != nil {
+		t.Fatalf("lint --json: %v", err)
+	}
+	var report struct {
+		Issues []struct {
+			Kind     string `json:"kind"`
+			Path     string `json:"path"`
+			Message  string `json:"message"`
+			ID       string `json:"id"`
+			ClaimID  string `json:"claim_id"`
+			Severity string `json:"severity"`
+			FixHint  string `json:"fix_hint"`
+		} `json:"issues"`
+	}
+	if err := json.Unmarshal([]byte(jsonOut), &report); err != nil {
+		t.Fatalf("parse JSON report: %v (%q)", err, jsonOut)
+	}
+	ids := map[string]bool{}
+	for _, issue := range report.Issues {
+		if issue.Kind == "evidence" {
+			ids[issue.ID] = true
+			if issue.Severity != "warning" || issue.ClaimID != "claim-1" {
+				t.Errorf("unexpected evidence issue: %+v", issue)
+			}
+		}
+	}
+	if !ids["EVID004"] || !ids["EVID005"] {
+		t.Fatalf("expected EVID004 and EVID005, got %+v", ids)
+	}
+	if !strings.Contains(textOut, "claim-1:") || strings.Contains(textOut, "EVID") {
+		t.Fatalf("text output must identify claim-1 without exposing diagnostic IDs: %q", textOut)
+	}
+}
+
+func TestLintResearchEvidenceAbsentAndEmptyJSON(t *testing.T) {
+	configPath, wikiDir, _ := testVault(t)
+	if _, _, err := executeCommand("init", "--config", configPath); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	writeLintPage(t, wikiDir, "a.md", "A", "see [[b]]")
+	writeLintPage(t, wikiDir, "b.md", "B", "see [[a]]")
+
+	for _, args := range [][]string{
+		{"lint", "--config", configPath, "--strict"},
+		{"lint", "--config", configPath, "--json", "--strict"},
+	} {
+		stdout, _, err := executeCommand(args...)
+		if err != nil {
+			t.Fatalf("%v: %v (output: %q)", args, err, stdout)
+		}
+		if strings.Contains(stdout, `"kind":"evidence"`) {
+			t.Fatalf("%v produced evidence diagnostics without the field: %q", args, stdout)
+		}
+		if args[3] == "--json" && stdout != "{\"issues\":[]}\n" {
+			t.Fatalf("JSON empty report = %q", stdout)
+		}
+	}
+}
+
+func TestLintJSONStrictOnlyChangesExitCodeAndSorts(t *testing.T) {
+	configPath, wikiDir, _ := testVault(t)
+	if _, _, err := executeCommand("init", "--config", configPath); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	for _, name := range []string{"z.md", "b.md", "a.md"} {
+		content := fmt.Sprintf("---\ntitle: %s\ntype: note\nresearch_evidence:\n  version: 1\n  claims:\n    - id: claim-1\n      text: A claim\n      kind: empirical\n      sources:\n        - ref: sources/missing.md\n      checks:\n        - kind: bibliography\n---\n\nsee [[missing]]\n", name)
+		if err := os.WriteFile(filepath.Join(wikiDir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, jsonMode := range []bool{false, true} {
+		args := []string{"lint", "--config", configPath}
+		if jsonMode {
+			args = append(args, "--json")
+		}
+		plain, _, plainErr := executeCommand(args...)
+		if plainErr != nil {
+			t.Fatalf("%v: %v", args, plainErr)
+		}
+		strictArgs := append(append([]string(nil), args...), "--strict")
+		strict, _, strictErr := executeCommand(strictArgs...)
+		if strictErr == nil {
+			t.Fatalf("%v must return an error when issues exist", strictArgs)
+		}
+		if strict != plain {
+			t.Fatalf("--strict changed stdout for %v\nplain:  %q\nstrict: %q", args, plain, strict)
+		}
+		again, _, err := executeCommand(args...)
+		if err != nil || again != plain {
+			t.Fatalf("repeated output differs for %v: err=%v\nfirst:  %q\nagain:  %q", args, err, plain, again)
+		}
+		if jsonMode {
+			var report struct {
+				Issues []map[string]json.RawMessage `json:"issues"`
+			}
+			if err := json.Unmarshal([]byte(plain), &report); err != nil {
+				t.Fatalf("parse sorted report: %v", err)
+			}
+			lastPath := ""
+			sawNonEvidence := false
+			for _, issue := range report.Issues {
+				var path, kind, id string
+				_ = json.Unmarshal(issue["path"], &path)
+				_ = json.Unmarshal(issue["kind"], &kind)
+				_ = json.Unmarshal(issue["id"], &id)
+				if path < lastPath {
+					t.Fatalf("issues are not path-sorted: %q before %q", lastPath, path)
+				}
+				lastPath = path
+				if kind != "evidence" && id == "" {
+					sawNonEvidence = true
+				}
+			}
+			if !sawNonEvidence {
+				t.Fatal("expected a non-evidence JSON issue with an empty id")
+			}
+		}
+	}
+}
+
 // TestLintResolvesDecomposedHangulFileNames pins the NFC fix: iCloud and
 // macOS can store Hangul file names decomposed (NFD) while pages link with the
 // composed (NFC) form. Both name the same page, so lint must not call it broken.

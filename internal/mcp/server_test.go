@@ -1,10 +1,12 @@
 package mcp_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	gomcp "github.com/mark3labs/mcp-go/mcp"
@@ -43,6 +45,96 @@ func setupIntegration(t *testing.T) (string, *server.MCPServer) {
 
 	s := mcp.NewServer(root, cfg, store, idx, adpt)
 	return root, s
+}
+
+func TestInitializeInstructionsIncludeEvidenceGuidance(t *testing.T) {
+	evidenceText := "Record performed checks"
+	for _, tc := range []struct {
+		name         string
+		schema       []byte
+		wantSchema   string
+		wantFullLink bool
+	}{
+		{name: "default schema"},
+		{
+			name:         "long schema",
+			schema:       []byte(strings.Repeat("x", 2001)),
+			wantSchema:   strings.Repeat("x", 2000),
+			wantFullLink: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			cfg := &config.Config{
+				WikiDir:             "_wiki",
+				DBPath:              ".cogvault.db",
+				Exclude:             []string{".obsidian", ".trash"},
+				ExcludeRead:         []string{},
+				Adapter:             "obsidian",
+				ConsistencyInterval: 0,
+			}
+			if err := os.MkdirAll(filepath.Join(root, "_wiki"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			store := storage.NewFSStorage(root, cfg)
+			if tc.schema != nil {
+				if err := os.WriteFile(filepath.Join(root, cfg.SchemaPath()), tc.schema, 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			idx, err := index.NewSQLiteIndex(root, filepath.Join(root, cfg.DBPath), cfg)
+			if err != nil {
+				t.Fatalf("NewSQLiteIndex: %v", err)
+			}
+			t.Cleanup(func() { idx.Close() })
+
+			s := mcp.NewServer(root, cfg, store, idx, obsidian.New())
+			initMsg, err := json.Marshal(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      0,
+				"method":  "initialize",
+				"params": map[string]any{
+					"protocolVersion": "2024-11-05",
+					"capabilities":    map[string]any{},
+					"clientInfo":      map[string]any{"name": "test", "version": "0.0.1"},
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp := s.HandleMessage(context.Background(), initMsg)
+			respJSON, err := json.Marshal(resp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var rpcResp struct {
+				Result struct {
+					Instructions string `json:"instructions"`
+				} `json:"result"`
+			}
+			if err := json.Unmarshal(respJSON, &rpcResp); err != nil {
+				t.Fatalf("unmarshal initialize response: %v\nraw: %s", err, respJSON)
+			}
+			if !strings.Contains(rpcResp.Result.Instructions, evidenceText) {
+				t.Errorf("initialize instructions omit evidence guidance")
+			}
+			if tc.wantFullLink {
+				if !strings.Contains(rpcResp.Result.Instructions, tc.wantSchema) {
+					t.Errorf("initialize instructions omit truncated schema")
+				}
+				if !strings.Contains(rpcResp.Result.Instructions, `[Full schema: wiki_read("_schema.md")]`) {
+					t.Errorf("initialize instructions omit full schema link")
+				}
+				got, err := os.ReadFile(filepath.Join(root, cfg.SchemaPath()))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(got, tc.schema) {
+					t.Errorf("NewServer changed _schema.md bytes")
+				}
+			}
+		})
+	}
 }
 
 func callTool(t *testing.T, s *server.MCPServer, toolName string, args map[string]any) *gomcp.CallToolResult {

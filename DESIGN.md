@@ -28,6 +28,8 @@ cmd/cogvault/main.go
 all packages ──▶ errors/, config/
 mcp/, cmd/     ──▶ gitutil/
 storage/, ingest/, cmd/ ──▶ terms/
+mcp/, cmd/cogvault/ ──▶ internal/evidence/
+internal/evidence/ ──▶ terms/
 ```
 
 Unidirectional, no cycles. Two new packages in v2: `internal/llm` and
@@ -49,6 +51,11 @@ concurrency and signal fix applied twice.
 capture/inspection. It owns metadata decoding, text-preserving encoding,
 automatic review-state reset, and structural evidence-loss checks. It does not
 open storage, access a DB, call an LLM, or decide legal permission.
+
+`internal/evidence` handles research-evidence frontmatter validation and search
+summarization. It reuses `terms.Parse` and depends on no storage implementation;
+validation accepts a `FileChecker` interface (`IsFile(path) (bool, error)`),
+implemented by `storage.Storage`.
 
 ---
 
@@ -414,6 +421,11 @@ no matching pathspec, so that delete produces no commit either.
 `handleWikiWrite` calls the same `gitAutoCommit` after a successful write
 only when `cfg.Git.CommitsOnWrite()` (default false) — this is the only
 conditional caller; `wiki_delete`'s call is unconditional and predates 0024.
+`handleWikiWrite` appends `evidence.Validate` warnings after frontmatter and
+wikilink warnings. `handleWikiSearch` adds a bounded `evidence.Summary` to each
+result, using `UnavailableSummary` when the page read fails. Both use the shared
+`internal/evidence` contract; search does not resolve refs. `server.go` appends
+server-owned evidence guidance after the schema instructions.
 Instructions/`mapError`/write-then-index otherwise unchanged.
 
 ### 2.10 cmd/cogvault
@@ -442,6 +454,11 @@ frontmatter is parsed with the existing frontmatter library and YAML v3 decoder.
 The inspector checks record completeness and date syntax only (SPEC §9.15).
 It neither opens SQLite nor calls an LLM, fetches evidence, or writes pages.
 Existing MCP read/parse operations expose the same page metadata without a new tool.
+
+`lint.go` reads each scanned page through storage and converts
+`evidence.Validate` diagnostics into evidence issues. It sorts all issues by
+Path, Kind, ClaimID, ID, and Message; text output omits diagnostic IDs, while
+`--json` emits the complete issue shape. `--strict` changes only the exit code.
 
 CLI `search` and MCP `wiki_search` enrich each index result by reading its page
 through storage. `terms.Summarize` projects applicability, Where, Level,
@@ -596,6 +613,7 @@ No rejection path in this package logs a credential, a bearer token, or a raw
 JWT — `logRejection` records only a reason class and remote address.
 
 
+
 ### 2.12 gitutil (new, 0024)
 
 ```go
@@ -666,6 +684,15 @@ assertion is arithmetic on derived deadlines rather than elapsed measurement.
 Those seams exist because the property is otherwise observable only as
 elapsed wall-clock time, and the timing-based tests that measured it flaked
 under load until they were replaced (0024, fourth correction pass).
+
+### 2.13 evidence (new)
+
+`internal/evidence` parses, validates, and summarizes the optional versioned
+`research_evidence` frontmatter record, reusing `terms.Parse`. `Validate`
+accepts a wiki-relative page path, content bytes, and a `FileChecker` interface
+(satisfied by `storage.Storage`) and returns diagnostics. `Summarize` returns a
+bounded projection without resolving refs or touching storage. The package
+performs no writes, network access, or LLM calls.
 
 ---
 
@@ -751,6 +778,7 @@ resolveConfigPath → Load → bootstrap(store/index/adapter) → CheckConsisten
 | `httpauth/metadata.go` | Protected Resource Metadata handler |
 | `httpauth/oauth.go` | OAuthValidator (JWT validation via golang-jwt/jwt/v5) |
 | `httpauth/jwks.go` | JWKSCache (OIDC discovery + JWKS fetch, key decode) |
+| `internal/evidence/evidence.go` | research-evidence parsing, validation diagnostics, warnings, and bounded summaries; reuses `terms.Parse`, storage accessed only through `FileChecker.IsFile` |
 | `cmd/cogvault/*` | cobra CLI: `--config`, init/search/serve/ingest/status/access-check; `ingest` brackets each run with timestamped stderr lines via one deferred emitter (`recover` → `result=panic`); clock seam `ingestNow`. `--run-log-dir` adds a per-run file (`ingest_run_log.go`) fed by `ingest.RunOptions.OnEvent`, which `internal/ingest` calls synchronously at each state-change result; seam `ingestPID` |
 | `Makefile` | build/install with `CODESIGN_IDENTITY` (default `-`, ad-hoc) and `CODESIGN_IDENTIFIER` (default `dev.tmint.cogvault`) applied to the build artifact and install destination; test, clean |
 | `scripts/install-signed.sh` | select one Developer ID identity, install, verify the installed identifier, and restart the loaded ingest job |
