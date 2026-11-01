@@ -1,0 +1,8 @@
+.git
+.github
+cogvault
+.cogvault.build
+docs
+testdata
+*.md
+!go.mod
