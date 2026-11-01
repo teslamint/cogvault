@@ -1,0 +1,14 @@
+# Container-side config. Paths are container paths (see compose.yaml volumes).
+wiki_dir: /data/wiki
+db_path: /data/state/cogvault.db
+sources: []
+exclude:
+    - .obsidian
+    - .trash
+adapter: obsidian
+consistency_interval: 5
+max_file_size_mb: 64
+auth:
+    mode: oauth
+    oauth:
+        issuer: https://teslamint.jp.auth0.com/

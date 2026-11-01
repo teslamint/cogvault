@@ -1,0 +1,7 @@
+# Copy to cloudflared/config.yaml next to the tunnel credentials JSON.
+tunnel: <TUNNEL_ID>
+credentials-file: /etc/cloudflared/<TUNNEL_ID>.json
+ingress:
+  - hostname: cogvault.guu.moe
+    service: http://cogvault:8484
+  - service: http_status:404

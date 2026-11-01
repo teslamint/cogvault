@@ -1,0 +1,41 @@
+# cogvault MCP server on the NAS. Ingest is NOT part of this stack: it stays
+# on the Mac, next to the local LLM, and writes into ./wiki over SMB.
+# Layout under this directory on the NAS:
+#   compose.yaml  config.yaml  .env
+#   wiki/   (source of truth)   state/   (index DB)   cloudflared/   (tunnel credentials)
+services:
+  cogvault:
+    image: ghcr.io/teslamint/cogvault:${COGVAULT_VERSION:?set COGVAULT_VERSION in .env, e.g. 0.2.0}
+    # Same uid/gid as the NAS account that owns ./wiki, so the Mac's SMB
+    # writes and the container's wiki_write land with one owner.
+    user: "${NAS_UID:?set NAS_UID in .env}:${NAS_GID:?set NAS_GID in .env}"
+    command:
+      - serve
+      - --config=/config/config.yaml
+      - --transport=http
+      - --addr=0.0.0.0:8484
+      - --endpoint-path=/mcp
+      - --public-url=${COGVAULT_PUBLIC_URL:?set COGVAULT_PUBLIC_URL in .env}
+    environment:
+      HOME: /tmp
+    volumes:
+      - ./config.yaml:/config/config.yaml:ro
+      - ./wiki:/data/wiki
+      - ./state:/data/state
+    restart: unless-stopped
+    healthcheck:
+      # TCP connect only: /mcp answers 401 without a token, which would fail an HTTP probe.
+      test: ["CMD", "nc", "-z", "127.0.0.1", "8484"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  cloudflared:
+    image: cloudflare/cloudflared:${CLOUDFLARED_VERSION:?set CLOUDFLARED_VERSION in .env}
+    command: ["tunnel", "--no-autoupdate", "--config", "/etc/cloudflared/config.yaml", "run"]
+    volumes:
+      - ./cloudflared:/etc/cloudflared:ro
+    depends_on:
+      - cogvault
+    restart: unless-stopped
