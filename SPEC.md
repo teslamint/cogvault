@@ -1113,7 +1113,8 @@ scan source dir (top level only, Lstat: skip dirs/symlinks)
 ### 10.2 Page identity
 
 One source file path → one wiki page `sources/<slug>.md`. `<slug>` is derived from
-the source base name (extension stripped) by: lowercasing, replacing spaces with
+the source base name (extension stripped) by: Unicode NFC normalization (APFS
+reports Hangul names decomposed), lowercasing, replacing spaces with
 `-`, dropping every character that is not a Unicode letter, Unicode digit, `.`, `_`,
 or `-`, collapsing runs of `-` to one, and trimming leading/trailing `-`. If that
 leaves the slug empty (e.g. a name with no letters or digits), it falls back to

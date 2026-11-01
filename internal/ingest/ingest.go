@@ -699,6 +699,9 @@ func containsType(types []string, ext string) bool {
 func slugFor(absPath, hash string) string {
 	base := filepath.Base(absPath)
 	base = strings.TrimSuffix(base, filepath.Ext(base))
+	// APFS reports Hangul file names decomposed; the slug (and the page name
+	// built from it) must be NFC, and truncateNFDSafe assumes NFC input.
+	base = norm.NFC.String(base)
 	base = strings.ToLower(base)
 	base = strings.ReplaceAll(base, " ", "-")
 
