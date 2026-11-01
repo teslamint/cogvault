@@ -10,3 +10,4 @@
 .omx/
 .agents/
 .pytest_cache/
+.env

@@ -2,6 +2,8 @@
 # on the Mac, next to the local LLM, and writes into ./wiki over SMB.
 # Layout under this directory on the NAS:
 #   compose.yaml  config.yaml  .env
+# COGVAULT_DIR is the absolute directory on the NAS (needed when Portainer
+# deploys the stack, because relative paths then resolve inside Portainer).
 #   wiki/   (source of truth)   state/   (index DB)   cloudflared/   (tunnel credentials)
 services:
   cogvault:
@@ -19,9 +21,9 @@ services:
     environment:
       HOME: /tmp
     volumes:
-      - ./config.yaml:/config/config.yaml:ro
-      - ./wiki:/data/wiki
-      - ./state:/data/state
+      - ${COGVAULT_DIR:-.}/config.yaml:/config/config.yaml:ro
+      - ${COGVAULT_DIR:-.}/wiki:/data/wiki
+      - ${COGVAULT_DIR:-.}/state:/data/state
     restart: unless-stopped
     healthcheck:
       # TCP connect only: /mcp answers 401 without a token, which would fail an HTTP probe.
@@ -33,9 +35,11 @@ services:
 
   cloudflared:
     image: cloudflare/cloudflared:${CLOUDFLARED_VERSION:?set CLOUDFLARED_VERSION in .env}
+    # The credentials file is mode 600 and owned by this account; the image default (65532) cannot read it.
+    user: "${NAS_UID}:${NAS_GID}"
     command: ["tunnel", "--no-autoupdate", "--config", "/etc/cloudflared/config.yaml", "run"]
     volumes:
-      - ./cloudflared:/etc/cloudflared:ro
+      - ${COGVAULT_DIR:-.}/cloudflared:/etc/cloudflared:ro
     depends_on:
       - cogvault
     restart: unless-stopped
