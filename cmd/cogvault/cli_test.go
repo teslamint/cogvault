@@ -1145,14 +1145,43 @@ func TestLintReportsReadFailureEvenWhenParseSucceeds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var parse []lintIssue
-	for _, issue := range issues {
-		if issue.Path == "b.md" && issue.Kind == "parse" {
-			parse = append(parse, issue)
+	// The unreadable page still parses, so its link to a.md must count:
+	// a.md is not an orphan.
+	if len(issues) != 1 || issues[0].Path != "b.md" || issues[0].Kind != "parse" ||
+		!strings.Contains(issues[0].Message, "injected read failure") {
+		t.Fatalf("issues = %#v, want only the b.md parse issue carrying the read error", issues)
+	}
+}
+
+func TestLintReportsUnreadablePageOnce(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores file permissions")
+	}
+	configPath, wikiDir, _ := testVault(t)
+	if _, _, err := executeCommand("init", "--config", configPath); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	writeLintPage(t, wikiDir, "a.md", "A", "see [[b]]")
+	writeLintPage(t, wikiDir, "b.md", "B", "see [[a]]")
+	locked := filepath.Join(wikiDir, "b.md")
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o644) })
+
+	// Both the storage read and the adapter parse fail here; one issue only.
+	stdout, _, err := executeCommand("lint", "--config", configPath, "--strict")
+	if err == nil {
+		t.Fatalf("lint --strict must fail when a page cannot be read (output: %q)", stdout)
+	}
+	parseLines := 0
+	for _, line := range strings.Split(stdout, "\n") {
+		if fields := strings.Fields(line); len(fields) >= 2 && fields[0] == "parse" && fields[1] == "b.md" {
+			parseLines++
 		}
 	}
-	if len(parse) != 1 || !strings.Contains(parse[0].Message, "injected read failure") {
-		t.Fatalf("issues = %#v, want one parse issue for b.md carrying the read error", issues)
+	if parseLines != 1 {
+		t.Fatalf("parse issues for b.md = %d, want 1 (output: %q)", parseLines, stdout)
 	}
 }
 

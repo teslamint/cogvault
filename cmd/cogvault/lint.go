@@ -112,21 +112,25 @@ func collectLintIssues(cfg *config.Config, store storage.Storage, idx *index.SQL
 	resolver := wikilink.NewSet(pages)
 
 	for page := range allPages {
+		// A read failure skips only the evidence check: the page's links must
+		// still count, or the pages it links to are reported as orphans.
 		content, readErr := store.Read(page)
 		if readErr != nil {
 			issues = append(issues, lintIssue{Path: page, Kind: "parse", Message: readErr.Error()})
-			continue
-		}
-		for _, diagnostic := range evidence.Validate(page, content, store) {
-			issues = append(issues, lintIssue{
-				Kind: "evidence", Path: diagnostic.Path, Message: diagnostic.Message,
-				ID: diagnostic.ID, ClaimID: diagnostic.ClaimID, Severity: diagnostic.Severity, FixHint: diagnostic.FixHint,
-			})
+		} else {
+			for _, diagnostic := range evidence.Validate(page, content, store) {
+				issues = append(issues, lintIssue{
+					Kind: "evidence", Path: diagnostic.Path, Message: diagnostic.Message,
+					ID: diagnostic.ID, ClaimID: diagnostic.ClaimID, Severity: diagnostic.Severity, FixHint: diagnostic.FixHint,
+				})
+			}
 		}
 
 		src, parseErr := adpt.Parse(cfg.WikiDir, page, false)
 		if parseErr != nil {
-			issues = append(issues, lintIssue{Path: page, Kind: "parse", Message: parseErr.Error()})
+			if readErr == nil {
+				issues = append(issues, lintIssue{Path: page, Kind: "parse", Message: parseErr.Error()})
+			}
 			continue
 		}
 
