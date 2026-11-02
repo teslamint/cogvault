@@ -19,6 +19,7 @@ import (
 	"github.com/teslamint/cogvault/internal/adapter/markdown"
 	"github.com/teslamint/cogvault/internal/config"
 	"github.com/teslamint/cogvault/internal/evidence"
+	"github.com/teslamint/cogvault/internal/extract"
 	"github.com/teslamint/cogvault/internal/index"
 	"github.com/teslamint/cogvault/internal/llm"
 	"github.com/teslamint/cogvault/internal/storage"
@@ -3058,6 +3059,22 @@ func TestRunTextInputExtractsPDFAndSharesContext(t *testing.T) {
 	}
 	if ex.called != 1 || len(m.requests) != 1 || m.requests[0].SourceText != ex.text {
 		t.Fatalf("extractor=%d requests=%+v", ex.called, m.requests)
+	}
+}
+
+func TestRunTextInputDigestsMarkdownSourceVerbatim(t *testing.T) {
+	m := okLLM()
+	m.inputMode = llm.TextInput
+	h := newHarness(t, []string{"md"}, m)
+	content := "---\ntitle: Note\n---\n\n# Note\n\nComplete markdown body.\n"
+	h.write(t, "note.md", content)
+	h.runner.extractor = extract.NewExtractor(1000, extract.Commands{})
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "test"})
+	if err != nil || rep.Digested != 1 {
+		t.Fatalf("Run: report=%+v err=%v", rep, err)
+	}
+	if len(m.requests) != 1 || m.requests[0].SourceText != content {
+		t.Fatalf("requests=%+v", m.requests)
 	}
 }
 

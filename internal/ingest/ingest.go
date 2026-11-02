@@ -99,7 +99,7 @@ func New(cfg *config.Config, store storage.Storage, idx index.Index, llmAdapter 
 	}
 	r := &Runner{
 		cfg: cfg, store: store, idx: idx, llm: llmAdapter,
-		extractor: extract.NewPDFExtractor(cfg.LLM.MaxInputChars, extract.Commands{}),
+		extractor: extract.NewExtractor(cfg.LLM.MaxInputChars, extract.Commands{}),
 		ledger:    l, dbPath: dbPath, settleWindow: settleWindow,
 		maxFileSize: int64(cfg.MaxFileSizeMB) << 20, now: time.Now,
 		readDir: os.ReadDir, notifyFunc: defaultNotify, withTimeout: context.WithTimeout,

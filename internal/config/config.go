@@ -311,8 +311,10 @@ func (c *Config) validate() error {
 		}
 		for i, source := range c.Sources {
 			for _, typ := range source.Types {
-				if typ != "pdf" {
-					return fmt.Errorf("sources[%d].types: openai supports pdf sources only", i)
+				switch typ {
+				case "pdf", "md", "markdown", "txt":
+				default:
+					return fmt.Errorf("sources[%d].types: openai does not support %q; allowed: pdf, md, markdown, txt", i, typ)
 				}
 			}
 		}

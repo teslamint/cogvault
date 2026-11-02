@@ -305,6 +305,10 @@ builds), enforces a rendered-image byte cap, and OCRs each image with
 and preserves page order.
 `ValidatePrerequisites` exposes the command and language names checked by the
 CLI before the OpenAI adapter or ingest ledger is constructed.
+`Extractor` dispatches by extension: `.pdf` goes to `PDFExtractor`; `.md`,
+`.markdown`, and `.txt` are read whole and returned verbatim after a UTF-8 check
+and the same complete-only `max_input_chars` check (over-limit fails, never
+truncates). Ingest constructs `Extractor`; any other extension is an error.
 
 ### 2.8 ingest (new)
 

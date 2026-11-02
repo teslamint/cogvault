@@ -36,7 +36,8 @@ directories the ingest pipeline reads directly (0021).
 - CLI (§9): `init`, `search`, `serve`, `ingest`, plus `fetch`, `digest`,
   `synthesize`, `embed`, `similar`, `graph`, `index`, `lint`.
 - `internal/llm` adapter interface with `claudecode` and `ollama` path-mode
-  backends, plus a local `openai` text-mode backend for extracted PDFs.
+  backends, plus a local `openai` text-mode backend for extracted PDFs and
+  Markdown/plain-text sources.
 - SQLite FTS5 full-text search (trigram, Korean-friendly).
 - launchd template + setup docs for zero-touch scheduled ingest.
 
@@ -140,7 +141,7 @@ llm:
   backend: string       # default "claudecode". Allowed: "claudecode", "ollama", "openai".
   model: string         # optional generally; required by "openai".
   base_url: string      # ollama/openai API root; openai must be loopback http.
-  max_input_chars: int  # openai PDF text ceiling, 1..1000000; required by openai.
+  max_input_chars: int  # openai source text ceiling, 1..1000000; required by openai.
   timeout_seconds: int  # optional. Per-digest-call bound. Default: 300. Negative rejected.
   embedding_model: string    # optional. Required by `cogvault embed` (§9.8).
   embedding_base_url: string # optional. Default: http://localhost:11434.
@@ -187,7 +188,8 @@ later (0001). Rejected:
 - `db_path` that is a directory-like path.
 - `adapter` outside the allowed list; `llm.backend` outside
   `claudecode`/`ollama`/`openai`. For `openai`: a missing or non-loopback
-  `base_url`, a missing `model`, a non-PDF `sources[].types` entry, or
+  `base_url`, a missing `model`, a `sources[].types` entry other than `pdf`,
+  `md`, `markdown`, or `txt`, or
   `max_input_chars` outside 1..1000000.
 - `max_file_size_mb` negative (zero or omitted defaults to 32).
 - `auth.mode` outside `none`/`bearer`/`oauth`.
@@ -833,8 +835,9 @@ cogvault fetch [--config <path>] [--source-dir <dir>] [--name <file>] <url>
   source directory is rejected with `must be a plain filename`.
 - `GET` with a 30-second timeout. A non-`200` response is an error
   (`fetch <url>: HTTP <code>`); so is an unparsable URL.
-- **The response body is read through a 10 MiB limit and silently truncated
-  past it** — a larger page produces a short file, not an error.
+- **The response body is limited to 10 MiB.** A larger body is rejected with
+  `response body exceeds 10 MiB limit` and no file is written; it is never
+  truncated into a short capture.
 - **Content validation**: a response whose `Content-Type` is not text-ish
   (`text/*`, `application/json|xml`; an absent header is allowed and left to
   the UTF-8 gate) is rejected with `unsupported Content-Type`, and a body
@@ -1373,7 +1376,10 @@ github.com/golang-jwt/jwt/v5    # JWT parsing/validation (oauth mode)
 
 The `claudecode` backend shells out to the `claude` CLI; the `ollama` and
 `openai` backends use HTTP. The `openai` PDF path additionally requires Poppler,
-Tesseract, and `eng`/`kor` language data at runtime. Each `openai` digest request
+Tesseract, and `eng`/`kor` language data at runtime. For `openai`, `.md`,
+`.markdown`, and `.txt` sources are sent verbatim; they must be valid UTF-8 and
+at most `max_input_chars` runes, otherwise the file fails permanently and is
+never truncated. Each `openai` digest request
 sends `reasoning_effort: "none"` and `max_tokens: 4096`; a response with
 `finish_reason: "length"` is a permanent failure.
 
@@ -1386,7 +1392,8 @@ sends `reasoning_effort: "none"` and `max_tokens: 4096`; a response with
   literal. Relative after expansion → error. Source overlapping `wiki_dir` (either
   direction / equal) → error. `db_path` inside `wiki_dir` → error. Unknown key →
   error. Backend must be `claudecode`, `ollama`, or `openai`; OpenAI requires a
-  loopback base URL, model, PDF-only sources, and `max_input_chars` in 1..1000000.
+  loopback base URL, model, sources limited to `pdf`/`md`/`markdown`/`txt`, and
+  `max_input_chars` in 1..1000000.
 
 ### Storage
 - Whole wiki root writable; `_schema.md` write → `ErrPermission`. `..`/absolute →
