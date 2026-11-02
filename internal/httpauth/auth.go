@@ -341,6 +341,8 @@ func validationCause(err error) string {
 		return "invalid_signature"
 	case errors.Is(err, errMissingKeyID):
 		return "missing_key_id"
+	case errors.Is(err, errMalformedKeyID):
+		return "malformed_key_id"
 	case errors.Is(err, jwt.ErrTokenUnverifiable):
 		return "key_unavailable"
 	case errors.Is(err, jwt.ErrTokenMalformed):

@@ -461,42 +461,56 @@ func TestOAuthRejectionLogsCause(t *testing.T) {
 	}
 }
 
-func TestOAuthMissingKeyIDLogsCause(t *testing.T) {
+func TestOAuthKeyIDProblemsLogCause(t *testing.T) {
 	issuer, key, keys := newTestOAuthFixture(t)
 	validator := NewOAuthValidator(issuer, testAudience, nil, keys)
-	token := mint(t, jwt.SigningMethodRS256, key, "", baseClaims(issuer, testAudience))
+	numericKID := jwt.NewWithClaims(jwt.SigningMethodRS256, baseClaims(issuer, testAudience))
+	numericKID.Header["kid"] = 42
+	numericToken, err := numericKID.SignedString(key)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	var buf bytes.Buffer
-	prevLogger := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
-	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+	for _, tc := range []struct {
+		name, token, want string
+	}{
+		{"no kid", mint(t, jwt.SigningMethodRS256, key, "", baseClaims(issuer, testAudience)), "missing_key_id"},
+		{"non-string kid", numericToken, "malformed_key_id"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			prevLogger := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+			t.Cleanup(func() { slog.SetDefault(prevLogger) })
 
-	cfg := Config{
-		Mode:             "oauth",
-		Validator:        validator,
-		PublicURL:        "https://mcp.example.com",
-		MaxBodyBytes:     1024,
-		MaxStreamSeconds: 30,
-	}
-	var ran bool
-	h := Middleware(cfg)(sentinelHandler(&ran))
-	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader("{}"))
-	req.Header.Set("Authorization", "Bearer "+token)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+			cfg := Config{
+				Mode:             "oauth",
+				Validator:        validator,
+				PublicURL:        "https://mcp.example.com",
+				MaxBodyBytes:     1024,
+				MaxStreamSeconds: 30,
+			}
+			var ran bool
+			h := Middleware(cfg)(sentinelHandler(&ran))
+			req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader("{}"))
+			req.Header.Set("Authorization", "Bearer "+tc.token)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
 
-	if ran {
-		t.Fatal("next handler ran for a token without kid")
-	}
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
-	}
-	logged := buf.String()
-	if !strings.Contains(logged, "cause=missing_key_id") {
-		t.Fatalf("log = %q, want cause=missing_key_id", logged)
-	}
-	if strings.Contains(logged, "key_unavailable") {
-		t.Fatalf("log = %q, must not classify missing kid as key_unavailable", logged)
+			if ran {
+				t.Fatal("next handler ran for a token with a bad kid")
+			}
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+			}
+			logged := buf.String()
+			if !strings.Contains(logged, "cause="+tc.want) {
+				t.Fatalf("log = %q, want cause=%s", logged, tc.want)
+			}
+			if strings.Contains(logged, "key_unavailable") {
+				t.Fatalf("log = %q, must not classify a bad kid as key_unavailable", logged)
+			}
+		})
 	}
 }
 
