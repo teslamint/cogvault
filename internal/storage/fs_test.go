@@ -434,6 +434,34 @@ func TestConcurrentWritesSamePath(t *testing.T) {
 	}
 }
 
+func TestSameFile(t *testing.T) {
+	root := t.TempDir()
+	fs := newTestStorage(t, root, &config.Config{})
+	mustWriteFile(t, filepath.Join(root, "a.md"), "same")
+	mustWriteFile(t, filepath.Join(root, "b.md"), "same")
+	if err := os.Link(filepath.Join(root, "a.md"), filepath.Join(root, "link.md")); err != nil {
+		t.Fatalf("os.Link: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		a, b string
+		want bool
+	}{
+		{"same path", "a.md", "a.md", true},
+		{"hard link", "a.md", "link.md", true},
+		{"distinct files with equal bytes", "a.md", "b.md", false},
+	} {
+		got, err := fs.SameFile(tc.a, tc.b)
+		if err != nil || got != tc.want {
+			t.Errorf("%s: SameFile(%q, %q) = %v, %v; want %v", tc.name, tc.a, tc.b, got, err, tc.want)
+		}
+	}
+	if _, err := fs.SameFile("missing.md", "a.md"); !errors.Is(err, cverr.ErrNotFound) {
+		t.Errorf("SameFile(missing) error = %v, want ErrNotFound", err)
+	}
+}
+
 func newTestStorage(t *testing.T, root string, cfg *config.Config) *FSStorage {
 	t.Helper()
 	if cfg.Exclude == nil {

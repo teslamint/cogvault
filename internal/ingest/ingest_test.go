@@ -520,6 +520,68 @@ func TestRunSucceedsWhenPreviousPageCleanupFails(t *testing.T) {
 	}
 }
 
+// sameFileStorage reports alias as the same file as target, standing in for
+// normalization-equivalent names on APFS.
+type sameFileStorage struct {
+	storage.Storage
+	alias, target string
+}
+
+func (s sameFileStorage) SameFile(a, b string) (bool, error) {
+	if a == s.alias && b == s.target {
+		return true, nil
+	}
+	return s.Storage.SameFile(a, b)
+}
+
+func seedPage(t *testing.T, h *harness, path, content string) {
+	t.Helper()
+	if err := h.store.Write(path, []byte(content)); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.idx.Add(path, content, buildMeta(map[string]any{"title": "T"}, "T")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRemovePreviousPageDeletesDistinctFileWithEqualBytes(t *testing.T) {
+	h := newHarness(t, []string{"md"}, okLLM())
+	content := validPage("Same")
+	seedPage(t, h, "sources/old-name.md", content)
+	seedPage(t, h, "sources/note.md", content)
+
+	h.runner.removePreviousPage("sources/old-name.md", "sources/note.md")
+
+	if exists, err := h.store.Exists("sources/old-name.md"); err != nil || exists {
+		t.Fatalf("old page exists=%v err=%v, want deleted", exists, err)
+	}
+	if meta, err := h.idx.GetMeta("sources/old-name.md"); err == nil || meta != nil {
+		t.Fatalf("old index entry meta=%v err=%v, want removed", meta, err)
+	}
+	if exists, err := h.store.Exists("sources/note.md"); err != nil || !exists {
+		t.Fatalf("new page exists=%v err=%v, want present", exists, err)
+	}
+}
+
+func TestRemovePreviousPageKeepsAliasFileButDropsItsIndexKey(t *testing.T) {
+	h := newHarness(t, []string{"md"}, okLLM())
+	seedPage(t, h, "sources/old-alias.md", validPage("Old"))
+	seedPage(t, h, "sources/note.md", validPage("New"))
+	h.runner.store = sameFileStorage{Storage: h.store, alias: "sources/old-alias.md", target: "sources/note.md"}
+
+	h.runner.removePreviousPage("sources/old-alias.md", "sources/note.md")
+
+	if exists, err := h.store.Exists("sources/old-alias.md"); err != nil || !exists {
+		t.Fatalf("alias file exists=%v err=%v, want kept", exists, err)
+	}
+	if meta, err := h.idx.GetMeta("sources/old-alias.md"); err == nil || meta != nil {
+		t.Fatalf("alias index entry meta=%v err=%v, want removed", meta, err)
+	}
+	if meta, err := h.idx.GetMeta("sources/note.md"); err != nil || meta == nil {
+		t.Fatalf("new index entry meta=%v err=%v, want present", meta, err)
+	}
+}
+
 func TestRunSlugCollisionDifferentSource(t *testing.T) {
 	m := okLLM()
 	h := newHarness(t, []string{"md"}, m)

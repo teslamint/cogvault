@@ -1,7 +1,6 @@
 package ingest
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -440,28 +439,31 @@ func (r *Runner) digestOne(parent context.Context, entry scanEntry, hash, schema
 		return
 	}
 	if previousPage != page && len(existing) > 0 {
-		r.removePreviousPage(previousPage, saved)
+		r.removePreviousPage(previousPage, page)
 	}
 	report.Digested++
 	report.addEvent(FileResult{Path: entry.absPath, Action: actionDigested})
 }
-func (r *Runner) removePreviousPage(page string, saved []byte) {
-	previous, err := r.store.Read(page)
-	if errors.Is(err, cverr.ErrNotFound) {
+
+// removePreviousPage retires the page an earlier digest of the same source
+// wrote at another path. When both paths name one file (normalization-equivalent
+// names on APFS) only the stale index key is dropped.
+func (r *Runner) removePreviousPage(previous, page string) {
+	same, err := r.store.SameFile(previous, page)
+	switch {
+	case errors.Is(err, cverr.ErrNotFound):
+		// The previous file is already gone; only its index key may remain.
+	case err != nil:
+		slog.Warn("ingest: could not compare previous page during cleanup", "page", previous, "error", err)
 		return
+	case !same:
+		if err := r.store.Delete(previous); err != nil {
+			slog.Warn("ingest: could not delete previous page", "page", previous, "error", err)
+			return
+		}
 	}
-	if err != nil {
-		slog.Warn("ingest: could not read previous page during cleanup", "page", page, "error", err)
-		return
-	}
-	if bytes.Equal(previous, saved) {
-		return
-	}
-	if err := r.store.Delete(page); err != nil {
-		slog.Warn("ingest: could not delete previous page", "page", page, "error", err)
-	}
-	if err := r.idx.Remove(page); err != nil {
-		slog.Warn("ingest: could not remove previous page from index", "page", page, "error", err)
+	if err := r.idx.Remove(previous); err != nil {
+		slog.Warn("ingest: could not remove previous page from index", "page", previous, "error", err)
 	}
 }
 func (r *Runner) recordFailure(entry scanEntry, hash, origin string, prev *ledgerRow, report *Report, msg string, class failureClass) {
