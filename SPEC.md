@@ -957,7 +957,7 @@ cogvault lint [--config <path>] [--strict] [--json]
 
 Reports, one line per issue as `<kind> <path> <message>` in text mode:
 
-- `parse` — the page could not be parsed.
+- `parse` — the page could not be read or parsed.
 - `frontmatter` — missing `title`, missing `type`, or, for `type: source`
   pages, a missing `source_path` or `ingested_at` (§11). `_schema.md` is exempt
   from this check: it defines the page contract rather than being written under

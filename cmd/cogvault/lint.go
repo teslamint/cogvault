@@ -67,13 +67,15 @@ func runLint(cmd *cobra.Command, args []string) error {
 
 	for page := range allPages {
 		content, readErr := store.Read(page)
-		if readErr == nil {
-			for _, diagnostic := range evidence.Validate(page, content, store) {
-				issues = append(issues, lintIssue{
-					Kind: "evidence", Path: diagnostic.Path, Message: diagnostic.Message,
-					ID: diagnostic.ID, ClaimID: diagnostic.ClaimID, Severity: diagnostic.Severity, FixHint: diagnostic.FixHint,
-				})
-			}
+		if readErr != nil {
+			issues = append(issues, lintIssue{Path: page, Kind: "parse", Message: readErr.Error()})
+			continue
+		}
+		for _, diagnostic := range evidence.Validate(page, content, store) {
+			issues = append(issues, lintIssue{
+				Kind: "evidence", Path: diagnostic.Path, Message: diagnostic.Message,
+				ID: diagnostic.ID, ClaimID: diagnostic.ClaimID, Severity: diagnostic.Severity, FixHint: diagnostic.FixHint,
+			})
 		}
 
 		src, parseErr := adpt.Parse(cfg.WikiDir, page, false)

@@ -1113,6 +1113,37 @@ func TestLintStrictSucceedsOnCleanWiki(t *testing.T) {
 	}
 }
 
+func TestLintReportsUnreadablePageOnce(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores file permissions")
+	}
+	configPath, wikiDir, _ := testVault(t)
+	if _, _, err := executeCommand("init", "--config", configPath); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	writeLintPage(t, wikiDir, "a.md", "A", "see [[b]]")
+	writeLintPage(t, wikiDir, "b.md", "B", "see [[a]]")
+	locked := filepath.Join(wikiDir, "b.md")
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o644) })
+
+	stdout, _, err := executeCommand("lint", "--config", configPath, "--strict")
+	if err == nil {
+		t.Fatalf("lint --strict must fail when a page cannot be read (output: %q)", stdout)
+	}
+	parseLines := 0
+	for _, line := range strings.Split(stdout, "\n") {
+		if fields := strings.Fields(line); len(fields) >= 2 && fields[0] == "parse" && fields[1] == "b.md" {
+			parseLines++
+		}
+	}
+	if parseLines != 1 {
+		t.Fatalf("parse issues for b.md = %d, want 1 (output: %q)", parseLines, stdout)
+	}
+}
+
 func TestLintResearchEvidenceDiagnosticsAndJSON(t *testing.T) {
 	configPath, wikiDir, _ := testVault(t)
 	if _, _, err := executeCommand("init", "--config", configPath); err != nil {
