@@ -111,7 +111,10 @@ type FSStorage struct { root string; cfg *config.Config; mu sync.Mutex }
 per-method checks). The v1 `Write` wiki-prefix check is **deleted**: the whole
 root is writable except `_schema.md` (guarded via `cfg.SchemaPath()`). New
 `Stat(path) (int64, time.Time, error)` uses `resolvePath` + `os.Stat` with the
-existing error mapping, feeding the index stat-gate. `Move(src, dst string) error`
+existing error mapping, feeding the index stat-gate. `SameFile(a, b) (bool, error)`
+compares two resolved paths with `os.SameFile` (missing path → `ErrNotFound`), so
+ingest can tell an APFS normalization-equivalent alias from a distinct old page.
+`Move(src, dst string) error`
 resolves both paths, acquires the mutex, creates the destination parent directory,
 and calls `os.Rename`; used by the ingest orphan sweep to archive pages.
 `exclude_read`/schema permission checks happen before existence checks on both

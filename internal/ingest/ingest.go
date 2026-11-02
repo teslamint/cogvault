@@ -30,6 +30,7 @@ import (
 
 	"golang.org/x/sys/unix"
 	"golang.org/x/text/unicode/norm"
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -358,9 +359,9 @@ func (r *Runner) digestOne(parent context.Context, entry scanEntry, hash, schema
 		r.recordFailure(entry, hash, origin, prev, report, "digest: "+err.Error(), class)
 		return
 	}
-	fm, title, body, ok := parsePage(res.PageContent)
-	if !ok {
-		r.recordFailure(entry, hash, origin, prev, report, "validate: page missing frontmatter or title", classPermanent)
+	fm, title, body, err := checkPage(res.PageContent)
+	if err != nil {
+		r.recordFailure(entry, hash, origin, prev, report, "validate: "+err.Error(), classPermanent)
 		return
 	}
 	page, err := r.pagePath(slug, entry.absPath)
@@ -437,8 +438,33 @@ func (r *Runner) digestOne(parent context.Context, entry scanEntry, hash, schema
 		r.recordFailure(entry, hash, origin, prev, report, "ledger: "+err.Error(), classInfra)
 		return
 	}
+	if previousPage != page {
+		r.removePreviousPage(previousPage, page)
+	}
 	report.Digested++
 	report.addEvent(FileResult{Path: entry.absPath, Action: actionDigested})
+}
+
+// removePreviousPage retires the page an earlier digest of the same source
+// wrote at another path. When both paths name one file (normalization-equivalent
+// names on APFS) only the stale index key is dropped.
+func (r *Runner) removePreviousPage(previous, page string) {
+	same, err := r.store.SameFile(previous, page)
+	switch {
+	case errors.Is(err, cverr.ErrNotFound):
+		// The previous file is already gone; only its index key may remain.
+	case err != nil:
+		slog.Warn("ingest: could not compare previous page during cleanup", "page", previous, "error", err)
+		return
+	case !same:
+		if err := r.store.Delete(previous); err != nil {
+			slog.Warn("ingest: could not delete previous page", "page", previous, "error", err)
+			return
+		}
+	}
+	if err := r.idx.Remove(previous); err != nil {
+		slog.Warn("ingest: could not remove previous page from index", "page", previous, "error", err)
+	}
 }
 func (r *Runner) recordFailure(entry scanEntry, hash, origin string, prev *ledgerRow, report *Report, msg string, class failureClass) {
 	attempts := attemptsOf(prev)
@@ -698,6 +724,9 @@ func containsType(types []string, ext string) bool {
 func slugFor(absPath, hash string) string {
 	base := filepath.Base(absPath)
 	base = strings.TrimSuffix(base, filepath.Ext(base))
+	// APFS reports Hangul file names decomposed; the slug (and the page name
+	// built from it) must be NFC, and truncateNFDSafe assumes NFC input.
+	base = norm.NFC.String(base)
 	base = strings.ToLower(base)
 	base = strings.ReplaceAll(base, " ", "-")
 
@@ -775,19 +804,68 @@ func truncateNFDSafe(s string, maxBytes int) string {
 // retained in memory. Only the hex digest is kept per scan entry.
 
 func parsePage(content string) (map[string]any, string, []byte, bool) {
+	fm, title, body, err := checkPage(content)
+	return fm, title, body, err == nil
+}
+
+var errNoTitle = errors.New("page missing frontmatter or title")
+
+// checkPage validates a generated page and says why it is rejected. A YAML
+// error is reported as such instead of as a missing frontmatter, so the
+// attention report shows the real cause.
+func checkPage(content string) (map[string]any, string, []byte, error) {
 	fm, body, err := terms.Parse([]byte(content))
-	if err != nil || len(fm) == 0 {
-		return nil, "", nil, false
+	if err != nil {
+		repaired, ok := quoteTitleLine(content)
+		if !ok {
+			return nil, "", nil, fmt.Errorf("frontmatter YAML: %w", err)
+		}
+		var rerr error
+		if fm, body, rerr = terms.Parse([]byte(repaired)); rerr != nil {
+			return nil, "", nil, fmt.Errorf("frontmatter YAML: %w", err)
+		}
 	}
 	titleVal, ok := fm["title"]
 	if !ok {
-		return nil, "", nil, false
+		return nil, "", nil, errNoTitle
 	}
 	title := strings.TrimSpace(fmt.Sprint(titleVal))
 	if title == "" {
-		return nil, "", nil, false
+		return nil, "", nil, errNoTitle
 	}
-	return fm, title, body, true
+	return fm, title, body, nil
+}
+
+// quoteTitleLine rewrites the frontmatter `title:` line so its whole remainder
+// is one YAML string. Models copy a headline that begins with a quote into
+// `title: "headline" more words`, which is not valid YAML; the remainder is
+// taken literally, outer quotes included. Only the title line is touched, and
+// the page is stored from the parsed metadata, so the rewrite never reaches disk.
+func quoteTitleLine(content string) (string, bool) {
+	lines := strings.Split(content, "\n")
+	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
+		return "", false
+	}
+	for i := 1; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) == "---" {
+			return "", false
+		}
+		value, found := strings.CutPrefix(lines[i], "title:")
+		if !found {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return "", false
+		}
+		quoted, err := yaml.Marshal(value)
+		if err != nil {
+			return "", false
+		}
+		lines[i] = "title: " + strings.TrimRight(string(quoted), "\n")
+		return strings.Join(lines, "\n"), true
+	}
+	return "", false
 }
 
 func validUsageTermsRecord(metadata map[string]any) bool {

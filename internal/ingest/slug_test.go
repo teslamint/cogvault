@@ -86,3 +86,30 @@ func TestSlugForNFDByteCap(t *testing.T) {
 		t.Fatal("slug should not be empty")
 	}
 }
+
+// APFS stores Hangul file names decomposed (NFD). The slug must still be NFC:
+// wikilinks and MCP paths are NFC, and truncating a decomposed name by NFD byte
+// cost can cut inside a syllable and leave a lone jamo.
+func TestSlugForDecomposedFilename(t *testing.T) {
+	const fakeHash = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+
+	short := norm.NFD.String("한국어 파일명")
+	if got, want := slugFor("/src/"+short+".pdf", fakeHash), "한국어-파일명"; got != want {
+		t.Errorf("short NFD filename: slug = %q, want %q", got, want)
+	}
+
+	long := norm.NFD.String("newstapa-org-명태균 과장은 좀 있지만 오세훈 운이 좋다 김영선 전 의원 인터뷰 " +
+		"명태균 과장은 좀 있지만 오세훈 운이 좋다 김영선 전 의원 인터뷰")
+	slug := slugFor("/src/"+long+".pdf", fakeHash)
+	if !norm.NFC.IsNormalString(slug) {
+		t.Errorf("slug is not NFC: %q", slug)
+	}
+	for _, r := range slug {
+		if r >= 0x1100 && r <= 0x11FF {
+			t.Fatalf("slug %q ends or contains a lone jamo %U", slug, r)
+		}
+	}
+	if len(norm.NFD.String(slug)) > 220 {
+		t.Errorf("NFD slug = %d bytes, want <= 220", len(norm.NFD.String(slug)))
+	}
+}

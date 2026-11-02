@@ -259,6 +259,36 @@ func (fs *FSStorage) Exists(path string) (bool, error) {
 	return true, nil
 }
 
+func (fs *FSStorage) SameFile(a, b string) (bool, error) {
+	infoA, err := fs.statForSameFile(a)
+	if err != nil {
+		return false, err
+	}
+	infoB, err := fs.statForSameFile(b)
+	if err != nil {
+		return false, err
+	}
+	return os.SameFile(infoA, infoB), nil
+}
+
+func (fs *FSStorage) statForSameFile(path string) (os.FileInfo, error) {
+	absPath, cleaned, err := fs.resolvePath(path)
+	if err != nil {
+		return nil, err
+	}
+	if fs.isExcludeRead(cleaned) {
+		return nil, fmt.Errorf("storage.SameFile %s: %w", path, cverr.ErrPermission)
+	}
+	info, err := os.Stat(absPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("storage.SameFile %s: %w", path, cverr.ErrNotFound)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("storage.SameFile %s: %w", path, err)
+	}
+	return info, nil
+}
+
 func (fs *FSStorage) Stat(path string) (int64, time.Time, error) {
 	absPath, cleaned, err := fs.resolvePath(path)
 	if err != nil {

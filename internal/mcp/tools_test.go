@@ -56,6 +56,7 @@ func (m *mockStorage) Delete(path string) error                        { return 
 func (m *mockStorage) Move(src, dst string) error                      { return nil }
 func (m *mockStorage) List(prefix string) ([]storage.ListEntry, error) { return m.listFn(prefix) }
 func (m *mockStorage) Exists(path string) (bool, error)                { return m.existsFn(path) }
+func (m *mockStorage) SameFile(a, b string) (bool, error)              { return a == b, nil }
 func (m *mockStorage) Stat(path string) (int64, time.Time, error) {
 	if m.statFn == nil {
 		return 0, time.Time{}, nil

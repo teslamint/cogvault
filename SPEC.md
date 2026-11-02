@@ -1113,14 +1113,20 @@ scan source dir (top level only, Lstat: skip dirs/symlinks)
 ### 10.2 Page identity
 
 One source file path → one wiki page `sources/<slug>.md`. `<slug>` is derived from
-the source base name (extension stripped) by: lowercasing, replacing spaces with
+the source base name (extension stripped) by: Unicode NFC normalization (APFS
+reports Hangul names decomposed), lowercasing, replacing spaces with
 `-`, dropping every character that is not a Unicode letter, Unicode digit, `.`, `_`,
 or `-`, collapsing runs of `-` to one, and trimming leading/trailing `-`. If that
 leaves the slug empty (e.g. a name with no letters or digits), it falls back to
 `src-<hash8>` (`hash8` = first 8 hex of sha256 of the file content). If the resulting page path is already mapped to a different source path,
 the page becomes `sources/<slug>-<hash8>.md` (here `hash8` = first 8 hex of sha256
 of the absolute source path). Re-digestion of the same source path with new content
-overwrites its page and marks the prior ledger row `superseded`.
+overwrites its page and marks the prior ledger row `superseded`. If re-digestion
+produces a different page path than the previous success row (for example, after
+a slug rule change), the previous page and its index entry are removed after the
+new page is saved. The index entry is removed even when the previous file is
+already gone. A previous path that names the same file keeps the file and loses
+only its index entry.
 
 A renamed or deleted source file's page and ledger row survive the immediate
 change. On the next ingest run, a pre-scan sweep archives only when the source

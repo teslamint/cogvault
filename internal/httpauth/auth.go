@@ -14,6 +14,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	jwt "github.com/golang-jwt/jwt/v5"
 )
 
 // TokenValidator validates a bearer token in oauth mode and reports when it
@@ -126,7 +128,7 @@ func Middleware(cfg Config) func(http.Handler) http.Handler {
 						writeInsufficientScope(w, cfg)
 						return
 					}
-					logRejection("invalid_credential", r)
+					logRejection("invalid_credential", r, "cause", validationCause(err))
 					writeUnauthorized(w, cfg, true)
 					return
 				}
@@ -157,7 +159,7 @@ func Middleware(cfg Config) func(http.Handler) http.Handler {
 			// only true after a successful oauth Validate call, so this
 			// never fires in "none" or "bearer" mode.
 			if hasExpiry && !deadline.After(time.Now()) {
-				logRejection("invalid_credential", r)
+				logRejection("invalid_credential", r, "cause", "token_expired")
 				writeUnauthorized(w, cfg, true)
 				return
 			}
@@ -313,9 +315,39 @@ func writeInsufficientScope(w http.ResponseWriter, cfg Config) {
 	w.WriteHeader(http.StatusForbidden)
 }
 
-// logRejection logs the reason class and remote address only. Credentials
-// must never reach the logs: no Authorization header value, bearer token, or
-// raw JWT may appear in a log line.
-func logRejection(reason string, r *http.Request) {
-	slog.Warn("httpauth: request rejected", "reason", reason, "remote_addr", r.RemoteAddr)
+// logRejection logs the reason class, remote address, and — for
+// invalid_credential only — a cause that names which validation check failed.
+// The cause is derived from sentinel error values only; no credential value,
+// bearer token, or raw JWT is ever written to the log.
+func logRejection(reason string, r *http.Request, extras ...any) {
+	args := append([]any{"reason", reason, "remote_addr", r.RemoteAddr}, extras...)
+	slog.Warn("httpauth: request rejected", args...)
+}
+
+// validationCause maps a JWT or key-lookup error to a short cause string
+// safe for logging. It checks only sentinel error categories; it never
+// includes error text that might embed a token fragment or credential detail.
+func validationCause(err error) string {
+	switch {
+	case errors.Is(err, jwt.ErrTokenExpired):
+		return "token_expired"
+	case errors.Is(err, jwt.ErrTokenNotValidYet):
+		return "token_not_yet_valid"
+	case errors.Is(err, jwt.ErrTokenInvalidAudience):
+		return "invalid_audience"
+	case errors.Is(err, jwt.ErrTokenInvalidIssuer):
+		return "invalid_issuer"
+	case errors.Is(err, jwt.ErrTokenSignatureInvalid):
+		return "invalid_signature"
+	case errors.Is(err, errMissingKeyID):
+		return "missing_key_id"
+	case errors.Is(err, errMalformedKeyID):
+		return "malformed_key_id"
+	case errors.Is(err, jwt.ErrTokenUnverifiable):
+		return "key_unavailable"
+	case errors.Is(err, jwt.ErrTokenMalformed):
+		return "malformed_token"
+	default:
+		return "other"
+	}
 }
