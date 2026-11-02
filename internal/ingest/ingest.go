@@ -390,6 +390,10 @@ func (r *Runner) digestOne(parent context.Context, entry scanEntry, hash, schema
 		return
 	}
 	fm = terms.Automatic(source, previous, fm)
+	// research_evidence is written by agents, never by the digest; keep it.
+	if evidence, ok := previous["research_evidence"]; ok {
+		fm["research_evidence"] = evidence
+	}
 	// Models invent this date (observed: today's date from a stale prompt, or the document's own date).
 	fm["ingested_at"] = r.now().Format("2006-01-02")
 	// The model cannot see the page list, so it invents link targets. Keep the

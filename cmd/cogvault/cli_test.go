@@ -19,6 +19,7 @@ import (
 	"github.com/teslamint/cogvault/internal/config"
 	cogmcp "github.com/teslamint/cogvault/internal/mcp"
 	"github.com/teslamint/cogvault/internal/schema"
+	"github.com/teslamint/cogvault/internal/storage"
 	"golang.org/x/sys/unix"
 	"golang.org/x/text/unicode/norm"
 )
@@ -1110,6 +1111,220 @@ func TestLintStrictSucceedsOnCleanWiki(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "no issues found") {
 		t.Fatalf("expected a clean report, got: %q", stdout)
+	}
+}
+
+// readFailStorage fails Read for one page while the file stays parseable, the
+// case a transient read error produces.
+type readFailStorage struct {
+	storage.Storage
+	page string
+}
+
+func (s readFailStorage) Read(path string) ([]byte, error) {
+	if path == s.page {
+		return nil, errors.New("injected read failure")
+	}
+	return s.Storage.Read(path)
+}
+
+func TestLintReportsReadFailureEvenWhenParseSucceeds(t *testing.T) {
+	configPath, wikiDir, _ := testVault(t)
+	if _, _, err := executeCommand("init", "--config", configPath); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	writeLintPage(t, wikiDir, "a.md", "A", "see [[b]]")
+	writeLintPage(t, wikiDir, "b.md", "B", "see [[a]]")
+	cfg, store, idx, adpt, err := bootstrap(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer idx.Close()
+
+	issues, err := collectLintIssues(cfg, readFailStorage{Storage: store, page: "b.md"}, idx, adpt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The unreadable page still parses, so its link to a.md must count:
+	// a.md is not an orphan.
+	if len(issues) != 1 || issues[0].Path != "b.md" || issues[0].Kind != "parse" ||
+		!strings.Contains(issues[0].Message, "injected read failure") {
+		t.Fatalf("issues = %#v, want only the b.md parse issue carrying the read error", issues)
+	}
+}
+
+func TestLintReportsUnreadablePageOnce(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores file permissions")
+	}
+	configPath, wikiDir, _ := testVault(t)
+	if _, _, err := executeCommand("init", "--config", configPath); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	writeLintPage(t, wikiDir, "a.md", "A", "see [[b]]")
+	writeLintPage(t, wikiDir, "b.md", "B", "see [[a]]")
+	locked := filepath.Join(wikiDir, "b.md")
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o644) })
+
+	// Both the storage read and the adapter parse fail here; one issue only.
+	stdout, _, err := executeCommand("lint", "--config", configPath, "--strict")
+	if err == nil {
+		t.Fatalf("lint --strict must fail when a page cannot be read (output: %q)", stdout)
+	}
+	parseLines := 0
+	for _, line := range strings.Split(stdout, "\n") {
+		if fields := strings.Fields(line); len(fields) >= 2 && fields[0] == "parse" && fields[1] == "b.md" {
+			parseLines++
+		}
+	}
+	if parseLines != 1 {
+		t.Fatalf("parse issues for b.md = %d, want 1 (output: %q)", parseLines, stdout)
+	}
+}
+
+func TestLintResearchEvidenceDiagnosticsAndJSON(t *testing.T) {
+	configPath, wikiDir, _ := testVault(t)
+	if _, _, err := executeCommand("init", "--config", configPath); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	content := "---\ntitle: Evidence\ntype: note\nresearch_evidence:\n  version: 1\n  claims:\n    - id: claim-1\n      text: A claim\n      kind: empirical\n      sources:\n        - ref: sources/missing.md\n      checks:\n        - kind: bibliography\n---\n"
+	if err := os.WriteFile(filepath.Join(wikiDir, "evidence.md"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	textOut, _, err := executeCommand("lint", "--config", configPath)
+	if err != nil {
+		t.Fatalf("lint: %v", err)
+	}
+	if !strings.Contains(textOut, "evidence") || !strings.Contains(textOut, "claim-1:") || strings.Contains(textOut, "EVID") {
+		t.Fatalf("unexpected text evidence report: %q", textOut)
+	}
+	if evidenceLines := strings.Count(textOut, "evidence       "); evidenceLines != 2 {
+		t.Fatalf("expected two text evidence diagnostics corresponding to EVID004/EVID005; got %d in %q", evidenceLines, textOut)
+	}
+
+	jsonOut, _, err := executeCommand("lint", "--config", configPath, "--json")
+	if err != nil {
+		t.Fatalf("lint --json: %v", err)
+	}
+	var report struct {
+		Issues []struct {
+			Kind     string `json:"kind"`
+			Path     string `json:"path"`
+			Message  string `json:"message"`
+			ID       string `json:"id"`
+			ClaimID  string `json:"claim_id"`
+			Severity string `json:"severity"`
+			FixHint  string `json:"fix_hint"`
+		} `json:"issues"`
+	}
+	if err := json.Unmarshal([]byte(jsonOut), &report); err != nil {
+		t.Fatalf("parse JSON report: %v (%q)", err, jsonOut)
+	}
+	ids := map[string]bool{}
+	for _, issue := range report.Issues {
+		if issue.Kind == "evidence" {
+			ids[issue.ID] = true
+			if issue.Severity != "warning" || issue.ClaimID != "claim-1" {
+				t.Errorf("unexpected evidence issue: %+v", issue)
+			}
+		}
+	}
+	if !ids["EVID004"] || !ids["EVID005"] {
+		t.Fatalf("expected EVID004 and EVID005, got %+v", ids)
+	}
+	if !strings.Contains(textOut, "claim-1:") || strings.Contains(textOut, "EVID") {
+		t.Fatalf("text output must identify claim-1 without exposing diagnostic IDs: %q", textOut)
+	}
+}
+
+func TestLintResearchEvidenceAbsentAndEmptyJSON(t *testing.T) {
+	configPath, wikiDir, _ := testVault(t)
+	if _, _, err := executeCommand("init", "--config", configPath); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	writeLintPage(t, wikiDir, "a.md", "A", "see [[b]]")
+	writeLintPage(t, wikiDir, "b.md", "B", "see [[a]]")
+
+	for _, args := range [][]string{
+		{"lint", "--config", configPath, "--strict"},
+		{"lint", "--config", configPath, "--json", "--strict"},
+	} {
+		stdout, _, err := executeCommand(args...)
+		if err != nil {
+			t.Fatalf("%v: %v (output: %q)", args, err, stdout)
+		}
+		if strings.Contains(stdout, `"kind":"evidence"`) {
+			t.Fatalf("%v produced evidence diagnostics without the field: %q", args, stdout)
+		}
+		if args[3] == "--json" && stdout != "{\"issues\":[]}\n" {
+			t.Fatalf("JSON empty report = %q", stdout)
+		}
+	}
+}
+
+func TestLintJSONStrictOnlyChangesExitCodeAndSorts(t *testing.T) {
+	configPath, wikiDir, _ := testVault(t)
+	if _, _, err := executeCommand("init", "--config", configPath); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	for _, name := range []string{"z.md", "b.md", "a.md"} {
+		content := fmt.Sprintf("---\ntitle: %s\ntype: note\nresearch_evidence:\n  version: 1\n  claims:\n    - id: claim-1\n      text: A claim\n      kind: empirical\n      sources:\n        - ref: sources/missing.md\n      checks:\n        - kind: bibliography\n---\n\nsee [[missing]]\n", name)
+		if err := os.WriteFile(filepath.Join(wikiDir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, jsonMode := range []bool{false, true} {
+		args := []string{"lint", "--config", configPath}
+		if jsonMode {
+			args = append(args, "--json")
+		}
+		plain, _, plainErr := executeCommand(args...)
+		if plainErr != nil {
+			t.Fatalf("%v: %v", args, plainErr)
+		}
+		strictArgs := append(append([]string(nil), args...), "--strict")
+		strict, _, strictErr := executeCommand(strictArgs...)
+		if strictErr == nil {
+			t.Fatalf("%v must return an error when issues exist", strictArgs)
+		}
+		if strict != plain {
+			t.Fatalf("--strict changed stdout for %v\nplain:  %q\nstrict: %q", args, plain, strict)
+		}
+		again, _, err := executeCommand(args...)
+		if err != nil || again != plain {
+			t.Fatalf("repeated output differs for %v: err=%v\nfirst:  %q\nagain:  %q", args, err, plain, again)
+		}
+		if jsonMode {
+			var report struct {
+				Issues []map[string]json.RawMessage `json:"issues"`
+			}
+			if err := json.Unmarshal([]byte(plain), &report); err != nil {
+				t.Fatalf("parse sorted report: %v", err)
+			}
+			lastPath := ""
+			sawNonEvidence := false
+			for _, issue := range report.Issues {
+				var path, kind, id string
+				_ = json.Unmarshal(issue["path"], &path)
+				_ = json.Unmarshal(issue["kind"], &kind)
+				_ = json.Unmarshal(issue["id"], &id)
+				if path < lastPath {
+					t.Fatalf("issues are not path-sorted: %q before %q", lastPath, path)
+				}
+				lastPath = path
+				if kind != "evidence" && id == "" {
+					sawNonEvidence = true
+				}
+			}
+			if !sawNonEvidence {
+				t.Fatal("expected a non-evidence JSON issue with an empty id")
+			}
+		}
 	}
 }
 

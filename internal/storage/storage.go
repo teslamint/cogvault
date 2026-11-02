@@ -9,6 +9,7 @@ type Storage interface {
 	Move(src, dst string) error
 	List(prefix string) ([]ListEntry, error)
 	Exists(path string) (bool, error)
+	IsFile(path string) (bool, error)
 	Stat(path string) (size int64, mtime time.Time, err error)
 	// SameFile reports whether a and b name the same file, such as two
 	// Unicode-normalization forms of one name on APFS.

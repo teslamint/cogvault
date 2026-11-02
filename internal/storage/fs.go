@@ -289,6 +289,25 @@ func (fs *FSStorage) statForSameFile(path string) (os.FileInfo, error) {
 	return info, nil
 }
 
+func (fs *FSStorage) IsFile(path string) (bool, error) {
+	absPath, cleaned, err := fs.resolvePath(path)
+	if err != nil {
+		return false, err
+	}
+	if fs.isExcludeRead(cleaned) {
+		return false, nil
+	}
+
+	info, err := os.Stat(absPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("storage.IsFile %s: %w", path, err)
+	}
+	return info.Mode().IsRegular(), nil
+}
+
 func (fs *FSStorage) Stat(path string) (int64, time.Time, error) {
 	absPath, cleaned, err := fs.resolvePath(path)
 	if err != nil {

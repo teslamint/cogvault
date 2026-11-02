@@ -17,6 +17,7 @@ import (
 	"github.com/teslamint/cogvault/internal/adapter"
 	"github.com/teslamint/cogvault/internal/config"
 	cverr "github.com/teslamint/cogvault/internal/errors"
+	"github.com/teslamint/cogvault/internal/evidence"
 	"github.com/teslamint/cogvault/internal/gitutil"
 	"github.com/teslamint/cogvault/internal/index"
 	"github.com/teslamint/cogvault/internal/storage"
@@ -98,6 +99,9 @@ func handleWikiWrite(root string, cfg *config.Config, store storage.Storage, idx
 		if strings.HasSuffix(strings.ToLower(path), ".md") {
 			warnings = validateFrontmatter(path, content)
 			warnings = append(warnings, unresolvedLinkWarnings(root, cfg, adpt, path, content)...)
+			for _, d := range evidence.Validate(path, []byte(content), store) {
+				warnings = append(warnings, d.Warning())
+			}
 		}
 		if warnings == nil {
 			warnings = []string{}
@@ -263,18 +267,22 @@ func handleWikiSearch(cfg *config.Config, store storage.Storage, idx index.Index
 		}
 		type searchResult struct {
 			index.Result
-			UsageTerms terms.Summary `json:"usage_terms"`
+			UsageTerms       terms.Summary    `json:"usage_terms"`
+			ResearchEvidence evidence.Summary `json:"research_evidence"`
 		}
 		enriched := make([]searchResult, len(results))
 		for i, result := range results {
 			content, readErr := store.Read(result.Path)
 			var sharing terms.Summary
+			var researchEvidence evidence.Summary
 			if readErr != nil {
 				sharing = terms.UnavailableSummary()
+				researchEvidence = evidence.UnavailableSummary("page could not be read")
 			} else {
 				sharing = terms.Summarize(content)
+				researchEvidence = evidence.Summarize(content)
 			}
-			enriched[i] = searchResult{Result: result, UsageTerms: sharing}
+			enriched[i] = searchResult{Result: result, UsageTerms: sharing, ResearchEvidence: researchEvidence}
 		}
 		return newToolResultJSONText(enriched)
 	}

@@ -19,9 +19,17 @@ const (
 	maxSchemaLen = 2000
 )
 
+const evidenceInstructions = `For optional research_evidence frontmatter (version 1):
+- Record performed checks, remaining gaps, and next steps separately.
+- Distinguish what a source actually covers from the claim's scope; record extension assumptions in limitation or gaps.
+- Never mark a check complete without a result and, for fulltext/table/replication, a locator.
+- Missing originals, code found, or failed reruns are not completed checks.
+- Passing lint or wiki_write checks confirms structure only, not factual accuracy.
+- Follow wiki_write warnings and review research_evidence summaries returned by wiki_search.`
+
 func NewServer(root string, cfg *config.Config, store storage.Storage, idx index.Index, adpt adapter.Adapter) *server.MCPServer {
 	s := server.NewMCPServer(serverName, version.String(),
-		server.WithInstructions(schemaInstructions(cfg, store)),
+		server.WithInstructions(schemaInstructions(cfg, store)+"\n\n"+evidenceInstructions),
 		server.WithToolHandlerMiddleware(callLogMiddleware),
 	)
 	registerTools(s, root, cfg, store, idx, adpt)
