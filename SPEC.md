@@ -980,7 +980,7 @@ Reports, one line per issue as `<kind> <path> <message>` in text mode:
 | --- | --- | --- |
 | EVID001 | error | Field is present but is not a mapping with `version` exactly integer `1`; sole diagnostic for the page. |
 | EVID002 | error | Missing/non-array `claims`; non-mapping claim; missing/empty/non-string claim `id` or `text`; missing/empty/non-string claim `kind`; duplicate claim `id` on second and later occurrences. |
-| EVID003 | error | Present `checks` or `gaps` not arrays; non-mapping item; missing/empty/non-string/out-of-set check or gap kind; claim kind outside its closed set. |
+| EVID003 | error | Present `checks` or `gaps` not arrays; non-mapping item; missing/empty/non-string/out-of-set check or gap kind; claim kind outside its closed set; present `limitation` that is not a string. |
 | EVID004 | warning | Sources absent, empty, non-array; non-mapping source; invalid/missing ref; unsafe or malformed ref; referenced path is not an existing regular file (a directory is not found). |
 | EVID005 | warning | Check result missing/empty, or required locator missing/empty for `fulltext`, `table`, or `replication`. |
 | EVID006 | reserved | Never emitted. |

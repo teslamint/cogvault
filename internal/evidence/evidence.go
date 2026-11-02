@@ -118,6 +118,11 @@ func validateMetadata(page string, metadata map[string]any, files FileChecker) [
 		out = append(out, validateSources(page, claimID, claim["sources"], hasKey(claim, "sources"), files)...)
 		out = append(out, validateChecks(page, claimID, claim["checks"], hasKey(claim, "checks"))...)
 		out = append(out, validateGaps(page, claimID, claim["gaps"], hasKey(claim, "gaps"))...)
+		if limitation, present := claim["limitation"]; present {
+			if _, ok := limitation.(string); !ok {
+				out = append(out, diag("EVID003", page, claimID, SeverityError, "limitation must be a string", "write limitation as a string"))
+			}
+		}
 	}
 	sort.Slice(out, func(i, j int) bool {
 		a, b := out[i], out[j]

@@ -134,6 +134,8 @@ func TestValidateDiagnosticClasses(t *testing.T) {
 		{"check kind unknown", "research_evidence:\n  version: 1\n  claims:\n" + claim("    checks: [{kind: bogus}]\n"), "EVID003"},
 		{"gap kind unknown", "research_evidence:\n  version: 1\n  claims:\n" + claim("    gaps: [{kind: bogus}]\n"), "EVID003"},
 		{"claim kind unknown", "research_evidence:\n  version: 1\n  claims:\n    - {id: x, text: y, kind: bogus, sources: [{ref: sources/a.md}]}\n", "EVID003"},
+		{"limitation integer", "research_evidence:\n  version: 1\n  claims:\n" + claim("    limitation: 42\n"), "EVID003"},
+		{"limitation list", "research_evidence:\n  version: 1\n  claims:\n" + claim("    limitation: [a, b]\n"), "EVID003"},
 		{"check result empty", "research_evidence:\n  version: 1\n  claims:\n" + claim("    checks: [{kind: bibliography, result: '  '}]\n"), "EVID005"},
 		{"table no locator", "research_evidence:\n  version: 1\n  claims:\n" + claim("    checks: [{kind: table, result: values}]\n"), "EVID005"},
 		{"gap no next step", "research_evidence:\n  version: 1\n  claims:\n" + claim("    gaps: [{kind: replication_pending, detail: pending}]\n"), "EVID007"},
@@ -217,6 +219,21 @@ func TestValidateSkipRulesSortingAndNoContradiction(t *testing.T) {
 	}
 	if Summarize(content).Status != "recorded" {
 		t.Fatalf("replication pairing should remain recorded: %#v", Summarize(content))
+	}
+}
+
+func TestValidateOrdersDiagnosticsByClaimID(t *testing.T) {
+	content := page("research_evidence:\n  version: 1\n  claims:\n    - {id: z, text: y, kind: empirical, sources: []}\n    - {id: a, text: y, kind: empirical, sources: []}")
+	ds := Validate("p.md", content, nil)
+	if len(ds) != 2 || ds[0].ClaimID != "a" || ds[1].ClaimID != "z" {
+		t.Fatalf("diagnostics = %#v, want claim a before z", ds)
+	}
+}
+
+func TestSummarizeRejectsNonStringLimitation(t *testing.T) {
+	content := page("research_evidence:\n  version: 1\n  claims:\n" + claim("    limitation: 42\n"))
+	if got := Summarize(content); got.Status != "unavailable" {
+		t.Fatalf("Summarize = %#v, want unavailable", got)
 	}
 }
 
