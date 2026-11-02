@@ -461,6 +461,45 @@ func TestOAuthRejectionLogsCause(t *testing.T) {
 	}
 }
 
+func TestOAuthMissingKeyIDLogsCause(t *testing.T) {
+	issuer, key, keys := newTestOAuthFixture(t)
+	validator := NewOAuthValidator(issuer, testAudience, nil, keys)
+	token := mint(t, jwt.SigningMethodRS256, key, "", baseClaims(issuer, testAudience))
+
+	var buf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	cfg := Config{
+		Mode:             "oauth",
+		Validator:        validator,
+		PublicURL:        "https://mcp.example.com",
+		MaxBodyBytes:     1024,
+		MaxStreamSeconds: 30,
+	}
+	var ran bool
+	h := Middleware(cfg)(sentinelHandler(&ran))
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if ran {
+		t.Fatal("next handler ran for a token without kid")
+	}
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "cause=missing_key_id") {
+		t.Fatalf("log = %q, want cause=missing_key_id", logged)
+	}
+	if strings.Contains(logged, "key_unavailable") {
+		t.Fatalf("log = %q, must not classify missing kid as key_unavailable", logged)
+	}
+}
+
 func TestStreamDeadline(t *testing.T) {
 	t.Run("no validator: deadline comes from MaxStreamSeconds", func(t *testing.T) {
 		cfg := Config{Mode: "none", MaxBodyBytes: 1024, MaxStreamSeconds: 1}

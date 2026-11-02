@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 
@@ -15,6 +14,8 @@ import (
 // token is otherwise valid but does not carry every scope in
 // NewOAuthValidator's requiredScopes.
 var ErrInsufficientScope = errors.New("insufficient scope")
+
+var errMissingKeyID = errors.New("httpauth: token header has no kid")
 
 // oauthClaims is the claim shape OAuthValidator parses. It embeds
 // jwt.RegisteredClaims for iss/aud/exp/nbf and adds the OAuth2 scope claim.
@@ -83,7 +84,7 @@ func (v *OAuthValidator) Validate(ctx context.Context, token string) (time.Time,
 	_, err := v.parser.ParseWithClaims(token, &claims, func(t *jwt.Token) (any, error) {
 		kid, ok := t.Header["kid"].(string)
 		if !ok || kid == "" {
-			return nil, fmt.Errorf("httpauth: token header has no kid")
+			return nil, errMissingKeyID
 		}
 		return v.keys.KeyFor(ctx, kid)
 	})
