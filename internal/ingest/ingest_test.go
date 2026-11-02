@@ -520,6 +520,36 @@ func TestRunSucceedsWhenPreviousPageCleanupFails(t *testing.T) {
 	}
 }
 
+func TestRunRemovesPreviousIndexKeyWhenPreviousFileIsGone(t *testing.T) {
+	h := newHarness(t, []string{"md"}, okLLM())
+	src := h.write(t, "note.md", "old source")
+	oldPage := "sources/old-name.md"
+	if err := h.idx.Add(oldPage, validPage("Old name"), buildMeta(map[string]any{"title": "Old name"}, "Old name")); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.runner.ledger.upsert(ledgerRow{
+		sourcePath: src, contentHash: contentHash([]byte("old source")),
+		sourceDir: h.srcDir, wikiPage: oldPage, status: "success",
+	}); err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+	h.write(t, "note.md", "changed source")
+
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "interactive"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Digested != 1 {
+		t.Fatalf("Digested = %d, want 1", rep.Digested)
+	}
+	if meta, err := h.idx.GetMeta(oldPage); err == nil || meta != nil {
+		t.Fatalf("old index entry meta=%v err=%v, want removed", meta, err)
+	}
+	if meta, err := h.idx.GetMeta("sources/note.md"); err != nil || meta == nil {
+		t.Fatalf("new index entry meta=%v err=%v, want present", meta, err)
+	}
+}
+
 // sameFileStorage reports alias as the same file as target, standing in for
 // normalization-equivalent names on APFS.
 type sameFileStorage struct {

@@ -438,7 +438,7 @@ func (r *Runner) digestOne(parent context.Context, entry scanEntry, hash, schema
 		r.recordFailure(entry, hash, origin, prev, report, "ledger: "+err.Error(), classInfra)
 		return
 	}
-	if previousPage != page && len(existing) > 0 {
+	if previousPage != page {
 		r.removePreviousPage(previousPage, page)
 	}
 	report.Digested++

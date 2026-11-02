@@ -1124,7 +1124,9 @@ of the absolute source path). Re-digestion of the same source path with new cont
 overwrites its page and marks the prior ledger row `superseded`. If re-digestion
 produces a different page path than the previous success row (for example, after
 a slug rule change), the previous page and its index entry are removed after the
-new page is saved. A previous path that names the same file is left alone.
+new page is saved. The index entry is removed even when the previous file is
+already gone. A previous path that names the same file keeps the file and loses
+only its index entry.
 
 A renamed or deleted source file's page and ledger row survive the immediate
 change. On the next ingest run, a pre-scan sweep archives only when the source
