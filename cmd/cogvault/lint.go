@@ -8,7 +8,11 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/teslamint/cogvault/internal/adapter"
+	"github.com/teslamint/cogvault/internal/config"
 	"github.com/teslamint/cogvault/internal/evidence"
+	"github.com/teslamint/cogvault/internal/index"
+	"github.com/teslamint/cogvault/internal/storage"
 	"github.com/teslamint/cogvault/internal/wikilink"
 )
 
@@ -49,12 +53,54 @@ func runLint(cmd *cobra.Command, args []string) error {
 		cmd.PrintErrln("warning: consistency check:", ccErr)
 	}
 
+	issues, err := collectLintIssues(cfg, store, idx, adpt)
+	if err != nil {
+		return err
+	}
+
+	jsonMode, _ := cmd.Flags().GetBool("json")
+	if jsonMode {
+		if issues == nil {
+			issues = []lintIssue{}
+		}
+		if err := json.NewEncoder(cmd.OutOrStdout()).Encode(struct {
+			Issues []lintIssue `json:"issues"`
+		}{Issues: issues}); err != nil {
+			return fmt.Errorf("encode lint issues: %w", err)
+		}
+	} else if len(issues) == 0 {
+		cmd.Println("lint: no issues found")
+	} else {
+		for _, issue := range issues {
+			message := issue.Message
+			if issue.Kind == "evidence" {
+				message = evidence.Diagnostic{
+					ID: issue.ID, Path: issue.Path, ClaimID: issue.ClaimID,
+					Severity: issue.Severity, Message: issue.Message, FixHint: issue.FixHint,
+				}.Text()
+			}
+			cmd.Printf("%-15s %-40s %s\n", issue.Kind, issue.Path, message)
+		}
+		cmd.Printf("\n%d issue(s) found\n", len(issues))
+	}
+
+	if len(issues) > 0 {
+		if strict, _ := cmd.Flags().GetBool("strict"); strict {
+			return errLintIssuesFound
+		}
+	}
+	return nil
+}
+
+// collectLintIssues takes storage as an interface so tests can inject read
+// failures that the adapter's own file read does not see.
+func collectLintIssues(cfg *config.Config, store storage.Storage, idx *index.SQLiteIndex, adpt adapter.Adapter) ([]lintIssue, error) {
 	allPages := map[string]bool{}
 	if err := adpt.Scan(cfg.WikiDir, cfg.AllExcluded(), func(path string) error {
 		allPages[path] = true
 		return nil
 	}); err != nil {
-		return fmt.Errorf("scan wiki: %w", err)
+		return nil, fmt.Errorf("scan wiki: %w", err)
 	}
 
 	var issues []lintIssue
@@ -151,39 +197,7 @@ func runLint(cmd *cobra.Command, args []string) error {
 		}
 		return left.Message < right.Message
 	})
-
-	jsonMode, _ := cmd.Flags().GetBool("json")
-	if jsonMode {
-		if issues == nil {
-			issues = []lintIssue{}
-		}
-		if err := json.NewEncoder(cmd.OutOrStdout()).Encode(struct {
-			Issues []lintIssue `json:"issues"`
-		}{Issues: issues}); err != nil {
-			return fmt.Errorf("encode lint issues: %w", err)
-		}
-	} else if len(issues) == 0 {
-		cmd.Println("lint: no issues found")
-	} else {
-		for _, issue := range issues {
-			message := issue.Message
-			if issue.Kind == "evidence" {
-				message = evidence.Diagnostic{
-					ID: issue.ID, Path: issue.Path, ClaimID: issue.ClaimID,
-					Severity: issue.Severity, Message: issue.Message, FixHint: issue.FixHint,
-				}.Text()
-			}
-			cmd.Printf("%-15s %-40s %s\n", issue.Kind, issue.Path, message)
-		}
-		cmd.Printf("\n%d issue(s) found\n", len(issues))
-	}
-
-	if len(issues) > 0 {
-		if strict, _ := cmd.Flags().GetBool("strict"); strict {
-			return errLintIssuesFound
-		}
-	}
-	return nil
+	return issues, nil
 }
 
 // errLintIssuesFound carries no count: the report on stdout already has it, and

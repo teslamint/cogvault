@@ -19,6 +19,7 @@ import (
 	"github.com/teslamint/cogvault/internal/config"
 	cogmcp "github.com/teslamint/cogvault/internal/mcp"
 	"github.com/teslamint/cogvault/internal/schema"
+	"github.com/teslamint/cogvault/internal/storage"
 	"golang.org/x/sys/unix"
 	"golang.org/x/text/unicode/norm"
 )
@@ -1113,34 +1114,45 @@ func TestLintStrictSucceedsOnCleanWiki(t *testing.T) {
 	}
 }
 
-func TestLintReportsUnreadablePageOnce(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root ignores file permissions")
+// readFailStorage fails Read for one page while the file stays parseable, the
+// case a transient read error produces.
+type readFailStorage struct {
+	storage.Storage
+	page string
+}
+
+func (s readFailStorage) Read(path string) ([]byte, error) {
+	if path == s.page {
+		return nil, errors.New("injected read failure")
 	}
+	return s.Storage.Read(path)
+}
+
+func TestLintReportsReadFailureEvenWhenParseSucceeds(t *testing.T) {
 	configPath, wikiDir, _ := testVault(t)
 	if _, _, err := executeCommand("init", "--config", configPath); err != nil {
 		t.Fatalf("init: %v", err)
 	}
 	writeLintPage(t, wikiDir, "a.md", "A", "see [[b]]")
 	writeLintPage(t, wikiDir, "b.md", "B", "see [[a]]")
-	locked := filepath.Join(wikiDir, "b.md")
-	if err := os.Chmod(locked, 0); err != nil {
+	cfg, store, idx, adpt, err := bootstrap(configPath)
+	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(locked, 0o644) })
+	defer idx.Close()
 
-	stdout, _, err := executeCommand("lint", "--config", configPath, "--strict")
-	if err == nil {
-		t.Fatalf("lint --strict must fail when a page cannot be read (output: %q)", stdout)
+	issues, err := collectLintIssues(cfg, readFailStorage{Storage: store, page: "b.md"}, idx, adpt)
+	if err != nil {
+		t.Fatal(err)
 	}
-	parseLines := 0
-	for _, line := range strings.Split(stdout, "\n") {
-		if fields := strings.Fields(line); len(fields) >= 2 && fields[0] == "parse" && fields[1] == "b.md" {
-			parseLines++
+	var parse []lintIssue
+	for _, issue := range issues {
+		if issue.Path == "b.md" && issue.Kind == "parse" {
+			parse = append(parse, issue)
 		}
 	}
-	if parseLines != 1 {
-		t.Fatalf("parse issues for b.md = %d, want 1 (output: %q)", parseLines, stdout)
+	if len(parse) != 1 || !strings.Contains(parse[0].Message, "injected read failure") {
+		t.Fatalf("issues = %#v, want one parse issue for b.md carrying the read error", issues)
 	}
 }
 
