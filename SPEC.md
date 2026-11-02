@@ -1121,7 +1121,10 @@ leaves the slug empty (e.g. a name with no letters or digits), it falls back to
 `src-<hash8>` (`hash8` = first 8 hex of sha256 of the file content). If the resulting page path is already mapped to a different source path,
 the page becomes `sources/<slug>-<hash8>.md` (here `hash8` = first 8 hex of sha256
 of the absolute source path). Re-digestion of the same source path with new content
-overwrites its page and marks the prior ledger row `superseded`.
+overwrites its page and marks the prior ledger row `superseded`. If re-digestion
+produces a different page path than the previous success row (for example, after
+a slug rule change), the previous page and its index entry are removed after the
+new page is saved. A previous path that names the same file is left alone.
 
 A renamed or deleted source file's page and ledger row survive the immediate
 change. On the next ingest run, a pre-scan sweep archives only when the source

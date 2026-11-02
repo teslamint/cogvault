@@ -413,6 +413,112 @@ func TestRunSupersedeOnContentChange(t *testing.T) {
 		t.Fatal("sources/note.md missing after overwrite")
 	}
 }
+func TestRunRemovesPreviousPageWhenPathChanges(t *testing.T) {
+	h := newHarness(t, []string{"md"}, okLLM())
+	src := h.write(t, "note.md", "old source")
+	oldPage := "sources/old-name.md"
+	if err := h.store.Write(oldPage, []byte(validPage("Old name"))); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.idx.Add(oldPage, validPage("Old name"), buildMeta(map[string]any{"title": "Old name"}, "Old name")); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.runner.ledger.upsert(ledgerRow{
+		sourcePath: src, contentHash: contentHash([]byte("old source")),
+		sourceDir: h.srcDir, wikiPage: oldPage, status: "success",
+	}); err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+	h.write(t, "note.md", "changed source")
+
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "interactive"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Digested != 1 {
+		t.Fatalf("Digested = %d, want 1", rep.Digested)
+	}
+	if exists, err := h.store.Exists(oldPage); err != nil || exists {
+		t.Fatalf("old page exists=%v err=%v, want absent", exists, err)
+	}
+	if meta, err := h.idx.GetMeta(oldPage); err == nil || meta != nil {
+		t.Fatalf("old index entry meta=%v err=%v, want absent", meta, err)
+	}
+	newRow, found, err := h.runner.ledger.lookup(src, contentHash([]byte("changed source")))
+	if err != nil || !found || newRow.status != "success" || newRow.wikiPage != "sources/note.md" {
+		t.Fatalf("new ledger row = %+v found=%v err=%v, want success for sources/note.md", newRow, found, err)
+	}
+	if exists, err := h.store.Exists(newRow.wikiPage); err != nil || !exists {
+		t.Fatalf("new page exists=%v err=%v, want present", exists, err)
+	}
+}
+
+func TestRunKeepsPreviousPageWhenPathIsUnchanged(t *testing.T) {
+	h := newHarness(t, []string{"md"}, okLLM())
+	src := h.write(t, "note.md", "old source")
+	page := "sources/note.md"
+	oldContent := []byte(validPage("Old name"))
+	if err := h.store.Write(page, oldContent); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.idx.Add(page, string(oldContent), buildMeta(map[string]any{"title": "Old name"}, "Old name")); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.runner.ledger.upsert(ledgerRow{
+		sourcePath: src, contentHash: contentHash([]byte("old source")),
+		sourceDir: h.srcDir, wikiPage: page, status: "success",
+	}); err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+	h.write(t, "note.md", "changed source")
+
+	if _, err := h.runner.Run(context.Background(), RunOptions{Origin: "interactive"}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if exists, err := h.store.Exists(page); err != nil || !exists {
+		t.Fatalf("page exists=%v err=%v, want present", exists, err)
+	}
+	if meta, err := h.idx.GetMeta(page); err != nil || meta == nil {
+		t.Fatalf("index entry meta=%v err=%v, want present", meta, err)
+	}
+}
+
+type deleteFailStorage struct{ storage.Storage }
+
+func (s deleteFailStorage) Delete(string) error { return errors.New("delete failed") }
+
+func TestRunSucceedsWhenPreviousPageCleanupFails(t *testing.T) {
+	h := newHarness(t, []string{"md"}, okLLM())
+	src := h.write(t, "note.md", "old source")
+	oldPage := "sources/old-name.md"
+	oldContent := []byte(validPage("Old name"))
+	if err := h.store.Write(oldPage, oldContent); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.idx.Add(oldPage, string(oldContent), buildMeta(map[string]any{"title": "Old name"}, "Old name")); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.runner.ledger.upsert(ledgerRow{
+		sourcePath: src, contentHash: contentHash([]byte("old source")),
+		sourceDir: h.srcDir, wikiPage: oldPage, status: "success",
+	}); err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+	h.write(t, "note.md", "changed source")
+	h.runner.store = deleteFailStorage{h.store}
+
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "interactive"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Digested != 1 {
+		t.Fatalf("Digested = %d, want 1", rep.Digested)
+	}
+	newRow, found, err := h.runner.ledger.lookup(src, contentHash([]byte("changed source")))
+	if err != nil || !found || newRow.status != "success" || newRow.wikiPage != "sources/note.md" {
+		t.Fatalf("new ledger row = %+v found=%v err=%v, want success for sources/note.md", newRow, found, err)
+	}
+}
 
 func TestRunSlugCollisionDifferentSource(t *testing.T) {
 	m := okLLM()
