@@ -1337,7 +1337,9 @@ the record are ignored.
 This record is self-reported structured evidence, not a fact-check or legal
 judgment. `wiki_write` reports findings as non-blocking warnings (§8.3), lint
 reports diagnostics (§9.12), and search returns a bounded summary (§8.5).
-Search does not resolve refs.
+Search does not resolve refs. Re-digesting a source page carries the previous
+page's `research_evidence` record into the new page unchanged; ingest never
+writes or revalidates it, so claims about the old text may need review.
 
 ---
 

@@ -18,6 +18,7 @@ import (
 
 	"github.com/teslamint/cogvault/internal/adapter/markdown"
 	"github.com/teslamint/cogvault/internal/config"
+	"github.com/teslamint/cogvault/internal/evidence"
 	"github.com/teslamint/cogvault/internal/index"
 	"github.com/teslamint/cogvault/internal/llm"
 	"github.com/teslamint/cogvault/internal/storage"
@@ -547,6 +548,35 @@ func TestRunRemovesPreviousIndexKeyWhenPreviousFileIsGone(t *testing.T) {
 	}
 	if meta, err := h.idx.GetMeta("sources/note.md"); err != nil || meta == nil {
 		t.Fatalf("new index entry meta=%v err=%v, want present", meta, err)
+	}
+}
+
+func TestRunKeepsResearchEvidenceOnRedigest(t *testing.T) {
+	h := newHarness(t, []string{"md"}, okLLM())
+	src := h.write(t, "note.md", "old source")
+	page := "sources/note.md"
+	evidenceRecord := "research_evidence:\n  version: 1\n  claims:\n    - id: c1\n      text: claim\n      kind: empirical\n      sources:\n        - ref: sources/note.md\n"
+	seedPage(t, h, page, "---\ntitle: Old\ntype: source\n"+evidenceRecord+"---\n\nold body\n")
+	if err := h.runner.ledger.upsert(ledgerRow{
+		sourcePath: src, contentHash: contentHash([]byte("old source")),
+		sourceDir: h.srcDir, wikiPage: page, status: "success",
+	}); err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+	h.write(t, "note.md", "changed source")
+
+	if _, err := h.runner.Run(context.Background(), RunOptions{Origin: "interactive"}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	saved, err := h.store.Read(page)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(saved), "old body") {
+		t.Fatalf("page was not regenerated: %q", saved)
+	}
+	if got := evidence.Summarize(saved); got.Status != "recorded" || got.ClaimCount != 1 || got.Claims[0].ID != "c1" {
+		t.Fatalf("research_evidence after re-digest = %#v, want the previous record", got)
 	}
 }
 
