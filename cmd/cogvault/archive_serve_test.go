@@ -443,7 +443,20 @@ func runSIGHUPChild(t *testing.T) {
 	}
 	errCh := make(chan error, 1)
 	go func() { errCh <- serveListener(context.Background(), ln, http.NotFoundHandler(), onReload) }()
-	waitForServing(t, ln.Addr().String())
+	// A dial succeeds on the open listener before Serve starts (and before
+	// SIGHUP is trapped), so wait for an HTTP response instead: Serve runs
+	// only after signal.Notify.
+	client := &http.Client{Timeout: time.Second}
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		resp, err := client.Get("http://" + ln.Addr().String() + "/")
+		if err == nil {
+			resp.Body.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("child never served: %v", err)
+		}
+	}
 	fmt.Println("child serving")
 	err = <-errCh
 	fmt.Printf("child returned err=%v finished=%v\n", err, finished.Load())
