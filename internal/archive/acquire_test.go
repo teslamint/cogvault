@@ -224,8 +224,11 @@ func TestAcquireLimitsSizeTimeAndRedirects(t *testing.T) {
 			w.WriteHeader(http.StatusForbidden)
 		case "/missing":
 			w.WriteHeader(http.StatusNotFound)
+		case "/loop":
+			// A fixed self-redirect: the client must stop at its hop limit.
+			http.Redirect(w, r, "/loop", http.StatusFound)
 		default:
-			http.Redirect(w, r, r.URL.Path+"x", http.StatusFound)
+			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
 	p := "http://public.test:" + port(t, f)
