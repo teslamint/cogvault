@@ -159,6 +159,16 @@ auth:                   # HTTP/SSE transport authorization (§8.1, §9.3). Ignor
     jwks_ttl_seconds: int    # JWKS cache TTL in seconds. Default: 900.
 git:                     # opt-in wiki auto-commit safety net (0024). Off by default.
   auto_commit: string      # "off" (default), "write", or "write+ingest".
+archive:                 # experimental research archive (§9.16, ADR 0027 proposed). Omitted = no archive.
+  root: string             # absolute. Must not overlap wiki_dir, any sources[].path, or contain db_path.
+  capture_enabled: bool    # default false. Exposes the archive MCP tools (§9.16). The only key a reload changes.
+  deployment:              # operator-supplied attestations; all required to enable capture (§9.16).
+    backup_target: string
+    backup_schedule: string
+    restore_test_report: string   # absolute path of an `archive restore-test` report.
+    permissions_owner: string
+    handoff_mount: string
+    deletion_log_replica: string  # absolute path outside root: off-NAS copy of the deletion log.
 ```
 
 `auth.max_body_mb`, `auth.max_stream_seconds`, and `auth.oauth.jwks_ttl_seconds`
@@ -475,6 +485,9 @@ Source {
 
 - Transport: `stdio` (default), `sse`, or `http` (Streamable HTTP), selected
   via `cogvault serve --transport` (§9.3). Server name `cogvault`.
+- The `wiki_*` tools below are always registered. The experimental
+  `archive_*` tools are registered only while archive capture is enabled
+  (§9.16); they never act on `wiki_dir`.
 - Authorization (`sse`/`http` only — `stdio` has no network boundary and is
   never gated): `auth.mode` (§3.1) selects one of three modes. `none` requires
   a loopback `--addr` and applies no credential check. `bearer` requires an
@@ -747,6 +760,11 @@ cogvault serve [--config <path>] [--transport stdio|sse|http] [--addr <host:port
   advertised resource (`<public-url><endpoint-path>`).
 - **Shutdown**: `sse`/`http` run until SIGINT/SIGTERM, then drain in-flight
   requests with a 10-second grace period instead of dying with the process.
+- **Archive reload** (only when `archive.root` is set; `sse`/`http` only):
+  SIGHUP reloads `archive.capture_enabled` (§9.16) and nothing else; the
+  process keeps serving. Without `archive.root`, SIGHUP is not trapped. On
+  shutdown, a running reload's drain wait is canceled and serve waits for the
+  reload to finish before it closes the archive.
 - See `docs/deployment/remote-mcp.md` for the full remote setup (tunneling,
   identity-provider prerequisites, security posture).
 
@@ -1139,6 +1157,303 @@ The isolated example workflow is documented in
 `docs/usage-terms.md`. All example terms are fictional validation settings,
 not evidence for rights to real material.
 
+### 9.16 archive (experimental prototype)
+
+```
+# archive host (reads no config file)
+cogvault archive --root <dir> capture --file <path> [--url <http(s) URL>]
+    [--supplier <s>] [--title <s>] [--media-type <s>]
+    [--completeness verified|unknown|incomplete] [--basis <s>] [--key <s>]
+cogvault archive --root <dir> import-report --file <path> [--supplier <s>]
+    [--title <s>] [--cite <capture-id|http(s) URL>]... [--key <s>]
+cogvault archive --root <dir> summary --file <path> [--of <capture-id>] [--url <URL>]
+    [--supplier <s>] [--title <s>] [--key <s>]
+cogvault archive --root <dir> attempt <capture-id> --cause <c> --tried <s>
+    --result acquired|partial|failed|human_action_required [--result-capture <id>]
+    [--gap <s>] [--next <s>]
+cogvault archive --root <dir> reassess <capture-id> --basis <s>
+cogvault archive --root <dir> import-fetched --file <cogvault fetch .md> [--key <s>]
+cogvault archive --root <dir> acquire <public http(s) URL>
+cogvault archive --root <dir> acquire --recover <capture-id> [--cause <c>]
+cogvault archive --root <dir> extract <capture-id>
+cogvault archive --root <dir> status [<capture-id>] [--json]
+cogvault archive --root <dir> handoff [--types pdf,md,markdown] [--json]
+cogvault archive --root <dir> collect-receipts
+cogvault archive --root <dir> page-links <wiki-page> [--json]
+cogvault archive --root <dir> impact <capture-or-object-id>
+cogvault archive --root <dir> quarantine <id> --impact <digest>
+cogvault archive --root <dir> unquarantine <id>
+cogvault archive --root <dir> purge <object-id> --confirm <object-id>
+cogvault archive --root <dir> backup --to <new dir>
+cogvault archive --root <dir> restore-test --backup <dir> --report <new file>
+    [--deletion-log <path>]... [--scratch <dir>]
+# ingest host (reads --config; never opens the registry)
+cogvault archive --root <share> --config <path> pickup --dest <source dir> [--json]
+cogvault archive --root <share> --config <path> receipts --dest <source dir>
+```
+
+An implemented prototype of the archive proposed in ADR 0027. That ADR is
+**proposed, not accepted**, and nothing here is deployed: these commands and
+the archive MCP tools may change or be removed. The user approved policy
+defaults (ADR 0027) shape the behavior below; deployment settings are empty
+and production capture stays blocked (see *Activation*). There is no
+automatic or scheduled re-acquisition, robots or terms handling, charset
+decoding, release of held material without a verified judgment, backup
+scheduling, or backup expiry.
+
+- `--root` is required. Layout: `objects/sha256/<hex>` (original bytes),
+  `objects/tmp/` (staging), `registry.db` (SQLite), `outbox/` (hand-off
+  manifests), `receipts/` (ingest-host receipts), `quarantine/`,
+  `deletions/log.jsonl`, `archive.lock`. At open, the root itself, every
+  managed directory, and `registry.db` with its `-wal`, `-shm`, and
+  `-journal` files are refused if they exist as symlinks or other
+  non-regular entries. Symlinks in the root's ancestors are trusted. The
+  check runs at open only: another same-user process that swaps entries
+  inside the root while a command runs is out of scope. Use a local disk;
+  the registry must not live on SMB. Registry schema 4; schema-1, -2, and
+  -3 registries are migrated in place, and capture IDs are unchanged.
+- **Locking.** Captures, attempts, hand-offs, and receipt collection share
+  `archive.lock` (flock, one descriptor per operation, so it orders
+  processes too); backups and deletion actions take it exclusively.
+- **Objects.** Input is staged under `objects/tmp`, hashed, synced, made
+  read-only, and hard-linked to `objects/sha256/<hex>`. A link never replaces
+  a file. Whenever a request reuses an existing object, including an identical
+  repeated request that returns `existing`, the object is opened without
+  following symlinks and its size and SHA-256 are checked; a mismatch is an
+  integrity error and the stored file is left unchanged. Input over 32 MiB is
+  rejected, never truncated. Object ID is `sha256:<hex>`. Bytes of a
+  quarantined or purged object are refused (`object is quarantined or
+  purged`) until an operator restores them.
+- **Captures** hold provenance separately from bytes: kind (`source`,
+  `report`, or `summary`), object ID, base file name (never a host path),
+  URL, supplier, title, media type (sniffed when omitted), acquisition
+  (`acquired`, or `partial` when completeness is `incomplete`), completeness
+  (`verified`, `unknown` default, `incomplete`), basis (required for
+  `verified`), and recording time. URLs must be absolute `http`/`https`.
+- **Identity and idempotency.** The request key is `--key`, or by default a
+  digest of the canonical request (object ID plus all provenance fields and
+  cites). The capture ID is `cap_` plus 32 hex characters derived from the key,
+  so it is stable. A repeated key with the same request prints `existing`;
+  with a different request it fails with `request key already used with
+  different content`. The same bytes with different provenance create a new
+  capture that shares one object.
+- **Reports** store the report bytes and their cites in order. A capture-ID
+  cite must name an existing `source` capture of an active object. A URL cite
+  records the citation only: it creates no capture and claims no original.
+- **Summaries** are captures of kind `summary` with acquisition and
+  completeness `not_applicable`. They name the summarized source capture
+  (`--of`), a URL, or both. A summary never changes the summarized capture
+  and is never handed off.
+- **Recovery attempts** are append-only: cause, what was tried, result, the
+  new source capture for `acquired`/`partial` (required then, forbidden
+  otherwise), remaining gap, next action. The earlier capture is never
+  changed; the recovered capture keeps its own completeness.
+- **Reassess** (`reassess`, operator only): for an `acquired` source capture
+  whose completeness is `unknown`, adds a new source capture of the same
+  bytes with the same name, URL, title, media type, and supplier,
+  completeness `verified`, and `--basis`, and links it by an attempt (cause
+  `other`; the attempt text says the basis is the operator's statement, not
+  an independent check by cogvault). The held capture is never changed.
+  `partial`/`incomplete` bytes are refused: a complete original must be
+  captured as new bytes and linked with `attempt`. Repeating the same
+  reassessment returns the same capture, links it if an earlier run stopped
+  before linking, and never links twice. There is no release of
+  `unknown`/`partial` bytes without a verified judgment (ADR 0027 open
+  question 5).
+- **Import of a fetch file** (`import-fetched`): reads an existing
+  `cogvault fetch` `.md` file (never fetches). The frontmatter may hold only
+  `source_url`, `fetched_at`, and `usage_terms`; the split is accepted only
+  if re-encoding the frontmatter and body gives back the file byte for byte.
+  The body becomes a source capture named `<stem>.response` (fetch keeps no
+  media type and stores HTML as `.md`, so the format is unknown and the
+  capture is never handed off, even after `reassess`), completeness
+  `unknown`, URL and fetch date as written in the file (not an independent
+  check of the HTTP exchange), supplier `imported cogvault fetch file (URL
+  and date as written in the file)`. The fetch file's bytes are stored as
+  their own object and recorded as `derived` from that capture, so the file
+  can be reproduced if its copy moves. Deletion actions on the body's object
+  apply to its derived objects too. All refusals (fields, size, deleted
+  objects) happen before the body is stored; if recording the derivation
+  then fails, the body capture stays without it, the error says so, and the
+  same import repeated adds it once. The file itself is not changed.
+- **Hand-off** (`handoff`): writes `outbox/<capture_id>.json` (version,
+  capture ID, object ID, size, extension; no host path) for each source
+  capture whose acquisition is `acquired`, completeness `verified`, and
+  extension one of `--types` (default `pdf,md,markdown`; `txt` only for an
+  openai ingest host). Others are reported `held` with a reason; a held
+  capture lists `recovered_as` captures recorded by attempts. The first
+  handed-off capture of an object fixes the object's extension; later
+  captures of the same bytes reuse it, so one object has one source path.
+  Manifests are never replaced.
+- **Pickup** (ingest host): `--dest` must be a configured `sources[].path`.
+  Accepted extensions are that source's types the backend digests
+  (`openai`: pdf, md, markdown, txt; `claudecode`/`ollama`: pdf, md,
+  markdown); other manifests are reported `refused`. Each object is copied to
+  `<dest>/<hex>.<ext>` with size and hash checked; an existing file is kept
+  if it matches and is an integrity error otherwise. Manifests with unknown
+  fields, trailing data, or one object under two extensions are rejected.
+  Pickup then adds each copied or matching capture to the **capture map**
+  `<dest>/.cogvault-archive-captures.json` (`version` 1; `entries` keyed by
+  copy file name: `object_id`, sorted `capture_ids`), replaced atomically.
+  IDs only accumulate; an entry for other bytes is a conflict. The map is
+  trusted as far as the source directory is: whoever can write source files
+  can write it.
+- **Capture IDs on source pages** (ingest, §10): on every digest ingest
+  removes `archive_capture_ids` and `archive_object_id` from the generated
+  frontmatter, then sets them from the capture map only if the map entry for
+  the source file names an object ID equal to `sha256:` plus the digested
+  bytes' hash. A missing, unreadable, or mismatched map sets nothing (an
+  unreadable map is logged). These keys are a snapshot of the map when the
+  page was digested, not the full list: ingest never rewrites a page for an
+  unchanged success row, so a capture handed off later is not added to it.
+- **Page links** (`page_links` in the registry, added in schema version 3;
+  version 4 applies the receipt-order rule below to links already
+  recorded, by relinking every collected receipt once on open): the
+  archive's own record of which captures belong to which wiki source page,
+  and the full list for a page (`page-links <wiki-page>`). A link is
+  recorded only from a collected receipt whose ledger status is `success`
+  with a wiki page; it holds the capture ID, object ID (content hash), the
+  exact wiki-relative `.md` page path from the ledger, the basis receipt
+  name, the ledger's `digested_at`, and the observation time. The ingest
+  host's ledger stays the authority for the ingest result; the archive is
+  the authority for the capture-to-page association. Each capture gets its
+  own link, so a later capture of the same bytes keeps its own provenance
+  and is linked without changing the page (a user edit stays). Links are
+  append-only: the basis of a (capture, page) link is the linking receipt
+  with the lowest receipt number, whatever order receipts are collected or
+  backfilled in; `current` means the capture's latest receipt (highest
+  number) still observes `success` with this page. A later receipt that
+  observes another status or page makes the link not `current` and may add
+  another link, never removing one. A
+  receipt's object must equal its capture's object. Captures of a
+  quarantined or purged object are hidden. Links are in the registry, so
+  backups carry them; a version 2 registry (for example a restored older
+  backup) gains links for every collected receipt on open. A link does not
+  show that the page exists now, describes this edition, or supports any
+  claim. A moved page is not followed: the link keeps the ledger's path.
+- **Acquire** (`acquire`, operator only, never MCP): downloads one URL with
+  `GET` and stores the body exactly as sent as a new source capture
+  (completeness `unknown`, supplier `cogvault archive acquire`) plus a
+  record of the requested and final URL, each hop's status, and selected
+  response headers. Refused before any connection: non-`http(s)` URLs,
+  userinfo, any query (including a bare `?`), and any fragment, on the first
+  URL and on every redirect (at most 5). Every DNS answer must be a public
+  address (no loopback, private, link-local, shared, documentation,
+  benchmark, multicast, reserved, NAT64, 6to4, Teredo, or cloud metadata
+  ranges); the connection goes to the checked address, so a second lookup
+  cannot redirect it. No proxy, cookie jar, credentials, or compression
+  request (`Accept-Encoding: identity`). Only status 200 is stored;
+  401/403/407/451 are reported as access-restricted. Bodies over 32 MiB or a
+  Content-Length mismatch are rejected; the default time bound is 60 s. A
+  body with a content coding is stored as sent with a `.bin` name. Errors
+  and records never contain a refused URL. `--recover` downloads an existing
+  capture's URL again and records an attempt (`acquired` with the new
+  capture, `human_action_required` for access-restricted, `failed`
+  otherwise); the earlier capture is not changed.
+- **Extract** (`extract`): `html-text/1`, standard library only, runs no
+  scripts and loads nothing. Input must be valid UTF-8, sniff as text,
+  carry no content coding, and be HTML by media type, sniff, or extension.
+  `script`, `style`, `template`, `noscript`, `iframe`, `object`, `svg`,
+  `math`, `head` content except `title`, and attributes are dropped; block
+  elements become line breaks, headings `#`, list items `- `. The text is
+  stored as its own object with the extractor version and limits; a parse
+  failure is recorded and returned, never guessed. The original is not
+  changed, extraction is per object and repeatable, and derived text is
+  never handed off. Extraction holds the shared lock from the source check
+  to the commit, so it never records output for a quarantined or purged
+  source; deletion actions apply to extracted text with its source.
+- **Receipts** (ingest host): opens the ingest ledger read-only
+  (`mode=ro&immutable=1`) under the existing `ingest.lock`, which it never
+  creates; refuses a missing DB, a missing ledger table, a missing lock file,
+  or a leftover `-wal`. For each picked-up object with a ledger row it writes
+  `receipts/<capture_id>.<n>.json` when the observation changed; `n` is the
+  capture's next receipt number. **Receipt order** is that number and
+  nothing else: `observed_at` comes from the ingest host's clock, which can
+  go backwards, and file names sort `.10` before `.2`. The latest receipt
+  of a capture is the one with the highest number. No ledger
+  row, no receipt. `collect-receipts` (archive host) stores each receipt
+  unchanged, in receipt order per capture, and in the same transaction
+  records the page link it observes (see *Page links*); a changed collected
+  receipt or one for a capture never handed off is refused.
+- **status** shows the capture, `same bytes`, `cited by`, summaries,
+  attempts, derived files, a download record, extractions, a report's
+  numbered citations, and the ingest
+  view: `held` (reason, `recovered_as`), `not_handed_off`, `awaiting_ingest`
+  (no receipt; not a success or failure claim), or `observed` (the latest
+  receipt's ledger status and time, labeled as an ingest-host observation).
+  `ref candidate` shows the observed page only when the ledger status is
+  `success`; the CLI does not check that the page exists, so it is a ref
+  only once that wiki page exists. `page link` lines list
+  the capture's page links with their basis receipt and whether they are
+  current; the CLI does not check that the page exists.
+- **Deletion** (operator only, never MCP): `impact` lists dependents
+  (captures, reports, summaries, attempts, manifests, ingest-host copies,
+  source pages) with a digest. `quarantine` needs the current digest, moves
+  the object to `quarantine/`, removes its manifests, and hides its captures
+  from status, list, hand-off, and MCP. `unquarantine` restores it. `purge`
+  needs `--confirm` with the object ID and at least 30 days in quarantine;
+  nothing purges automatically. Purge removes this archive's bytes only, not
+  backups or ingest-host copies. Every action first appends a record (seq,
+  action, object ID, capture IDs, time; no content) to `deletions/log.jsonl`;
+  open re-applies the log, ordered by seq, never by time.
+- **Backup** (`backup`): under the exclusive lock, `VACUUM INTO` copies the
+  registry, then objects, quarantine, receipts, and the deletion log are
+  copied and every object the registry copy references is checked by size
+  and hash before `backup.json` (all files and hashes) is written.
+  `restore-test` restores into a scratch directory, merges the backup's log
+  with each `--deletion-log` (a log must extend the other; diverging logs
+  fail), re-applies deletions, re-hashes active objects, and writes a report
+  that lists the logs used (path, hash, record count). Without
+  `--deletion-log` it uses only this root's live log and says so; such a
+  report does not show recovery after the archive host is lost.
+- **Activation.** `serve` enables capture only if `archive.deployment` passes
+  a presence-and-file check: every setting set; the restore test report
+  passed, tested a backup under `backup_target`, and used
+  `deletion_log_replica`; and the replica holds every record of the live
+  log right now. This checks operator-supplied attestations only. It does not
+  verify that the target or replica is off the NAS, that backups run daily,
+  that the replica stays current, or that permissions and mounts are right;
+  production enable needs a separate human review. No config key bypasses the
+  check. A blocked activation at startup stops `serve`; on reload it is
+  rejected.
+- **MCP tools** (registered only while capture is enabled): `archive_capture_text`,
+  `archive_capture_report`, `archive_capture_summary`, `archive_status`,
+  `archive_page_links`. Text
+  up to 1 MiB (rejected, never truncated); `name` must be a base file name
+  ending in `.md`, `.markdown`, or `.txt`; completeness `unknown` or
+  `incomplete` only (only an operator records `verified`). Undeclared
+  arguments are refused. No tool deletes, overwrites, takes a host path, or
+  reloads. `archive_status` returns a projection without host paths, plus
+  live checks of the source page: `search_visible` (index),
+  `evidence_ref_path_exists` (a file exists at the observed page path, so
+  a ref to it passes the EVID004 path check; this does not show the page
+  describes this capture or edition, or support any claim), and
+  `page_frontmatter_lists_capture` (the page frontmatter lists this capture
+  ID and object ID; a digest-time snapshot, editable through `wiki_write`,
+  not the full list and not an independent check). In the MCP ingest view,
+  `wiki_page` is the observed ledger path, unchecked; `ingest.evidence_ref`
+  is set only when the observation is `success` and a file exists at that
+  path now, the same rule as a link's `evidence_ref`. It also returns the
+  download record, extractions, and `page_links`. `archive_page_links`
+  (`wiki_page`: a wiki-relative `.md` path) lists every capture linked to
+  one page. Each link view adds a live `page_exists`, and `evidence_ref` is
+  set only when the link is current and the page exists now; a moved or
+  deleted page is never offered as a ref.
+  Internal errors
+  return a fixed message. The existing `auth.mode` checks apply unchanged.
+- **Reload** (SIGHUP, `sse`/`http`): re-reads and fully validates the config,
+  then applies only `capture_enabled`. A change to `wiki_dir`, `db_path`,
+  `auth`, `archive.root`, or `archive.deployment` rejects the reload; other
+  changed keys are logged as not applied until a restart. Disable closes the
+  gate (new calls fail at once), removes the tools, and waits up to 30 s for
+  admitted calls; enable re-runs activation, opens the gate, and adds the
+  tools. Every tool checks the gate itself: `tools/list_changed` is sent, but
+  a client need not refresh, and a call looked up before removal still
+  reaches the gate. Reload logs carry a fixed code and key names, never
+  values. `stdio` has no reload.
+- Provenance records what was supplied; it is not a fact check. Capture IDs
+  are not `research_evidence` refs; refs remain wiki `.md` paths (§11.1).
+
 ---
 
 ## 10. Ingest pipeline & ledger
@@ -1157,6 +1472,8 @@ scan source dir (top level only, Lstat: skip dirs/symlinks)
       → otherwise select a safe diagnostic: eligible result → stderr → plain stdout → process error
   → validate page frontmatter from bytes (non-empty map + title)
   → set `ingested_at` to the run's local date (YYYY-MM-DD), replacing any model value
+  → drop model `archive_capture_ids`/`archive_object_id`; set them from the archive
+    capture map only when its object ID matches these bytes (§9.16, experimental)
   → replace each non-embed `[[link]]` that resolves to no wiki page (§9.12; the
     page being written counts) with its display text; a wiki scan error is an infra failure
   → collision-aware page path under sources/
@@ -1441,6 +1758,100 @@ sends `reasoning_effort: "none"` and `max_tokens: 4096`; a response with
   and empty-array encoding; `--strict` changes only exit status.
 - MCP initialize appends server-owned evidence guidance after schema text, with
   the schema rune cap independent of that appended guidance.
+
+### Archive prototype (§9.16)
+- Object bytes equal input, read-only, one file per hash; no staging files
+  remain after success or rejection; oversize input and non-http(s) URLs are
+  rejected without storing.
+- Identical requests return the same stable capture ID (also after reopen); a
+  reused key with different content conflicts without changing the archive;
+  same bytes with different provenance share one object as separate captures.
+- `verified` requires a basis; `incomplete` gives `partial` acquisition.
+- A tampered existing object is an integrity error for both a new request and
+  an identical repeated request, and is not overwritten; a symlinked root,
+  `objects`, `registry.db`, `-wal`, `-shm`, or `-journal` and a relative root
+  are refused without touching the symlink target.
+- Report cites keep order; URL cites create no capture; unknown or report
+  capture cites are rejected; status shows `same bytes` and `cited by`.
+- Schema-1 registries migrate with capture IDs unchanged. A summary never
+  changes its source and is never handed off; recovery attempts append and
+  link a new capture without changing the old one.
+- Hand-off holds `unknown`/`incomplete`/`partial` and non-hand-off types;
+  same bytes under different names get one extension and one source path;
+  pickup refuses types the ingest backend does not digest, never replaces a
+  file, and rejects manifests with unknown fields, trailing JSON, or two
+  extensions for one object. The ledger reader creates no file (no `-wal`,
+  `-shm`, or `ingest.lock`) and refuses missing DB/table/lock and a leftover
+  `-wal`. Receipts are written only for ledger rows; an evidence ref appears
+  only for `success`; changed or unmatched receipts are refused.
+- Quarantine needs the current impact digest and hides the capture
+  everywhere; re-capturing its bytes fails; purge needs the confirmation and
+  30 days; a crash between log and apply is repaired at open; deletion order
+  follows seq even when the clock moves backward; diverging logs fail.
+- Backups under concurrent writes from a second handle always hold every
+  referenced object; a missing referenced object fails the backup; a tampered
+  backup fails verification; a restore with the newer log brings back no
+  deleted object.
+- MCP archive tools refuse while the gate is closed, including a handler
+  looked up before removal; reject paths, undeclared arguments, `verified`,
+  and text over 1 MiB without storing; expose no host path or internal error
+  text; list no admin, delete, or reload tool; keep bearer 401s.
+- Reload toggles only `capture_enabled`; invalid config, restart-only
+  changes, and blocked activation keep the state and log no values; disable
+  drains admitted calls and stops waiting on shutdown; SIGHUP reloads without
+  stopping the server, and serve returns only after the reload worker ends;
+  enable sends `tools/list_changed`. `serve` with capture enabled and no
+  deployment settings refuses to start on loopback with bearer auth.
+- Reassess adds a linked verified capture with the held capture's
+  provenance, never changes the held capture, refuses incomplete, verified,
+  and non-source captures, and links once even after an interrupted run.
+- A fetch file splits only when it re-encodes byte for byte; the body is
+  held as `.response` even after reassessment; the fetch file is kept as a
+  derived object and is quarantined and purged with the body; an oversize
+  derived file is refused before the body is stored; a partial import is
+  completed by repeating it.
+- A source page named by a receipt: a ref to it warns EVID004 until the page
+  exists; `evidence_ref_path_exists` follows the file's presence only;
+  `page_frontmatter_lists_capture` is true only when the page lists both
+  this capture ID and its object ID; the page link stays when the
+  frontmatter does not list it, and a deleted page keeps the link with
+  `page_exists` false and no `evidence_ref`; `ingest.evidence_ref` is
+  omitted until the page exists while `ingest.wiki_page` keeps the path.
+- Pickup records captures in the capture map, rejects repeated or malformed
+  IDs and symlinked maps, and a lookup matches only the same name and bytes.
+  Real ingest writes the map's IDs on the page, drops model-written archive
+  keys, and sets none for changed bytes. A later capture of the same bytes
+  is linked through its own receipt after the next ingest without changing
+  the page (a user edit made meanwhile stays) and the frontmatter snapshot
+  still lists only the first capture.
+- Page links: each capture of the same bytes has its own link and basis
+  receipt; the first link and basis stay unchanged; re-collection and
+  reopening add nothing; other bytes never join another page's list; a
+  failed observation links nothing; a later failure makes a link not
+  current and a re-digest to another page adds a link; forged receipts,
+  object mismatches, and non-wiki page paths are refused; quarantined
+  captures are hidden; links survive backup and restore, a receipt
+  collected after restore links there, and a schema-2 registry is
+  backfilled with the same basis on open.
+- Receipt order: receipts `.1`, `.2`, `.10` collected in one run give
+  basis `.2`; a newer receipt whose `observed_at` is earlier (clock went
+  back) is still the latest; linking `.10` before `.2` still gives basis
+  `.2`; a schema-2 backfill gives the same basis and latest state; a
+  schema-3 registry holding a `.10` basis with `.2` already collected
+  (which re-collection does not change) gets basis `.2` on open.
+- Acquire: public-address table; loopback, private, mixed, metadata,
+  mapped, and literal hosts refused with no unchecked dial; the dial goes to
+  the checked address when DNS rebinds; queries, bare `?`, fragments,
+  userinfo, and query redirects refused without echoing the secret; no
+  cookie or credential is sent; size, time, redirect, 403, and 404 limits
+  store nothing; re-acquisition records attempts and never changes the old
+  capture; a content-coded body is stored as `.bin` and never extracted.
+- Extract drops script, style, frames, SVG, and attributes, keeps headings
+  and lists, refuses non-UTF-8 and non-HTML input, records failures, never
+  changes the original, refuses a quarantined source, quarantines extracted
+  text with its source, and leaves no active text for a quarantined source
+  under concurrent extraction and quarantine; a derivation is not recorded
+  for a body quarantined after its capture.
 
 ### CLI
 - `init` two-step (first run scaffolds + guidance; second run builds wiki/schema/

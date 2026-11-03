@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -77,6 +78,15 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 
 	mcpSrv := cogmcp.NewServer(cfg.WikiDir, cfg, store, idx, adpt)
+	archiveRT, err := newArchiveRuntime(cfg, configPath, mcpSrv, idx, store, productionActivation, slog.Default())
+	if err != nil {
+		return err
+	}
+	var onReload func(context.Context)
+	if archiveRT != nil {
+		defer archiveRT.Close()
+		onReload = func(ctx context.Context) { _ = archiveRT.Reload(ctx) }
+	}
 
 	transport, _ := cmd.Flags().GetString("transport")
 	addr, _ := cmd.Flags().GetString("addr")
@@ -85,6 +95,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 	switch transport {
 	case "stdio":
+		// stdio has no reload: whether it should is ADR 0027 open question 8.
 		return server.ServeStdio(mcpSrv)
 	case "sse", "http":
 		handler, err := buildServeHandler(cfg, mcpSrv, serveFlags{
@@ -97,7 +108,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		cmd.Printf("%s server listening on %s\n", transport, addr)
-		return serveUntilSignal(cmd.Context(), addr, handler)
+		return serveUntilSignal(cmd.Context(), addr, handler, onReload)
 	default:
 		return fmt.Errorf("--transport: %q not supported; use \"stdio\", \"sse\", or \"http\"", transport)
 	}
@@ -110,38 +121,75 @@ func runServe(cmd *cobra.Command, args []string) error {
 // mid-response. The listener is created up front so a bind failure surfaces
 // before the signal handling starts, and tests can inject their own via
 // serveListener.
-func serveUntilSignal(ctx context.Context, addr string, handler http.Handler) error {
+func serveUntilSignal(ctx context.Context, addr string, handler http.Handler, onReload func(context.Context)) error {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", addr, err)
 	}
-	return serveListener(ctx, ln, handler)
+	return serveListener(ctx, ln, handler, onReload)
 }
 
 // serveListener is the testable core of serveUntilSignal: it serves on the
 // given listener until ctx is canceled or a signal arrives, then shuts the
 // server down with a grace period.
-func serveListener(ctx context.Context, ln net.Listener, handler http.Handler) error {
+//
+// With a non-nil onReload, SIGHUP calls it instead of ending the process
+// (an untrapped SIGHUP would kill it). Reloads run one at a time on their
+// own goroutine; SIGHUPs that arrive during a reload collapse into one more
+// reload. On every return path the reload context is canceled first (so a
+// slow drain stops waiting instead of delaying shutdown) and serveListener
+// then waits for the worker to finish, so nothing the reload touches is
+// still in use when the caller closes it. With a nil onReload, SIGHUP is
+// not trapped, as before.
+func serveListener(ctx context.Context, ln net.Listener, handler http.Handler, onReload func(context.Context)) error {
 	srv := newHTTPServer(ln.Addr().String(), handler)
 	signalCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	var hup chan os.Signal
+	pending := make(chan struct{}, 1)
+	if onReload != nil {
+		hup = make(chan os.Signal, 1)
+		signal.Notify(hup, syscall.SIGHUP)
+		defer signal.Stop(hup)
+		reloadCtx, cancelReload := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for range pending {
+				onReload(reloadCtx)
+			}
+		}()
+		defer func() {
+			cancelReload()
+			close(pending)
+			<-done
+		}()
+	}
+
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(ln) }()
 
-	select {
-	case err := <-errCh:
-		if errors.Is(err, http.ErrServerClosed) {
+	for {
+		select {
+		case err := <-errCh:
+			if errors.Is(err, http.ErrServerClosed) {
+				return nil
+			}
+			return err
+		case <-hup:
+			select {
+			case pending <- struct{}{}:
+			default: // a reload is already queued
+			}
+		case <-signalCtx.Done():
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := srv.Shutdown(shutdownCtx); err != nil {
+				return fmt.Errorf("shutdown: %w", err)
+			}
 			return nil
 		}
-		return err
-	case <-signalCtx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := srv.Shutdown(shutdownCtx); err != nil {
-			return fmt.Errorf("shutdown: %w", err)
-		}
-		return nil
 	}
 }
 
@@ -208,10 +256,13 @@ type serveFlags struct {
 //
 // The TTL must exceed the longest a live session can go untouched, or the
 // sweeper would evict a connected client. A session is touched when a request
-// arrives and when an event is written to a listen stream; cogvault emits no
-// server-initiated notifications, so a listen stream is touched exactly once,
-// at establishment, and then runs until the middleware's stream deadline. Twice
-// that bound clears the longest such stream with margin.
+// arrives and when an event is written to a listen stream. The only
+// server-initiated notification cogvault sends is tools/list_changed on an
+// archive reload (ADR 0027 item 12), which touches a stream at most once per
+// reload; without reloads a listen stream is touched once, at establishment,
+// and then runs until the middleware's stream deadline. Extra touches only
+// delay eviction, so twice that bound still clears the longest stream with
+// margin.
 //
 // Eviction is not visible to a client that comes back: mcp-go validates a
 // session ID by format rather than existence and creates an ephemeral session

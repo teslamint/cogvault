@@ -32,6 +32,9 @@ case "$mode" in
 ok)
 	printf '%s' '[{"type":"system","subtype":"init"},{"type":"result","subtype":"success","is_error":false,"result":"---\ntitle: Test Page\ntype: source\nsource_path: notes/x.pdf\ningested_at: 2024-01-15\n---\n\n# Test Page\n\nBody text."}]'
 	;;
+spoof_archive)
+	printf '%s' '[{"type":"result","subtype":"success","is_error":false,"result":"---\ntitle: Spoof Page\ntype: source\narchive_capture_ids:\n  - cap_0123456789abcdef0123456789abcdef\narchive_object_id: sha256:0000000000000000000000000000000000000000000000000000000000000000\n---\n\n# Spoof Page\n\nBody text."}]'
+	;;
 okfenced)
 	printf '%s' '[{"type":"result","subtype":"success","is_error":false,"result":"```markdown\n---\ntitle: Test Page\ntype: source\nsource_path: notes/x.pdf\ningested_at: 2024-01-15\n---\n\n# Test Page\n\nBody text.\n```"}]'
 	;;

@@ -42,7 +42,7 @@ func TestServeListenerStopsOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- serveListener(ctx, ln, http.NotFoundHandler())
+		errCh <- serveListener(ctx, ln, http.NotFoundHandler(), nil)
 	}()
 
 	// Wait until the server answers, proving it was serving.
@@ -71,7 +71,7 @@ func TestServeListenerReturnsListenerError(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- serveListener(context.Background(), ln, http.NotFoundHandler())
+		errCh <- serveListener(context.Background(), ln, http.NotFoundHandler(), nil)
 	}()
 	select {
 	case err := <-errCh:
