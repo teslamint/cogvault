@@ -78,6 +78,15 @@ func (a *Archive) RecordAttempt(ctx context.Context, at Attempt) (Attempt, error
 	res, err := tx.ExecContext(ctx, `INSERT INTO attempts (capture_id, cause, tried, result, result_capture_id, remaining_gap, next_action, recorded_at) VALUES (?,?,?,?,?,?,?,?)`,
 		at.CaptureID, at.Cause, at.Tried, at.Result, result, at.RemainingGap, at.NextAction, at.RecordedAt)
 	if err != nil {
+		if recovered {
+			// attempts_link_once: this pair is already linked (possibly by a
+			// concurrent run that committed first). The pool has one
+			// connection, so the check must go through tx.
+			var n int
+			if tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM attempts WHERE capture_id = ? AND result_capture_id = ?`, at.CaptureID, at.ResultCaptureID).Scan(&n) == nil && n > 0 {
+				return Attempt{}, fmt.Errorf("%w: %s is already linked to %s", ErrConflict, at.CaptureID, at.ResultCaptureID)
+			}
+		}
 		return Attempt{}, err
 	}
 	if at.AttemptID, err = res.LastInsertId(); err != nil {
@@ -160,7 +169,7 @@ func (a *Archive) Reassess(ctx context.Context, captureID, basis string) (Result
 	if _, err := a.RecordAttempt(ctx, Attempt{
 		CaptureID: captureID, Cause: "other", Tried: reassessmentTried,
 		Result: "acquired", ResultCaptureID: res.CaptureID, NextAction: "hand off the reassessed capture",
-	}); err != nil {
+	}); err != nil && !errors.Is(err, ErrConflict) {
 		return res, fmt.Errorf("reassessed capture %s was stored but not linked to %s; run the same reassessment again to link it: %w", res.CaptureID, captureID, err)
 	}
 	return res, nil

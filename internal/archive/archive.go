@@ -41,7 +41,7 @@ var managedDirs = []string{
 }
 
 const (
-	schemaVersion = 4
+	schemaVersion = 5
 	maxFieldRunes = 1000
 	maxKeyRunes   = 200
 	autoKeyPrefix = "digest:"
@@ -145,7 +145,14 @@ CREATE TABLE IF NOT EXISTS citations (
  PRIMARY KEY (report_id, position),
  CHECK ((cited_capture_id IS NULL) <> (cited_url = '')));
 CREATE INDEX IF NOT EXISTS citations_cited ON citations(cited_capture_id);
-` + v2Tables + v3Tables
+` + v2Tables + v3Tables + linkOnceIndex
+
+// linkOnceIndex (schema version 5) allows one linking attempt per (held
+// capture, result capture) pair, so concurrent reassessments of the same
+// capture link it once.
+const linkOnceIndex = `
+CREATE UNIQUE INDEX IF NOT EXISTS attempts_link_once ON attempts(capture_id, result_capture_id) WHERE result_capture_id IS NOT NULL;
+`
 
 // Archive is one archive root: objects/sha256/<hex> plus registry.db.
 type Archive struct {
@@ -268,7 +275,11 @@ func Open(root string) (*Archive, error) {
 			return nil, fmt.Errorf("archive registry: %w", err)
 		}
 	}
-	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
+	// _txlock=immediate: every transaction takes the write lock at BEGIN, so
+	// two handles (or processes) writing under the shared archive lock wait
+	// on busy_timeout instead of failing with SQLITE_BUSY_SNAPSHOT when a
+	// read transaction tries to upgrade.
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_txlock=immediate")
 	if err != nil {
 		return nil, fmt.Errorf("archive registry: %w", err)
 	}
@@ -356,19 +367,21 @@ func migrate(db *sql.DB) error {
 		return err
 	case 1:
 		return migrateV1(db)
-	case 2, 3:
+	case 2, 3, 4:
 		return migrateLinks(db, v)
 	default:
 		return fmt.Errorf("unsupported registry schema version %d", v)
 	}
 }
 
-// migrateLinks brings page_links to the receipt-order contract in one
-// transaction. From version 2 it creates the table; from version 3 it
-// repairs links recorded before the contract (a version 3 registry could
-// keep a .10 basis over an already collected .2, because collection sorted
-// names). Both relink every collected receipt: linkReceipt keeps the
-// lowest-numbered linking receipt as the basis.
+// migrateLinks upgrades a version 2, 3, or 4 registry in one transaction.
+// It creates page_links if missing (v2) and relinks every collected receipt,
+// which repairs links recorded before the receipt-order contract (a version
+// 3 registry could keep a .10 basis over an already collected .2, because
+// collection sorted names): linkReceipt keeps the lowest-numbered linking
+// receipt as the basis. It then adds linkOnceIndex; a registry that already
+// holds a duplicate link fails here with the constraint error and is left
+// unchanged.
 func migrateLinks(db *sql.DB, from int) error {
 	ctx := context.Background()
 	tx, err := db.BeginTx(ctx, nil)
@@ -380,6 +393,9 @@ func migrateLinks(db *sql.DB, from int) error {
 		return fmt.Errorf("migrate registry v%d: %w", from, err)
 	}
 	if err := backfillPageLinks(ctx, tx); err != nil {
+		return fmt.Errorf("migrate registry v%d: %w", from, err)
+	}
+	if _, err := tx.ExecContext(ctx, linkOnceIndex); err != nil {
 		return fmt.Errorf("migrate registry v%d: %w", from, err)
 	}
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
@@ -417,6 +433,7 @@ func migrateV1(db *sql.DB) error {
 		`ALTER TABLE objects ADD COLUMN state_at TEXT NOT NULL DEFAULT ''`,
 		v2Tables,
 		v3Tables,
+		linkOnceIndex,
 	}
 	for _, s := range steps {
 		if _, err := tx.ExecContext(ctx, s); err != nil {

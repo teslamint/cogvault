@@ -1,10 +1,12 @@
 package archive
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -73,6 +75,51 @@ func TestReassessLinksACaptureStoredByAnInterruptedRun(t *testing.T) {
 	}
 	if n := len(mustStatus(t, a, held.CaptureID).Attempts); n != 1 {
 		t.Fatalf("attempts = %d, want 1", n)
+	}
+}
+
+// TestDuplicateLinkIsAConflictAndConcurrentReassessLinksOnce: a second
+// link of the same pair is ErrConflict without blocking (the registry pool
+// has one connection), and reassessments racing from two handles link once.
+func TestDuplicateLinkIsAConflictAndConcurrentReassessLinksOnce(t *testing.T) {
+	a, root := openTest(t)
+	held := mustCapture(t, a, SourceRequest{Content: strings.NewReader("race\n"), OriginalName: "r.md", Supplier: "s"})
+	basis := "declared length 5 matches"
+	b, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	var wg sync.WaitGroup
+	results := make([]Result, 2)
+	errs := make([]error, 2)
+	for i, h := range []*Archive{a, b} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results[i], errs[i] = h.Reassess(ctx, held.CaptureID, basis)
+		}()
+	}
+	wg.Wait()
+	for i := range 2 {
+		if errs[i] != nil || results[i].CaptureID != results[0].CaptureID {
+			t.Fatalf("reassess %d = %+v, %v", i, results[i], errs[i])
+		}
+	}
+	if n := len(mustStatus(t, a, held.CaptureID).Attempts); n != 1 {
+		t.Fatalf("attempts after concurrent reassessments = %d, want 1", n)
+	}
+
+	tctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	_, err = a.RecordAttempt(tctx, Attempt{CaptureID: held.CaptureID, Cause: "other", Tried: "again", Result: "acquired", ResultCaptureID: results[0].CaptureID})
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("duplicate link: err = %v; want ErrConflict before the deadline", err)
+	}
+	// Other failures are not conflicts: an unknown result capture.
+	_, err = a.RecordAttempt(tctx, Attempt{CaptureID: held.CaptureID, Cause: "other", Tried: "x", Result: "acquired", ResultCaptureID: "cap_" + strings.Repeat("0", 32)})
+	if err == nil || errors.Is(err, ErrConflict) {
+		t.Fatalf("unknown result capture: err = %v", err)
 	}
 }
 
