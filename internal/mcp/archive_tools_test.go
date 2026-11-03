@@ -132,6 +132,15 @@ func TestArchiveToolsCaptureWithinBounds(t *testing.T) {
 			t.Fatalf("capture %v accepted", truncate(args))
 		}
 	}
+	for _, args := range []map[string]any{
+		{"text": "r", "cites": []any{"https://example.org/a", 7}},
+		{"text": "r", "cites": "https://example.org/a"},
+	} {
+		r := callTool(t, f.srv, "archive_capture_report", args)
+		if !r.IsError || !strings.Contains(extractText(t, r), "wrong type") {
+			t.Fatalf("report %v: %+v", args, r)
+		}
+	}
 	if after := objectCount(t, f.aroot); after != before {
 		t.Fatalf("rejected captures stored %d objects", after-before)
 	}

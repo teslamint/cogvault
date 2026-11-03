@@ -116,8 +116,9 @@ type PageChecker interface {
 func ArchiveTools(a *archive.Archive, gate *ArchiveGate, idx index.Index, pages PageChecker) []server.ServerTool {
 	// mcp-go does not enforce additionalProperties at call time, so the
 	// wrapper refuses any argument the tool does not declare, and any value
-	// whose JSON type differs from a declared string parameter (GetString
-	// would otherwise replace it with the default silently).
+	// whose JSON type differs from a declared string parameter or string
+	// array item (GetString and GetStringSlice would otherwise substitute the
+	// default or drop the item silently).
 	gated := func(tool mcp.Tool, h server.ToolHandlerFunc) server.ServerTool {
 		tool = noExtra(tool)
 		return server.ServerTool{Tool: tool, Handler: func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -131,9 +132,9 @@ func ArchiveTools(a *archive.Archive, gate *ArchiveGate, idx index.Index, pages 
 				if !declared {
 					return mcp.NewToolResultError(fmt.Sprintf("unknown parameter: %s", k)), nil
 				}
-				if p, ok := prop.(map[string]any); ok && p["type"] == "string" {
-					if _, isString := v.(string); !isString {
-						return mcp.NewToolResultError(fmt.Sprintf("parameter %s must be a string", k)), nil
+				if p, ok := prop.(map[string]any); ok {
+					if !matchesStringSchema(p, v) {
+						return mcp.NewToolResultError(fmt.Sprintf("parameter %s has the wrong type; the schema declares %s", k, p["type"])), nil
 					}
 				}
 			}
@@ -147,6 +148,31 @@ func ArchiveTools(a *archive.Archive, gate *ArchiveGate, idx index.Index, pages 
 		gated(archiveStatusTool(), handleArchiveStatus(a, idx, pages)),
 		gated(archivePageLinksTool(), handleArchivePageLinks(a, pages)),
 	}
+}
+
+// matchesStringSchema reports whether v fits a string property or an array
+// of string items; other property types are not checked here.
+func matchesStringSchema(p map[string]any, v any) bool {
+	switch p["type"] {
+	case "string":
+		_, ok := v.(string)
+		return ok
+	case "array":
+		items, _ := p["items"].(map[string]any)
+		if items["type"] != "string" {
+			return true
+		}
+		list, ok := v.([]any)
+		if !ok {
+			return false
+		}
+		for _, item := range list {
+			if _, ok := item.(string); !ok {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 const textName = "Base file name with extension .md, .markdown, or .txt (default capture.md). Never a path."
