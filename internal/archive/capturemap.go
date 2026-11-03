@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"golang.org/x/sys/unix"
 )
 
 // The capture map ties copies in an ingest source directory to the archive
@@ -57,8 +59,26 @@ func readCaptureMap(dir string) (captureMap, error) {
 
 // updateCaptureMap adds the picked-up captures to dir's map and replaces
 // the map file atomically. Capture IDs only accumulate: a capture handed
-// off for these bytes stays a capture of these bytes.
+// off for these bytes stays a capture of these bytes. An exclusive flock on
+// dir serializes overlapping Pickups from read to rename, so neither loses
+// the other's entries. A map that would exceed maxCaptureMapSize is refused
+// before anything is written, so the map stays readable.
 func updateCaptureMap(dir string, picked []PickupResult) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	for {
+		err = unix.Flock(int(d.Fd()), unix.LOCK_EX)
+		if !errors.Is(err, unix.EINTR) {
+			break
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("capture map lock: %w", err)
+	}
+	defer unix.Flock(int(d.Fd()), unix.LOCK_UN)
 	m, err := readCaptureMap(dir)
 	if err != nil {
 		return err
@@ -87,6 +107,9 @@ func updateCaptureMap(dir string, picked []PickupResult) error {
 	body, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return err
+	}
+	if len(body) > maxCaptureMapSize {
+		return fmt.Errorf("%w: capture map would be %d bytes; the limit is %d", ErrTooLarge, len(body), maxCaptureMapSize)
 	}
 	tmp, err := os.CreateTemp(dir, ".cogvault-archive-captures-*")
 	if err != nil {

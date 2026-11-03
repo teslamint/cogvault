@@ -166,7 +166,13 @@ func (a *Archive) ImpactOf(ctx context.Context, objectID string) (Impact, error)
 		}
 	}
 	im.IngestCopies, im.SourcePages = sortedKeys(copies), sortedKeys(pages)
-	if im.DerivedObjects, err = a.derivedObjects(ctx, objectID); err != nil {
+	// The derived objects the next action would move: purge for a
+	// quarantined object, quarantine otherwise.
+	next := "quarantine"
+	if im.State != "active" {
+		next = "purge"
+	}
+	if im.DerivedObjects, err = a.derivedObjects(ctx, objectID, next); err != nil {
 		return Impact{}, err
 	}
 	canonical, err := json.Marshal(im)
@@ -223,6 +229,25 @@ func (a *Archive) Unquarantine(ctx context.Context, objectID string) error {
 	if im.State != "quarantined" {
 		return fmt.Errorf("%w: %s is %s, not quarantined", ErrInvalid, objectID, im.State)
 	}
+	// A restore record needs intact bytes: one of the quarantined or active
+	// files must match the object's size and SHA-256 (moveIfPresent then
+	// keeps the verified copy). Otherwise the restore would mark the object
+	// active with missing or damaged bytes behind it.
+	var size int64
+	if err := a.db.QueryRowContext(ctx, `SELECT size FROM objects WHERE object_id = ?`, objectID).Scan(&size); err != nil {
+		return err
+	}
+	hexSum := strings.TrimPrefix(objectID, "sha256:")
+	intact := false
+	for _, p := range []string{filepath.Join(a.root, "quarantine", hexSum), a.objectPath(hexSum)} {
+		if verifyFile(p, hexSum, size) == nil {
+			intact = true
+			break
+		}
+	}
+	if !intact {
+		return fmt.Errorf("%w: %s has no intact quarantined or active file to restore", ErrIntegrity, objectID)
+	}
 	return a.record(ctx, DeletionRecord{Action: "restore", ObjectID: objectID, CaptureIDs: im.Captures})
 }
 
@@ -277,6 +302,11 @@ func appendDeletion(path string, rec DeletionRecord) error {
 	line, err := json.Marshal(rec)
 	if err != nil {
 		return err
+	}
+	// ReadDeletionLog reads lines up to maxDeletionRecord; a longer line
+	// would make the whole log unreadable, so it is refused before writing.
+	if len(line)+1 > maxDeletionRecord {
+		return fmt.Errorf("%w: deletion record for %s is %d bytes (%d capture IDs); the limit is %d", ErrTooLarge, rec.ObjectID, len(line)+1, len(rec.CaptureIDs), maxDeletionRecord)
 	}
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE|noFollow, 0o600)
 	if err != nil {
@@ -420,7 +450,7 @@ func (a *Archive) applyDeletions(ctx context.Context) (int, error) {
 // apply makes one object's registry state and file location match rec. It
 // is idempotent, so re-applying the whole log is safe.
 func (a *Archive) apply(ctx context.Context, rec DeletionRecord) error {
-	derived, err := a.derivedObjects(ctx, rec.ObjectID)
+	derived, err := a.derivedObjects(ctx, rec.ObjectID, rec.Action)
 	if err != nil {
 		return err
 	}
@@ -438,9 +468,13 @@ func (a *Archive) applyObject(ctx context.Context, objectID, action, at string) 
 	active := a.objectPath(hexSum)
 	quarantined := filepath.Join(a.root, "quarantine", hexSum)
 	state := map[string]string{"quarantine": "quarantined", "restore": "active", "purge": "purged"}[action]
+	size := int64(-1) // unknown: the registry has no row for this object
+	if err := a.db.QueryRowContext(ctx, `SELECT size FROM objects WHERE object_id = ?`, objectID).Scan(&size); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
 	switch action {
 	case "quarantine":
-		if err := moveIfPresent(active, quarantined); err != nil {
+		if err := moveIfPresent(active, quarantined, hexSum, size); err != nil {
 			return err
 		}
 		caps, err := a.ids(ctx, `SELECT capture_id FROM captures WHERE object_id = ?`, objectID)
@@ -453,7 +487,7 @@ func (a *Archive) applyObject(ctx context.Context, objectID, action, at string) 
 			}
 		}
 	case "restore":
-		if err := moveIfPresent(quarantined, active); err != nil {
+		if err := moveIfPresent(quarantined, active, hexSum, size); err != nil {
 			return err
 		}
 	case "purge":
@@ -468,16 +502,31 @@ func (a *Archive) applyObject(ctx context.Context, objectID, action, at string) 
 }
 
 // moveIfPresent renames src to dst when src exists and dst does not. If
-// both exist, src is the stale copy (for example from a restored backup)
-// and is removed, so an object never lives in two places.
-func moveIfPresent(src, dst string) error {
+// both exist (for example after a restored backup), the verified copy wins
+// and the other is removed, so an object never lives in two places: dst is
+// kept when its size and SHA-256 match, otherwise a matching src replaces
+// it, and when neither matches nothing is removed and ErrIntegrity is
+// returned. With an unknown size (size < 0) dst is kept unverified. A
+// missing src is not an error and dst is not checked: replaying the log on
+// open must not fail on an earlier move. Unquarantine verifies the bytes
+// before it records a restore, and restore-test re-hashes active objects.
+func moveIfPresent(src, dst, hexSum string, size int64) error {
 	if _, err := os.Lstat(src); errors.Is(err, fs.ErrNotExist) {
 		return nil
 	} else if err != nil {
 		return err
 	}
-	if _, err := os.Lstat(dst); err == nil {
+	if _, err := os.Lstat(dst); err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		return os.Rename(src, dst)
+	}
+	if size < 0 || verifyFile(dst, hexSum, size) == nil {
 		return os.Remove(src)
+	}
+	if err := verifyFile(src, hexSum, size); err != nil {
+		return fmt.Errorf("%w: neither %s nor %s holds the object's bytes", ErrIntegrity, src, dst)
 	}
 	return os.Rename(src, dst)
 }

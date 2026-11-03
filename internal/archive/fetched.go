@@ -171,13 +171,24 @@ func (a *Archive) derivations(ctx context.Context, captureID string) ([]Derivati
 	return out, rows.Err()
 }
 
-// derivedObjects returns the objects made from objectID's bytes: files
-// recorded as derived from its captures and text extracted from it.
-// Deletion actions apply to them together with objectID: they hold the
-// same content, so keeping them would keep the deleted bytes.
-func (a *Archive) derivedObjects(ctx context.Context, objectID string) ([]string, error) {
-	return a.ids(ctx, `SELECT id FROM (
- SELECT d.derived_object_id AS id FROM derivations d JOIN captures c ON c.capture_id = d.capture_id WHERE c.object_id = ?
- UNION SELECT x.output_object_id FROM extractions x WHERE x.source_object_id = ? AND x.output_object_id IS NOT NULL)
- WHERE id <> ? ORDER BY id`, objectID, objectID, objectID)
+// derivedObjects returns the objects made from objectID's bytes (files
+// recorded as derived from its captures and text extracted from it) that a
+// deletion action moves together with objectID: they hold the same content,
+// so keeping them would keep the deleted bytes. A derived object is never
+// moved with another object when it is itself the original of a capture,
+// or when another source it is derived from still needs it: for quarantine,
+// another active source; for purge, another active or quarantined (still
+// restorable) source. Restore brings back every derived object that is not
+// a capture's original. Derived objects are never captures, so they have no
+// derived objects of their own; one level is complete.
+func (a *Archive) derivedObjects(ctx context.Context, objectID, action string) ([]string, error) {
+	return a.ids(ctx, `WITH links(id, src) AS (
+ SELECT d.derived_object_id, c.object_id FROM derivations d JOIN captures c ON c.capture_id = d.capture_id
+ UNION SELECT x.output_object_id, x.source_object_id FROM extractions x WHERE x.output_object_id IS NOT NULL)
+SELECT DISTINCT l.id FROM links l WHERE l.src = ?1 AND l.id <> ?1
+ AND l.id NOT IN (SELECT object_id FROM captures)
+ AND (?2 = 'restore' OR NOT EXISTS (
+  SELECT 1 FROM links o JOIN objects s ON s.object_id = o.src
+  WHERE o.id = l.id AND o.src <> ?1 AND (s.state = 'active' OR (?2 = 'purge' AND s.state = 'quarantined'))))
+ORDER BY l.id`, objectID, action)
 }

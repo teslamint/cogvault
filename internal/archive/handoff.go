@@ -382,23 +382,45 @@ func Pickup(archiveRoot, destDir string, accept []string) ([]PickupResult, error
 	return out, nil
 }
 
+// openRegular opens p for reading without following a final symlink and
+// without blocking: O_NONBLOCK makes a FIFO open return at once, and the
+// file is refused unless it is a regular file. A missing file returns an
+// fs.ErrNotExist error; anything else that is not a regular file is
+// ErrIntegrity. O_NONBLOCK does not change reads of a regular file.
+func openRegular(p string) (*os.File, error) {
+	f, err := os.OpenFile(p, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s: %v", ErrIntegrity, p, err)
+	}
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		f.Close()
+		return nil, fmt.Errorf("%w: %s is not a regular file", ErrIntegrity, p)
+	}
+	return f, nil
+}
+
 // verifyFile checks p (not following a final symlink) against hexSum and
 // size. A missing file returns an fs.ErrNotExist error; anything else that
 // does not match is ErrIntegrity.
 func verifyFile(p, hexSum string, size int64) error {
-	f, err := os.OpenFile(p, os.O_RDONLY|unix.O_NOFOLLOW, 0)
-	if errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
+	f, err := openRegular(p)
 	if err != nil {
-		return fmt.Errorf("%w: %s: %v", ErrIntegrity, p, err)
+		return err
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil {
 		return err
 	}
-	if !info.Mode().IsRegular() || info.Size() != size {
+	if info.Size() != size {
 		return fmt.Errorf("%w: %s", ErrIntegrity, p)
 	}
 	h := sha256.New()
@@ -414,9 +436,9 @@ func verifyFile(p, hexSum string, size int64) error {
 // copyVerified copies src to dst through a hidden temporary file in dst's
 // directory, checking size and hash before it links the copy into place.
 func copyVerified(src, dst, hexSum string, size int64) error {
-	in, err := os.OpenFile(src, os.O_RDONLY|unix.O_NOFOLLOW, 0)
+	in, err := openRegular(src)
 	if err != nil {
-		return fmt.Errorf("%w: %s: %v", ErrIntegrity, src, err)
+		return err
 	}
 	defer in.Close()
 	dir := filepath.Dir(dst)

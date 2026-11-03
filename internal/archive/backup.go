@@ -141,13 +141,19 @@ func checkBackupObjects(ctx context.Context, dir string) error {
 	return rows.Err()
 }
 
+// copyFile copies a regular file to a new dst with the source's permission
+// bits, so read-only objects stay read-only in backups and restores.
 func copyFile(src, dst string) error {
-	in, err := os.OpenFile(src, os.O_RDONLY|noFollow, 0)
+	in, err := openRegular(src)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL|noFollow, 0o600)
+	info, err := in.Stat()
+	if err != nil {
+		return err
+	}
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL|noFollow, info.Mode().Perm())
 	if err != nil {
 		return err
 	}
@@ -358,7 +364,7 @@ func RestoreTest(ctx context.Context, backupDir, scratchParent string, liveLogs 
 		if r.Action == "restore" {
 			continue
 		}
-		derived, err := a.derivedObjects(ctx, id)
+		derived, err := a.derivedObjects(ctx, id, r.Action)
 		if err != nil {
 			rep.Errors = append(rep.Errors, err.Error())
 			return rep, nil
@@ -393,6 +399,10 @@ func RestoreTest(ctx context.Context, backupDir, scratchParent string, liveLogs 
 		objs = append(objs, o)
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		rep.Errors = append(rep.Errors, err.Error())
+		return rep, nil
+	}
 	for _, o := range objs {
 		hexSum := strings.TrimPrefix(o.id, "sha256:")
 		if err := verifyFile(a.objectPath(hexSum), hexSum, o.size); err != nil {

@@ -103,6 +103,10 @@ func ExtractHTMLText(src []byte) (string, error) {
 	var out strings.Builder
 	var title strings.Builder
 	skip, inTitle := 0, false
+	// open is the stack of open element names. Only a title whose parent is
+	// head (or html, when head is omitted) is the document title; a title
+	// inside svg or anywhere else is not.
+	var open []string
 	line := func() {
 		s := out.String()
 		if s != "" && !strings.HasSuffix(s, "\n") {
@@ -120,9 +124,10 @@ func ExtractHTMLText(src []byte) (string, error) {
 		switch t := tok.(type) {
 		case xml.StartElement:
 			name := strings.ToLower(t.Name.Local)
-			if name == "title" && skip <= 1 {
+			if name == "title" && len(open) > 0 && (open[len(open)-1] == "head" || open[len(open)-1] == "html") {
 				inTitle = true
 			}
+			open = append(open, name)
 			if skip > 0 || removedElements[name] {
 				skip++
 				continue
@@ -138,6 +143,12 @@ func ExtractHTMLText(src []byte) (string, error) {
 			}
 		case xml.EndElement:
 			name := strings.ToLower(t.Name.Local)
+			for i := len(open) - 1; i >= 0; i-- {
+				if open[i] == name {
+					open = open[:i]
+					break
+				}
+			}
 			if name == "title" {
 				inTitle = false
 			}
@@ -220,6 +231,10 @@ func (a *Archive) ExtractText(ctx context.Context, captureID string) (Extraction
 	}
 	for _, e := range c.Extractions {
 		if e.Extractor == HTMLTextExtractor {
+			if e.Status == "failed" {
+				// Same outcome as the first run: the failure, not a result.
+				return e, fmt.Errorf("%w: recorded %s failure: %s", ErrInvalid, HTMLTextExtractor, e.Detail)
+			}
 			return e, nil
 		}
 	}

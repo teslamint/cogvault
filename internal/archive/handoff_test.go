@@ -383,8 +383,15 @@ func TestPickupVerifiesAndNeverReplaces(t *testing.T) {
 	if data, _ := os.ReadFile(path); string(data) != "pickup body\n" {
 		t.Fatalf("copy = %q", data)
 	}
-	if res, err = Pickup(root, dest, DefaultHandoffTypes); err != nil || res[0].Status != "existing" && res[1].Status != "existing" {
-		t.Fatalf("second pickup = %+v, %v", res, err)
+	if res, err = Pickup(root, dest, DefaultHandoffTypes); err != nil {
+		t.Fatalf("second pickup: %v", err)
+	}
+	again := map[string]string{}
+	for _, r := range res {
+		again[r.CaptureID] = r.Status
+	}
+	if again[md.CaptureID] != "existing" || again[txt.CaptureID] != "refused" {
+		t.Fatalf("second pickup = %+v", res)
 	}
 
 	os.Chmod(path, 0o644)

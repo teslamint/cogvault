@@ -36,6 +36,12 @@ func TestExtractHTMLTextDropsActiveAndHiddenContent(t *testing.T) {
 	if _, err := ExtractHTMLText([]byte("<p>caf\xe9</p>")); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("latin-1 input: err = %v", err)
 	}
+	// Only a head-level title is the document title; an svg title is not,
+	// whether the svg is in head or body.
+	got, err = ExtractHTMLText([]byte(`<html><head><svg><title>HEAD-ICON</title></svg><title>Real</title></head><body><svg><title>BODY-ICON</title></svg><p>x</p></body></html>`))
+	if err != nil || got != "# Real\n\nx\n" {
+		t.Fatalf("svg titles: %q, %v", got, err)
+	}
 }
 
 func htmlCapture(t *testing.T, a *Archive, body string) Result {
@@ -75,6 +81,9 @@ func TestExtractTextKeepsOriginalAndRecordsVersion(t *testing.T) {
 	if c := mustStatus(t, a, bad.CaptureID); len(c.Extractions) != 1 || c.Extractions[0].Status != "failed" || c.Extractions[0].OutputObjectID != "" {
 		t.Fatalf("failed extraction record = %+v", c.Extractions)
 	}
+	if e, err := a.ExtractText(ctx, bad.CaptureID); !errors.Is(err, ErrInvalid) || e.Status != "failed" {
+		t.Fatalf("repeated failed extraction = %+v, %v; want the recorded failure as an error", e, err)
+	}
 	notHTML := mustCapture(t, a, source("# plain markdown\n", ""))
 	if _, err := a.ExtractText(ctx, notHTML.CaptureID); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("markdown: %v", err)
@@ -106,6 +115,66 @@ func TestExtractionFollowsSourceDeletion(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "objects", "sha256", hexOf(e.OutputObjectID))); !os.IsNotExist(err) {
 		t.Fatal("extracted text stayed active after its source was quarantined")
 	}
+}
+
+// TestSharedExtractedTextFollowsEverySource: two HTML sources that yield the
+// same text share one output object. It stays while any source still needs
+// it, so deleting one source never hides the other's extraction.
+func TestSharedExtractedTextFollowsEverySource(t *testing.T) {
+	a, root := openTest(t)
+	clk := withClock(a)
+	one := htmlCapture(t, a, "<p>same text</p>")
+	two := htmlCapture(t, a, "<div>same text</div>")
+	e1, err := a.ExtractText(ctx, one.CaptureID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e2, err := a.ExtractText(ctx, two.CaptureID)
+	if err != nil || e2.OutputObjectID != e1.OutputObjectID {
+		t.Fatalf("fixture: outputs %s and %+v, %v", e1.OutputObjectID, e2, err)
+	}
+	out := filepath.Join(root, "objects", "sha256", hexOf(e1.OutputObjectID))
+	present := func(want bool, when string) {
+		t.Helper()
+		_, err := os.Stat(out)
+		if (err == nil) != want {
+			t.Fatalf("%s: shared text present = %v, want %v", when, err == nil, want)
+		}
+		if c, err := a.Status(ctx, two.CaptureID); err == nil && want != (len(c.Extractions) == 1) {
+			t.Fatalf("%s: second source extractions = %+v", when, c.Extractions)
+		}
+	}
+	quarantine(t, a, one.ObjectID)
+	present(true, "first source quarantined")
+	if im, _ := a.ImpactOf(ctx, one.ObjectID); len(im.DerivedObjects) != 0 {
+		t.Fatalf("purge impact lists shared text: %+v", im.DerivedObjects)
+	}
+	clk.t = clk.t.Add(QuarantineMinimum)
+	if err := a.Purge(ctx, one.ObjectID, one.ObjectID); err != nil {
+		t.Fatal(err)
+	}
+	present(true, "first source purged")
+	three := htmlCapture(t, a, "<span>same text</span>")
+	if e3, err := a.ExtractText(ctx, three.CaptureID); err != nil || e3.OutputObjectID != e1.OutputObjectID {
+		t.Fatalf("fixture: third output %+v, %v", e3, err)
+	}
+	quarantine(t, a, two.ObjectID)
+	present(true, "second source quarantined while the third is active")
+	quarantine(t, a, three.ObjectID)
+	present(false, "every remaining source quarantined")
+	// Purging the third source must keep the text the quarantined second
+	// source still needs if it is restored.
+	clk.t = clk.t.Add(QuarantineMinimum)
+	if err := a.Purge(ctx, three.ObjectID, three.ObjectID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "quarantine", hexOf(e1.OutputObjectID))); err != nil {
+		t.Fatalf("purge removed text a quarantined source still needs: %v", err)
+	}
+	if err := a.Unquarantine(ctx, two.ObjectID); err != nil {
+		t.Fatal(err)
+	}
+	present(true, "second source restored")
 }
 
 // TestExtractionAndQuarantineRaceLeavesNoActiveText runs both from two
