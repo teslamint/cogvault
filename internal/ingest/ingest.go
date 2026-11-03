@@ -324,6 +324,11 @@ func (r *Runner) digestOne(parent context.Context, entry scanEntry, hash, schema
 		var err error
 		sourceText, err = r.extractor.Extract(ctx, entry.absPath)
 		if err != nil {
+			// A file that changed after the scan (for example into invalid
+			// UTF-8) must not consume an attempt under the old hash.
+			if r.stopIfChanged(entry, hash, report) {
+				return
+			}
 			class := classPermanent
 			if errors.Is(err, extract.ErrTransient) {
 				class = classTransient
@@ -363,6 +368,9 @@ func (r *Runner) digestOne(parent context.Context, entry scanEntry, hash, schema
 	slug := slugFor(entry.absPath, hash)
 	res, err := r.llm.Digest(ctx, llm.DigestRequest{SourcePath: entry.absPath, SourceText: sourceText, SchemaText: schemaText, PageSlug: slug, SourceExt: filepath.Ext(entry.absPath)})
 	if err != nil {
+		if r.stopIfChanged(entry, hash, report) {
+			return
+		}
 		class := classPermanent
 		if errors.Is(err, llm.ErrTransient) {
 			class = classTransient
@@ -377,8 +385,7 @@ func (r *Runner) digestOne(parent context.Context, entry scanEntry, hash, schema
 	// changed after the scan and is still different now; a change that was
 	// reverted before this check is not detected. Verbatim text is also
 	// checked exactly above.
-	if now, err := hashFile(entry.absPath); err != nil || now != hash {
-		deferChanged(report, entry)
+	if r.stopIfChanged(entry, hash, report) {
 		return
 	}
 	fm, title, body, err := checkPage(res.PageContent)
@@ -723,18 +730,51 @@ func contentHash(data []byte) string {
 }
 
 // hashFile streams the file into a sha256 hasher so full contents are never
-// retained in memory. Only the hex digest is kept per scan entry.
+// retained in memory. Only the hex digest is kept per scan entry. It opens
+// without following a final symlink and without blocking, and refuses
+// anything but a regular file, so a FIFO swapped in cannot hang the run.
 func hashFile(path string) (string, error) {
-	f, err := os.Open(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	info, err := f.Stat()
+	if err != nil {
 		return "", err
 	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("%s is not a regular file", filepath.Base(path))
+	}
+	// Read at most one byte past the size at open, so a file that keeps
+	// growing cannot keep the hash reading; a size change is an error.
+	h := sha256.New()
+	n, err := io.Copy(h, io.LimitReader(f, info.Size()+1))
+	if err != nil {
+		return "", err
+	}
+	if n != info.Size() {
+		return "", fmt.Errorf("%s changed size while being read", filepath.Base(path))
+	}
 	return fmt.Sprintf("%x", h.Sum(nil)), nil
+}
+
+// stopIfChanged re-hashes a source after the scan. It reports a read
+// failure as skipped (as the scan does) and a different hash as deferred,
+// and returns true in both cases so nothing is recorded under the scan's
+// hash.
+func (r *Runner) stopIfChanged(entry scanEntry, hash string, report *Report) bool {
+	now, err := hashFile(entry.absPath)
+	if err != nil {
+		report.Skipped++
+		report.addEvent(FileResult{Path: entry.absPath, Action: actionSkipped, Error: "read: " + sourceErrorText(err)})
+		return true
+	}
+	if now != hash {
+		deferChanged(report, entry)
+		return true
+	}
+	return false
 }
 func sourceErrorText(err error) string {
 	if !errors.Is(err, fs.ErrPermission) {

@@ -1504,11 +1504,14 @@ scan source dir (top level only, Lstat: skip dirs/symlinks)
       → parse stdout event array; inspect only the final result event
       → classify policy refusal across eligible final result, stderr, and permitted plain stdout
       → otherwise select a safe diagnostic: eligible result → stderr → plain stdout → process error
-  → re-hash the file after the model call; a different hash defers the file
-    (no page, ledger row, or archive keys under the old hash). A change that is
-    reverted before this check is not detected for path inputs (PDF, any file
-    the model reads itself); Claude-path markdown is also checked exactly when
-    ingest reads its frontmatter
+  → re-hash the file after the model call, and before recording an extraction
+    or model error; a different hash defers the file (no page, ledger row,
+    attempt, or archive keys under the old hash), and a file that cannot be read
+    or is no longer a regular file is skipped as `read:`. Hashing opens without
+    following symlinks or blocking and reads no more than the size at open. A
+    change that is reverted before this check is not detected for path inputs
+    (PDF, any file the model reads itself); Claude-path markdown is also checked
+    exactly when ingest reads its frontmatter
   → validate page frontmatter from bytes (non-empty map + title)
   → set `ingested_at` to the run's local date (YYYY-MM-DD), replacing any model value
   → drop model `archive_capture_ids`/`archive_object_id`; set them from the archive
