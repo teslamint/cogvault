@@ -142,16 +142,24 @@ func serveUntilSignal(ctx context.Context, addr string, handler http.Handler, on
 // still in use when the caller closes it. With a nil onReload, SIGHUP is
 // not trapped, as before.
 func serveListener(ctx context.Context, ln net.Listener, handler http.Handler, onReload func(context.Context)) error {
+	if onReload == nil {
+		return serveWithReload(ctx, ln, handler, nil, nil)
+	}
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
+	return serveWithReload(ctx, ln, handler, onReload, hup)
+}
+
+// serveWithReload is serveListener with the reload trigger injected: each
+// value on hup requests one reload. Tests drive it without real signals.
+func serveWithReload(ctx context.Context, ln net.Listener, handler http.Handler, onReload func(context.Context), hup <-chan os.Signal) error {
 	srv := newHTTPServer(ln.Addr().String(), handler)
 	signalCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	var hup chan os.Signal
 	pending := make(chan struct{}, 1)
 	if onReload != nil {
-		hup = make(chan os.Signal, 1)
-		signal.Notify(hup, syscall.SIGHUP)
-		defer signal.Stop(hup)
 		reloadCtx, cancelReload := context.WithCancel(context.Background())
 		done := make(chan struct{})
 		go func() {

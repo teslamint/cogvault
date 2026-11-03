@@ -5,12 +5,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -319,11 +321,12 @@ func TestArchiveReloadDrainsAdmittedCallsAndStopsOnShutdown(t *testing.T) {
 	}
 }
 
-// TestServeListenerSIGHUPRunsReloadAndWaitsForIt sends a real SIGHUP to
-// this process. serveListener must run the reload, keep serving, collapse
-// repeated signals, and return only after the reload worker has finished,
-// so the caller can close the archive safely.
-func TestServeListenerSIGHUPRunsReloadAndWaitsForIt(t *testing.T) {
+// TestServeWithReloadCollapsesAndWaitsForReload drives the reload loop
+// through an injected channel, so no real signal reaches the test process.
+// It must run the reload, keep serving, collapse repeated requests, and
+// return only after the reload worker has finished, so the caller can close
+// the archive safely.
+func TestServeWithReloadCollapsesAndWaitsForReload(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -338,20 +341,21 @@ func TestServeListenerSIGHUPRunsReloadAndWaitsForIt(t *testing.T) {
 		time.Sleep(20 * time.Millisecond) // work after cancel must still finish before return
 		finished.Store(true)
 	}
+	hup := make(chan os.Signal, 3)
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
-	go func() { errCh <- serveListener(ctx, ln, http.NotFoundHandler(), onReload) }()
+	go func() { errCh <- serveWithReload(ctx, ln, http.NotFoundHandler(), onReload, hup) }()
 	waitForServing(t, ln.Addr().String())
 	for range 3 {
-		syscall.Kill(os.Getpid(), syscall.SIGHUP)
+		hup <- syscall.SIGHUP
 	}
 	select {
 	case <-started:
 	case <-time.After(5 * time.Second):
-		t.Fatal("SIGHUP did not start a reload")
+		t.Fatal("a reload request did not start a reload")
 	}
 	if resp, err := http.Get("http://" + ln.Addr().String()); err != nil {
-		t.Fatalf("server stopped serving after SIGHUP: %v", err)
+		t.Fatalf("server stopped serving after a reload request: %v", err)
 	} else {
 		resp.Body.Close()
 	}
@@ -362,14 +366,87 @@ func TestServeListenerSIGHUPRunsReloadAndWaitsForIt(t *testing.T) {
 			t.Fatal(err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("serveListener did not return")
+		t.Fatal("serveWithReload did not return")
 	}
 	if !finished.Load() {
-		t.Fatal("serveListener returned while the reload was still running")
+		t.Fatal("serveWithReload returned while the reload was still running")
 	}
 	if n := calls.Load(); n < 1 || n > 2 {
-		t.Fatalf("reload ran %d times for 3 signals during one reload; want 1 or 2", n)
+		t.Fatalf("reload ran %d times for 3 requests during one reload; want 1 or 2", n)
 	}
+}
+
+const sighupChildEnv = "COGVAULT_TEST_SIGHUP_CHILD"
+
+// TestServeListenerSIGHUPInChildProcess sends a real SIGHUP, but only to a
+// child copy of the test binary, so no signal can reach this process or
+// other tests. The child must reload instead of dying, and exit cleanly on
+// SIGTERM after the reload worker has finished.
+func TestServeListenerSIGHUPInChildProcess(t *testing.T) {
+	if os.Getenv(sighupChildEnv) == "1" {
+		runSIGHUPChild(t)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestServeListenerSIGHUPInChildProcess$", "-test.count=1")
+	cmd.Env = append(os.Environ(), sighupChildEnv+"=1")
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	lines := bufio.NewScanner(out)
+	await := func(prefix string) string {
+		t.Helper()
+		for lines.Scan() {
+			if strings.HasPrefix(lines.Text(), prefix) {
+				return lines.Text()
+			}
+		}
+		t.Fatalf("child ended before %q: %v", prefix, lines.Err())
+		return ""
+	}
+	await("child serving")
+	if err := cmd.Process.Signal(syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	await("child reload started")
+	// The SIGHUP was handled, so none is left in flight when the child
+	// stops trapping it.
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	if got := await("child returned"); got != "child returned err=<nil> finished=true" {
+		t.Fatalf("child: %s", got)
+	}
+	io.Copy(io.Discard, out)
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("child did not exit cleanly (SIGHUP must not kill it): %v", err)
+	}
+}
+
+func runSIGHUPChild(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var finished atomic.Bool
+	onReload := func(ctx context.Context) {
+		fmt.Println("child reload started")
+		<-ctx.Done()
+		time.Sleep(20 * time.Millisecond)
+		finished.Store(true)
+	}
+	errCh := make(chan error, 1)
+	go func() { errCh <- serveListener(context.Background(), ln, http.NotFoundHandler(), onReload) }()
+	waitForServing(t, ln.Addr().String())
+	fmt.Println("child serving")
+	err = <-errCh
+	fmt.Printf("child returned err=%v finished=%v\n", err, finished.Load())
 }
 
 func mcpPost(t *testing.T, url, session, token, body string) *http.Response {
