@@ -3106,6 +3106,74 @@ func TestRunTextInputUsesTheExtractorNewBuilds(t *testing.T) {
 	}
 }
 
+// changingExtractor rewrites the source once, between the scan's hash and
+// the extraction, then extracts.
+type changingExtractor struct {
+	inner TextExtractor
+	then  string
+	done  *bool
+}
+
+func (c changingExtractor) Extract(ctx context.Context, p string) (string, error) {
+	if !*c.done {
+		*c.done = true
+		if err := os.WriteFile(p, []byte(c.then), 0o644); err != nil {
+			return "", err
+		}
+	}
+	return c.inner.Extract(ctx, p)
+}
+
+// TestRunTextInputDefersASourceThatChangedAfterTheScan: verbatim text whose
+// bytes no longer match the scan's hash is deferred, never digested or
+// recorded under the old hash; the next run digests the new bytes.
+func TestRunTextInputDefersASourceThatChangedAfterTheScan(t *testing.T) {
+	m := okLLM()
+	m.inputMode = llm.TextInput
+	h := newHarness(t, []string{"md"}, m)
+	h.write(t, "note.md", "---\ntitle: Old\n---\nold body\n")
+	changed := "---\ntitle: New\n---\nnew body\n"
+	done := false
+	h.runner.extractor = changingExtractor{inner: extract.NewExtractor(1000, extract.Commands{}), then: changed, done: &done}
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "test"})
+	if err != nil || rep.Digested != 0 || rep.Deferred != 1 || len(m.requests) != 0 {
+		t.Fatalf("changed source: report=%+v requests=%d err=%v", rep, len(m.requests), err)
+	}
+	rep, err = h.runner.Run(context.Background(), RunOptions{Origin: "test"})
+	if err != nil || rep.Digested != 1 || len(m.requests) != 1 || m.requests[0].SourceText != changed {
+		t.Fatalf("next run: report=%+v requests=%+v err=%v", rep, m.requests, err)
+	}
+}
+
+// TestRunPathInputDefersASourceThatChangedDuringTheDigest: when the model
+// reads the file itself, a file that changed during the call (and stays
+// changed) is deferred and no page or ledger row is written for it.
+func TestRunPathInputDefersASourceThatChangedDuringTheDigest(t *testing.T) {
+	m := okLLM()
+	h := newHarness(t, []string{"md"}, m)
+	p := h.write(t, "note.md", "---\ntitle: Old\n---\nold body\n")
+	changed := false
+	m.ctxFn = func(context.Context) {
+		if !changed {
+			changed = true
+			if err := os.WriteFile(p, []byte("---\ntitle: New\n---\nnew body\n"), 0o644); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "test"})
+	if err != nil || rep.Digested != 0 || rep.Deferred != 1 {
+		t.Fatalf("changed during digest: report=%+v err=%v", rep, err)
+	}
+	if pages, _ := filepath.Glob(filepath.Join(h.wikiDir, "*", "*.md")); len(pages) != 0 {
+		t.Fatalf("pages written for a changed source: %v", pages)
+	}
+	rep, err = h.runner.Run(context.Background(), RunOptions{Origin: "test"})
+	if err != nil || rep.Digested != 1 {
+		t.Fatalf("next run: report=%+v err=%v", rep, err)
+	}
+}
+
 type movingDeadlineContext struct {
 	context.Context
 	remaining *time.Duration

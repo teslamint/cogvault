@@ -331,6 +331,14 @@ func (r *Runner) digestOne(parent context.Context, entry scanEntry, hash, schema
 			r.recordFailure(entry, hash, origin, prev, report, "extract: "+err.Error(), class)
 			return
 		}
+		// Markdown and text are passed verbatim, so their text is the bytes
+		// the model reads: an exact check against the scan's hash.
+		if ext := strings.ToLower(filepath.Ext(entry.absPath)); ext != ".pdf" {
+			if fmt.Sprintf("%x", sha256.Sum256([]byte(sourceText))) != hash {
+				deferChanged(report, entry)
+				return
+			}
+		}
 		source, _, err = terms.Parse([]byte(sourceText))
 		if err != nil {
 			r.recordFailure(entry, hash, origin, prev, report, "source: "+err.Error(), classPermanent)
@@ -340,6 +348,10 @@ func (r *Runner) digestOne(parent context.Context, entry scanEntry, hash, schema
 		content, err := os.ReadFile(entry.absPath)
 		if err != nil {
 			r.recordFailure(entry, hash, origin, prev, report, "source: "+sourceErrorText(err), classPermanent)
+			return
+		}
+		if fmt.Sprintf("%x", sha256.Sum256(content)) != hash {
+			deferChanged(report, entry)
 			return
 		}
 		source, _, err = terms.Parse(content)
@@ -358,6 +370,15 @@ func (r *Runner) digestOne(parent context.Context, entry scanEntry, hash, schema
 			class = classRefused
 		}
 		r.recordFailure(entry, hash, origin, prev, report, "digest: "+err.Error(), class)
+		return
+	}
+	// Path inputs (a PDF read by the extractor, any file the model reads
+	// itself) are re-hashed after the model call. This catches a file that
+	// changed after the scan and is still different now; a change that was
+	// reverted before this check is not detected. Verbatim text is also
+	// checked exactly above.
+	if now, err := hashFile(entry.absPath); err != nil || now != hash {
+		deferChanged(report, entry)
 		return
 	}
 	fm, title, body, err := checkPage(res.PageContent)
@@ -938,4 +959,12 @@ func acquireLock(dbPath string) (func(), error) {
 		unix.Flock(int(f.Fd()), unix.LOCK_UN)
 		f.Close()
 	}, nil
+}
+
+// deferChanged reports a source whose bytes no longer hash to the scan's
+// hash. Nothing is recorded under the old hash (no page, ledger row, or
+// archive capture keys); the next run sees the new bytes.
+func deferChanged(report *Report, entry scanEntry) {
+	report.Deferred++
+	report.addEvent(FileResult{Path: entry.absPath, Action: actionDeferred, Error: "changed since the scan"})
 }
