@@ -134,18 +134,25 @@ func TestSharedExtractedTextFollowsEverySource(t *testing.T) {
 		t.Fatalf("fixture: outputs %s and %+v, %v", e1.OutputObjectID, e2, err)
 	}
 	out := filepath.Join(root, "objects", "sha256", hexOf(e1.OutputObjectID))
-	present := func(want bool, when string) {
+	// present checks the shared text file and, through the second source's
+	// status, its extraction list: listed while that source is active, and
+	// the source itself not found while quarantined.
+	present := func(want, twoActive bool, when string) {
 		t.Helper()
 		_, err := os.Stat(out)
 		if (err == nil) != want {
 			t.Fatalf("%s: shared text present = %v, want %v", when, err == nil, want)
 		}
-		if c, err := a.Status(ctx, two.CaptureID); err == nil && want != (len(c.Extractions) == 1) {
-			t.Fatalf("%s: second source extractions = %+v", when, c.Extractions)
+		c, err := a.Status(ctx, two.CaptureID)
+		switch {
+		case !twoActive && !errors.Is(err, ErrNotFound):
+			t.Fatalf("%s: quarantined second source status err = %v", when, err)
+		case twoActive && (err != nil || len(c.Extractions) != 1 || c.Extractions[0].OutputObjectID != e1.OutputObjectID):
+			t.Fatalf("%s: second source extractions = %+v, %v", when, c.Extractions, err)
 		}
 	}
 	quarantine(t, a, one.ObjectID)
-	present(true, "first source quarantined")
+	present(true, true, "first source quarantined")
 	if im, _ := a.ImpactOf(ctx, one.ObjectID); len(im.DerivedObjects) != 0 {
 		t.Fatalf("purge impact lists shared text: %+v", im.DerivedObjects)
 	}
@@ -153,15 +160,15 @@ func TestSharedExtractedTextFollowsEverySource(t *testing.T) {
 	if err := a.Purge(ctx, one.ObjectID, one.ObjectID); err != nil {
 		t.Fatal(err)
 	}
-	present(true, "first source purged")
+	present(true, true, "first source purged")
 	three := htmlCapture(t, a, "<span>same text</span>")
 	if e3, err := a.ExtractText(ctx, three.CaptureID); err != nil || e3.OutputObjectID != e1.OutputObjectID {
 		t.Fatalf("fixture: third output %+v, %v", e3, err)
 	}
 	quarantine(t, a, two.ObjectID)
-	present(true, "second source quarantined while the third is active")
+	present(true, false, "second source quarantined while the third is active")
 	quarantine(t, a, three.ObjectID)
-	present(false, "every remaining source quarantined")
+	present(false, false, "every remaining source quarantined")
 	// Purging the third source must keep the text the quarantined second
 	// source still needs if it is restored.
 	clk.t = clk.t.Add(QuarantineMinimum)
@@ -174,7 +181,7 @@ func TestSharedExtractedTextFollowsEverySource(t *testing.T) {
 	if err := a.Unquarantine(ctx, two.ObjectID); err != nil {
 		t.Fatal(err)
 	}
-	present(true, "second source restored")
+	present(true, true, "second source restored")
 }
 
 // TestExtractionAndQuarantineRaceLeavesNoActiveText runs both from two

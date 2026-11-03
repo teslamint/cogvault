@@ -229,15 +229,9 @@ func (a *Archive) ExtractText(ctx context.Context, captureID string) (Extraction
 	if err != nil {
 		return Extraction{}, err
 	}
-	for _, e := range c.Extractions {
-		if e.Extractor == HTMLTextExtractor {
-			if e.Status == "failed" {
-				// Same outcome as the first run: the failure, not a result.
-				return e, fmt.Errorf("%w: recorded %s failure: %s", ErrInvalid, HTMLTextExtractor, e.Detail)
-			}
-			return e, nil
-		}
-	}
+	// Every per-capture rule (content coding, media type, sniff) runs before
+	// a recorded extraction of the same bytes is returned, so the result
+	// never depends on which capture of those bytes was extracted first.
 	hexSum := strings.TrimPrefix(c.ObjectID, "sha256:")
 	src, err := readBounded(a.objectPath(hexSum), MaxObjectBytes)
 	if err != nil {
@@ -248,6 +242,15 @@ func (a *Archive) ExtractText(ctx context.Context, captureID string) (Extraction
 	}
 	if err := htmlInput(c, src); err != nil {
 		return Extraction{}, err
+	}
+	for _, e := range c.Extractions {
+		if e.Extractor == HTMLTextExtractor {
+			if e.Status == "failed" {
+				// Same outcome as the first run: the failure, not a result.
+				return e, fmt.Errorf("%w: recorded %s failure: %s", ErrInvalid, HTMLTextExtractor, e.Detail)
+			}
+			return e, nil
+		}
 	}
 	text, extractErr := ExtractHTMLText(src)
 	e := Extraction{Extractor: HTMLTextExtractor, RecordedAt: a.now().UTC().Format(time.RFC3339Nano)}

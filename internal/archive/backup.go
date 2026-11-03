@@ -157,6 +157,11 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
+	// The create mode is masked by the umask; set the source's bits exactly.
+	if err := out.Chmod(info.Mode().Perm()); err != nil {
+		out.Close()
+		return err
+	}
 	if _, err := io.Copy(out, in); err != nil {
 		out.Close()
 		return err
@@ -290,8 +295,14 @@ func Restore(backupDir, target string, extraLogs []string) (*Archive, BackupMani
 		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 			return nil, BackupManifest{}, err
 		}
-		if err := copyFile(filepath.Join(backupDir, filepath.FromSlash(f.Path)), dst); err != nil {
+		// Check the copy itself, so bytes that changed in the backup after
+		// VerifyBackup never enter the restored archive.
+		src := filepath.Join(backupDir, filepath.FromSlash(f.Path))
+		if err := copyFile(src, dst); err != nil {
 			return nil, BackupManifest{}, err
+		}
+		if err := verifyFile(dst, f.SHA256, f.Size); err != nil {
+			return nil, BackupManifest{}, fmt.Errorf("%w: restored %s does not match the backup manifest", ErrIntegrity, f.Path)
 		}
 	}
 	logPath := filepath.Join(target, "deletions", deletionLogName)

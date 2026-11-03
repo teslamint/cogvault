@@ -330,4 +330,16 @@ func TestAcquiredContentCodedBodyIsNeverExtractedAsHTML(t *testing.T) {
 	if _, err := a.ExtractText(ctx, declared.CaptureID); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("extract of a body with a declared coding: err = %v", err)
 	}
+	// The same bytes captured without a coding are extracted first; the
+	// coded capture must still be refused, whatever the order.
+	plain := mustCapture(t, a, SourceRequest{Content: strings.NewReader("<html><p>looks plain</p></html>"), OriginalName: "plain.html", MediaType: "text/html"})
+	if plain.ObjectID != declared.ObjectID {
+		t.Fatalf("fixture: objects %s and %s differ", plain.ObjectID, declared.ObjectID)
+	}
+	if _, err := a.ExtractText(ctx, plain.CaptureID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.ExtractText(ctx, declared.CaptureID); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("coded capture after its bytes were extracted: err = %v", err)
+	}
 }

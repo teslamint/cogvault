@@ -424,10 +424,13 @@ func verifyFile(p, hexSum string, size int64) error {
 		return fmt.Errorf("%w: %s", ErrIntegrity, p)
 	}
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	// Read at most one byte past the registered size, so a file that keeps
+	// growing cannot keep the check reading.
+	n, err := io.Copy(h, io.LimitReader(f, size+1))
+	if err != nil {
 		return err
 	}
-	if hex.EncodeToString(h.Sum(nil)) != hexSum {
+	if n != size || hex.EncodeToString(h.Sum(nil)) != hexSum {
 		return fmt.Errorf("%w: %s", ErrIntegrity, p)
 	}
 	return nil

@@ -187,6 +187,9 @@ func TestCaptureMapUpdatesAreSerializedAndBounded(t *testing.T) {
 }
 
 func TestBackupKeepsObjectsReadOnly(t *testing.T) {
+	// A restrictive umask must not change the copied permission bits.
+	old := syscall.Umask(0o077)
+	defer syscall.Umask(old)
 	a, _ := openTest(t)
 	res := mustCapture(t, a, source("read only\n", ""))
 	bdir := filepath.Join(t.TempDir(), "b")
@@ -196,5 +199,28 @@ func TestBackupKeepsObjectsReadOnly(t *testing.T) {
 	info, err := os.Stat(filepath.Join(bdir, "objects", "sha256", hexOf(res.ObjectID)))
 	if err != nil || info.Mode().Perm() != 0o444 {
 		t.Fatalf("backed-up object mode = %v, %v", info.Mode().Perm(), err)
+	}
+}
+
+// TestUnquarantineVerifiesDerivedObjects: the extracted text a restore
+// brings back must be intact too, or nothing is restored.
+func TestUnquarantineVerifiesDerivedObjects(t *testing.T) {
+	a, root := openTest(t)
+	res := mustCapture(t, a, SourceRequest{Content: strings.NewReader("<p>derived</p>"), OriginalName: "d.html", MediaType: "text/html"})
+	e, err := a.ExtractText(ctx, res.CaptureID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	quarantine(t, a, res.ObjectID)
+	q := filepath.Join(root, "quarantine", hexOf(e.OutputObjectID))
+	os.Chmod(q, 0o600)
+	if err := os.WriteFile(q, []byte("damaged text\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Unquarantine(ctx, res.ObjectID); !errors.Is(err, ErrIntegrity) {
+		t.Fatalf("damaged derived text: err = %v", err)
+	}
+	if _, err := a.Status(ctx, res.CaptureID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("source was restored anyway: %v", err)
 	}
 }

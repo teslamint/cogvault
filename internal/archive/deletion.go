@@ -229,24 +229,31 @@ func (a *Archive) Unquarantine(ctx context.Context, objectID string) error {
 	if im.State != "quarantined" {
 		return fmt.Errorf("%w: %s is %s, not quarantined", ErrInvalid, objectID, im.State)
 	}
-	// A restore record needs intact bytes: one of the quarantined or active
-	// files must match the object's size and SHA-256 (moveIfPresent then
-	// keeps the verified copy). Otherwise the restore would mark the object
-	// active with missing or damaged bytes behind it.
-	var size int64
-	if err := a.db.QueryRowContext(ctx, `SELECT size FROM objects WHERE object_id = ?`, objectID).Scan(&size); err != nil {
+	// A restore record needs intact bytes for the object and for every
+	// derived object the restore brings back: one of its quarantined or
+	// active files must match its size and SHA-256 (moveIfPresent then keeps
+	// the verified copy). Otherwise the restore would mark it active with
+	// missing or damaged bytes behind it.
+	derived, err := a.derivedObjects(ctx, objectID, "restore")
+	if err != nil {
 		return err
 	}
-	hexSum := strings.TrimPrefix(objectID, "sha256:")
-	intact := false
-	for _, p := range []string{filepath.Join(a.root, "quarantine", hexSum), a.objectPath(hexSum)} {
-		if verifyFile(p, hexSum, size) == nil {
-			intact = true
-			break
+	for _, id := range append([]string{objectID}, derived...) {
+		var size int64
+		if err := a.db.QueryRowContext(ctx, `SELECT size FROM objects WHERE object_id = ?`, id).Scan(&size); err != nil {
+			return err
 		}
-	}
-	if !intact {
-		return fmt.Errorf("%w: %s has no intact quarantined or active file to restore", ErrIntegrity, objectID)
+		hexSum := strings.TrimPrefix(id, "sha256:")
+		intact := false
+		for _, p := range []string{filepath.Join(a.root, "quarantine", hexSum), a.objectPath(hexSum)} {
+			if verifyFile(p, hexSum, size) == nil {
+				intact = true
+				break
+			}
+		}
+		if !intact {
+			return fmt.Errorf("%w: %s has no intact quarantined or active file to restore", ErrIntegrity, id)
+		}
 	}
 	return a.record(ctx, DeletionRecord{Action: "restore", ObjectID: objectID, CaptureIDs: im.Captures})
 }
