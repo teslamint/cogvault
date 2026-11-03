@@ -1211,7 +1211,12 @@ scheduling, or backup expiry.
   check runs at open only: another same-user process that swaps entries
   inside the root while a command runs is out of scope. Use a local disk;
   the registry must not live on SMB. Registry schema 5; schema-1 through
-  -4 registries are migrated in place, and capture IDs are unchanged.
+  -4 registries are migrated in place, and capture IDs are unchanged. One
+  exception: a schema-2 to -4 registry that already holds two attempts
+  linking the same (held, result) captures cannot take the schema-5 unique
+  index; the upgrade rolls back, the registry is left as it was, and open
+  fails naming the constraint. Removing the duplicate attempt row is a
+  manual operator repair; no automatic repair exists.
   Registry transactions take the write lock at `BEGIN` (`_txlock=immediate`),
   so concurrent writers wait instead of failing. Schema 5 allows one linking
   attempt per (held capture, result capture) pair; a repeated link is a
@@ -1366,7 +1371,10 @@ scheduling, or backup expiry.
   elements become line breaks, headings `#`, list items `- `. The text is
   stored as its own object with the extractor version and limits; a parse
   failure is recorded and returned, never guessed; repeating a failed
-  extraction returns the recorded failure as an error. Only a `title` whose
+  extraction returns the recorded failure as an error. The per-capture
+  checks (content coding, sniff, media type) run before a recorded result of
+  the same bytes is returned, so the result does not depend on which
+  capture was extracted first. Only a `title` whose
   parent is `head` (or `html`) becomes the heading. The original is not
   changed, extraction is per object and repeatable, and derived text is
   never handed off. Extraction holds the shared lock from the source check
@@ -1402,9 +1410,10 @@ scheduling, or backup expiry.
   source pages, and the derived objects the next action would move) with a
   digest. `quarantine` needs the current digest, moves the object to
   `quarantine/`, removes its manifests, and hides its captures from status,
-  list, hand-off, and MCP. `unquarantine` restores it only when a
-  quarantined or active file matches the object's size and SHA-256
-  (otherwise an integrity error and no record). `purge` needs `--confirm`
+  list, hand-off, and MCP. `unquarantine` restores it only when the object
+  and every derived object the restore brings back each have a quarantined
+  or active file matching its size and SHA-256 (otherwise an integrity error
+  and no record). `purge` needs `--confirm`
   with the object ID and at least 30 days in quarantine; nothing purges
   automatically. Purge removes this archive's bytes only, not backups or
   ingest-host copies. **Derived objects** (fetch files, extracted text) move
@@ -1422,7 +1431,8 @@ scheduling, or backup expiry.
   registry, then objects, quarantine, receipts, and the deletion log are
   copied and every object the registry copy references is checked by size
   and hash before `backup.json` (all files and hashes) is written.
-  `restore-test` restores into a scratch directory, merges the backup's log
+  `restore-test` restores into a scratch directory (each copied file is
+  checked against the backup manifest's size and hash), merges the backup's log
   with each `--deletion-log` (a log must extend the other; diverging logs
   fail), re-applies deletions, re-hashes active objects, and writes a report
   that lists the logs used (path, hash, record count). Without
@@ -1488,10 +1498,17 @@ scan source dir (top level only, Lstat: skip dirs/symlinks)
   → size cap (config max_file_size_mb, default 32MB; oversized files reported, not persisted)
   → settle-window gate (skip files modified within 2m — mid-download guard)
   → sha256 content hash → ledger lookup (skip if already processed)
+  → markdown/text on an openai (text input) backend: the extracted text must hash
+    to the scan's hash, else the file is deferred as "changed since the scan"
   → llm.Digest(source path, schema) via claude --print
       → parse stdout event array; inspect only the final result event
       → classify policy refusal across eligible final result, stderr, and permitted plain stdout
       → otherwise select a safe diagnostic: eligible result → stderr → plain stdout → process error
+  → re-hash the file after the model call; a different hash defers the file
+    (no page, ledger row, or archive keys under the old hash). A change that is
+    reverted before this check is not detected for path inputs (PDF, any file
+    the model reads itself); Claude-path markdown is also checked exactly when
+    ingest reads its frontmatter
   → validate page frontmatter from bytes (non-empty map + title)
   → set `ingested_at` to the run's local date (YYYY-MM-DD), replacing any model value
   → drop model `archive_capture_ids`/`archive_object_id`; set them from the archive
