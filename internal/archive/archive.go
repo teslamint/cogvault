@@ -289,7 +289,7 @@ func Open(root string) (*Archive, error) {
 		return nil, fmt.Errorf("archive registry: %w", err)
 	}
 	a := &Archive{root: root, db: db, now: time.Now}
-	unlock, err := a.lock(true)
+	unlock, err := a.lock(context.Background(), true)
 	if err != nil {
 		db.Close()
 		return nil, err
@@ -305,12 +305,15 @@ func Open(root string) (*Archive, error) {
 
 // lock takes the archive lock (flock on root/archive.lock) for one
 // operation. Writes that add data (captures, attempts, hand-offs,
-// receipts) share it; Backup and deletion actions hold it exclusively, so
-// a backup never sees a registry snapshot and an object set from different
-// moments, and deletion records get one total order. Each call opens its
-// own descriptor, so the lock also orders goroutines of one process and
-// other processes on the same root.
-func (a *Archive) lock(exclusive bool) (func(), error) {
+// receipts) share it; Backup, deletion actions, and Status hold it
+// exclusively, so a backup never sees a registry snapshot and an object set
+// from different moments, deletion records get one total order, and a
+// status is one point in time. Each call opens its own descriptor, so the
+// lock also orders goroutines of one process and other processes on the
+// same root. While the lock is held elsewhere, lock retries a non-blocking
+// flock every lockPoll and returns ctx's error once ctx ends, so a
+// cancelled request never waits for a stuck holder.
+func (a *Archive) lock(ctx context.Context, exclusive bool) (func(), error) {
 	p := filepath.Join(a.root, "archive.lock")
 	f, err := os.OpenFile(p, os.O_RDWR|os.O_CREATE|noFollow, 0o600)
 	if err != nil {
@@ -321,20 +324,31 @@ func (a *Archive) lock(exclusive bool) (func(), error) {
 		how = unix.LOCK_EX
 	}
 	for {
-		err = unix.Flock(int(f.Fd()), how)
-		if !errors.Is(err, unix.EINTR) {
+		err = unix.Flock(int(f.Fd()), how|unix.LOCK_NB)
+		if err == nil {
 			break
 		}
-	}
-	if err != nil {
-		f.Close()
-		return nil, fmt.Errorf("archive lock: %w", err)
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if !errors.Is(err, unix.EWOULDBLOCK) {
+			f.Close()
+			return nil, fmt.Errorf("archive lock: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			f.Close()
+			return nil, fmt.Errorf("archive lock: %w", ctx.Err())
+		case <-time.After(lockPoll):
+		}
 	}
 	return func() {
 		unix.Flock(int(f.Fd()), unix.LOCK_UN)
 		f.Close()
 	}, nil
 }
+
+const lockPoll = 5 * time.Millisecond
 
 func ensureDir(p string) error {
 	info, err := os.Lstat(p)
@@ -583,7 +597,7 @@ func (a *Archive) store(ctx context.Context, key string, content io.Reader, rec 
 	if content == nil {
 		return Result{}, fmt.Errorf("%w: content is required", ErrInvalid)
 	}
-	unlock, err := a.lock(false)
+	unlock, err := a.lock(ctx, false)
 	if err != nil {
 		return Result{}, err
 	}
@@ -858,7 +872,7 @@ func checkText(fields ...string) error {
 // reads only the registry, so the view is one point in time: no write lands
 // between its queries.
 func (a *Archive) Status(ctx context.Context, captureID string) (Capture, error) {
-	unlock, err := a.lock(true)
+	unlock, err := a.lock(ctx, true)
 	if err != nil {
 		return Capture{}, err
 	}
@@ -866,9 +880,8 @@ func (a *Archive) Status(ctx context.Context, captureID string) (Capture, error)
 	return a.status(ctx, captureID)
 }
 
-// status is Status for a caller that already holds the archive lock. Under
-// the shared lock its relations can include writes made between its
-// queries; deletion actions still run wholly before or after it.
+// status is Status for a caller that already holds the archive lock
+// exclusively.
 func (a *Archive) status(ctx context.Context, captureID string) (Capture, error) {
 	row := a.db.QueryRowContext(ctx, captureSelect+` WHERE c.capture_id = ?`, captureID)
 	c, err := scanCapture(row)

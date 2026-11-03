@@ -1,6 +1,7 @@
 package archive
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -304,7 +305,7 @@ func TestRestoreTestFailsOnTamperedBackup(t *testing.T) {
 func TestStatusIsOnePointInTimeAgainstAConcurrentWrite(t *testing.T) {
 	a, _ := openTest(t)
 	res := mustCapture(t, a, verified("status bytes\n", "s.md", "https://example.org/s"))
-	unlock, err := a.lock(false) // a writer in the middle of its operation
+	unlock, err := a.lock(ctx, false) // a writer in the middle of its operation
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,6 +327,12 @@ func TestStatusIsOnePointInTimeAgainstAConcurrentWrite(t *testing.T) {
 	// The writer adds a relation (a second capture of the same bytes);
 	// Capture's own shared lock is compatible with the one held above.
 	two := mustCapture(t, a, verified("status bytes\n", "s.md", "https://example.org/s2"))
+	select {
+	case r := <-done:
+		unlock()
+		t.Fatalf("Status finished before the writer released the lock: %+v, %v", r.c.SameObject, r.err)
+	default:
+	}
 	unlock()
 	r := <-done
 	if r.err != nil {
@@ -333,5 +340,27 @@ func TestStatusIsOnePointInTimeAgainstAConcurrentWrite(t *testing.T) {
 	}
 	if len(r.c.SameObject) != 1 || r.c.SameObject[0] != two.CaptureID {
 		t.Fatalf("Status did not see the whole write: same_object = %v, want [%s]", r.c.SameObject, two.CaptureID)
+	}
+}
+
+// A caller whose context ends while it waits for the archive lock gets the
+// context error instead of waiting until the holder releases the lock.
+func TestLockWaitEndsWithTheContext(t *testing.T) {
+	a, _ := openTest(t)
+	res := mustCapture(t, a, verified("lock wait\n", "w.md", "https://example.org/w"))
+	unlock, err := a.lock(ctx, false) // a writer stuck in its operation
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	waitCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err = a.Status(waitCtx, res.CaptureID)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Status err = %v, want context.DeadlineExceeded", err)
+	}
+	if waited := time.Since(start); waited > 2*time.Second {
+		t.Fatalf("Status waited %v after its context ended", waited)
 	}
 }

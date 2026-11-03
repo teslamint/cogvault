@@ -35,7 +35,7 @@ var (
 // recovered capture keeps its own completeness, so recovery alone never
 // makes anything verified.
 func (a *Archive) RecordAttempt(ctx context.Context, at Attempt) (Attempt, error) {
-	unlock, err := a.lock(false)
+	unlock, err := a.lock(ctx, false)
 	if err != nil {
 		return Attempt{}, err
 	}

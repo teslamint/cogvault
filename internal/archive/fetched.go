@@ -117,7 +117,7 @@ func (a *Archive) objectUsable(ctx context.Context, objectID string) error {
 }
 
 func (a *Archive) addDerivation(ctx context.Context, staged stagedObject, req FetchedRequest, captureID string) error {
-	unlock, err := a.lock(false)
+	unlock, err := a.lock(ctx, false)
 	if err != nil {
 		return err
 	}

@@ -116,7 +116,7 @@ func (a *Archive) Handoff(ctx context.Context, types []string) ([]HandoffResult,
 	if err := checkTypes(types); err != nil {
 		return nil, err
 	}
-	unlock, err := a.lock(false)
+	unlock, err := a.lock(ctx, false)
 	if err != nil {
 		return nil, err
 	}
@@ -600,7 +600,7 @@ func ValidWikiPage(p string) bool {
 // a changed one is ErrConflict. Receipts that do not match a hand-off are
 // ErrInvalid.
 func (a *Archive) CollectReceipts(ctx context.Context) (int, error) {
-	unlock, err := a.lock(false)
+	unlock, err := a.lock(ctx, false)
 	if err != nil {
 		return 0, err
 	}

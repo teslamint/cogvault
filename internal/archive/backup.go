@@ -60,7 +60,7 @@ func (a *Archive) Backup(ctx context.Context, dest string) (BackupManifest, erro
 	if !filepath.IsAbs(dest) {
 		return BackupManifest{}, fmt.Errorf("%w: backup destination %q must be absolute", ErrInvalid, dest)
 	}
-	unlock, err := a.lock(true)
+	unlock, err := a.lock(ctx, true)
 	if err != nil {
 		return BackupManifest{}, err
 	}

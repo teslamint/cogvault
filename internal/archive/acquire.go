@@ -378,7 +378,7 @@ func (a *Archive) Acquire(ctx context.Context, q Acquirer, rawURL string) (Resul
 	if err != nil {
 		return res, rec, err
 	}
-	unlock, err := a.lock(false)
+	unlock, err := a.lock(ctx, false)
 	if err != nil {
 		return res, rec, err
 	}

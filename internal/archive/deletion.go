@@ -197,7 +197,7 @@ func sortedKeys(m map[string]bool) []string {
 // and hand-off. digest must match the current ImpactOf report, so an
 // operator acts only on the impact they saw.
 func (a *Archive) Quarantine(ctx context.Context, objectID, digest string) error {
-	unlock, err := a.lock(true)
+	unlock, err := a.lock(ctx, true)
 	if err != nil {
 		return err
 	}
@@ -217,7 +217,7 @@ func (a *Archive) Quarantine(ctx context.Context, objectID, digest string) error
 
 // Unquarantine restores a quarantined object.
 func (a *Archive) Unquarantine(ctx context.Context, objectID string) error {
-	unlock, err := a.lock(true)
+	unlock, err := a.lock(ctx, true)
 	if err != nil {
 		return err
 	}
@@ -265,7 +265,7 @@ func (a *Archive) Purge(ctx context.Context, objectID, confirm string) error {
 	if confirm != objectID {
 		return fmt.Errorf("%w: purge needs --confirm with the exact object ID", ErrInvalid)
 	}
-	unlock, err := a.lock(true)
+	unlock, err := a.lock(ctx, true)
 	if err != nil {
 		return err
 	}
