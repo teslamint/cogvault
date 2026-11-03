@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/teslamint/cogvault/internal/adapter/obsidian"
+	"github.com/teslamint/cogvault/internal/archive"
 	"github.com/teslamint/cogvault/internal/config"
 	cverr "github.com/teslamint/cogvault/internal/errors"
 	"github.com/teslamint/cogvault/internal/extract"
@@ -396,6 +397,17 @@ func (r *Runner) digestOne(parent context.Context, entry scanEntry, hash, schema
 	}
 	// Models invent this date (observed: today's date from a stale prompt, or the document's own date).
 	fm["ingested_at"] = r.now().Format("2006-01-02")
+	// Archive provenance comes only from the capture map Pickup wrote next to
+	// the source, and only when its object ID is these bytes' hash; a value
+	// from the model or an older run never survives.
+	delete(fm, archive.PageCaptureIDsKey)
+	delete(fm, archive.PageObjectIDKey)
+	if obj, ids, err := archive.CapturesForSource(entry.absPath, hash); err != nil {
+		slog.Warn("ingest: archive capture map unreadable; capture IDs not recorded", "source", entry.absPath, "err", err)
+	} else if obj != "" {
+		fm[archive.PageCaptureIDsKey] = ids
+		fm[archive.PageObjectIDKey] = obj
+	}
 	// The model cannot see the page list, so it invents link targets. Keep the
 	// links that resolve and turn the rest into plain display text.
 	pages, err := r.listPages()
