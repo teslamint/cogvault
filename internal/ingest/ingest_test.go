@@ -127,6 +127,13 @@ type harness struct {
 
 func newHarness(t *testing.T, types []string, m *mockLLM) *harness {
 	t.Helper()
+	return newHarnessWith(t, types, m, nil)
+}
+
+// newHarnessWith is newHarness with a config change applied before New, so
+// a test can exercise what New wires from the config.
+func newHarnessWith(t *testing.T, types []string, m *mockLLM, mutate func(*config.Config)) *harness {
+	t.Helper()
 	root := t.TempDir()
 	wikiDir := filepath.Join(root, "wiki")
 	srcDir := filepath.Join(root, "src")
@@ -143,6 +150,9 @@ func newHarness(t *testing.T, types []string, m *mockLLM) *harness {
 		Sources:       []config.SourceDir{{Path: srcDir, Types: types}},
 		Adapter:       "obsidian",
 		MaxFileSizeMB: 32,
+	}
+	if mutate != nil {
+		mutate(cfg)
 	}
 	store := storage.NewFSStorage(wikiDir, cfg)
 	idx, err := index.NewSQLiteIndex(wikiDir, dbPath, cfg)
@@ -3069,6 +3079,24 @@ func TestRunTextInputDigestsMarkdownSourceVerbatim(t *testing.T) {
 	content := "---\ntitle: Note\n---\n\n# Note\n\nComplete markdown body.\n"
 	h.write(t, "note.md", content)
 	h.runner.extractor = extract.NewExtractor(1000, extract.Commands{})
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "test"})
+	if err != nil || rep.Digested != 1 {
+		t.Fatalf("Run: report=%+v err=%v", rep, err)
+	}
+	if len(m.requests) != 1 || m.requests[0].SourceText != content {
+		t.Fatalf("requests=%+v", m.requests)
+	}
+}
+
+// TestRunTextInputUsesTheExtractorNewBuilds runs the runner New built,
+// without replacing its extractor, so New's wiring from llm.max_input_chars
+// is what digests the Markdown source.
+func TestRunTextInputUsesTheExtractorNewBuilds(t *testing.T) {
+	m := okLLM()
+	m.inputMode = llm.TextInput
+	content := "---\ntitle: Note\n---\n\n# Note\n\nComplete markdown body.\n"
+	h := newHarnessWith(t, []string{"md"}, m, func(c *config.Config) { c.LLM.MaxInputChars = len(content) })
+	h.write(t, "note.md", content)
 	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "test"})
 	if err != nil || rep.Digested != 1 {
 		t.Fatalf("Run: report=%+v err=%v", rep, err)

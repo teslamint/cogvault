@@ -2,11 +2,14 @@ package extract
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func writeSource(t *testing.T, name string, content []byte) string {
@@ -48,6 +51,41 @@ func TestExtractorRejectsInvalidUTF8Text(t *testing.T) {
 	_, err := e.Extract(context.Background(), writeSource(t, "a.txt", []byte("caf\xe9")))
 	if err == nil || !strings.Contains(err.Error(), "not valid UTF-8") {
 		t.Fatalf("err=%v, want UTF-8 error", err)
+	}
+}
+
+func TestExtractorTextReadIsBoundedAndRefusesSpecialFiles(t *testing.T) {
+	e := NewExtractor(3, Commands{})
+	// A large ASCII file fails on the byte bound (3 runes * 4 bytes + 1).
+	if _, err := e.Extract(context.Background(), writeSource(t, "big.md", []byte(strings.Repeat("x", 1<<20)))); err == nil || !strings.Contains(err.Error(), "exceeds input limit") {
+		t.Fatalf("large file: %v", err)
+	}
+	dir := t.TempDir()
+	target := writeSource(t, "real.md", []byte("ok"))
+	link := filepath.Join(dir, "link.md")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Extract(context.Background(), link); err == nil {
+		t.Fatal("followed a symlink")
+	}
+	fifo := filepath.Join(dir, "pipe.md")
+	if err := syscall.Mkfifo(fifo, 0o600); err == nil {
+		done := make(chan error, 1)
+		go func() { _, err := e.Extract(context.Background(), fifo); done <- err }()
+		select {
+		case err := <-done:
+			if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+				t.Fatalf("FIFO: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("reading a FIFO blocked")
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := e.Extract(ctx, target); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled context: %v", err)
 	}
 }
 
