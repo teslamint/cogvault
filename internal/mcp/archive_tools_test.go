@@ -123,6 +123,9 @@ func TestArchiveToolsCaptureWithinBounds(t *testing.T) {
 		{"text": "x", "url": "file:///etc/passwd"},
 		{"text": strings.Repeat("x", mcp.ArchiveMaxTextBytes+1)},
 		{"text": "x", "path": "/tmp/x"},
+		{"text": "x", "name": 123},
+		{"text": "x", "name": nil},
+		{"text": "x", "url": []any{"https://example.org/"}},
 	} {
 		r := callTool(t, f.srv, "archive_capture_text", args)
 		if !r.IsError {

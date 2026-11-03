@@ -115,7 +115,9 @@ type PageChecker interface {
 // exists in the wiki (so a research_evidence ref to it resolves).
 func ArchiveTools(a *archive.Archive, gate *ArchiveGate, idx index.Index, pages PageChecker) []server.ServerTool {
 	// mcp-go does not enforce additionalProperties at call time, so the
-	// wrapper refuses any argument the tool does not declare.
+	// wrapper refuses any argument the tool does not declare, and any value
+	// whose JSON type differs from a declared string parameter (GetString
+	// would otherwise replace it with the default silently).
 	gated := func(tool mcp.Tool, h server.ToolHandlerFunc) server.ServerTool {
 		tool = noExtra(tool)
 		return server.ServerTool{Tool: tool, Handler: func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -124,9 +126,15 @@ func ArchiveTools(a *archive.Archive, gate *ArchiveGate, idx index.Index, pages 
 				return mcp.NewToolResultError(archiveDisabled), nil
 			}
 			defer release()
-			for k := range req.GetArguments() {
-				if _, declared := tool.InputSchema.Properties[k]; !declared {
+			for k, v := range req.GetArguments() {
+				prop, declared := tool.InputSchema.Properties[k]
+				if !declared {
 					return mcp.NewToolResultError(fmt.Sprintf("unknown parameter: %s", k)), nil
+				}
+				if p, ok := prop.(map[string]any); ok && p["type"] == "string" {
+					if _, isString := v.(string); !isString {
+						return mcp.NewToolResultError(fmt.Sprintf("parameter %s must be a string", k)), nil
+					}
 				}
 			}
 			return h(ctx, req)
