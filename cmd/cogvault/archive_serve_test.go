@@ -550,19 +550,28 @@ func TestArchiveReloadSendsListChanged(t *testing.T) {
 		}
 	}()
 	time.Sleep(50 * time.Millisecond)
+	await := func(when string) {
+		t.Helper()
+		deadline := time.After(3 * time.Second)
+		for {
+			select {
+			case l := <-lines:
+				if strings.Contains(l, "notifications/tools/list_changed") {
+					return
+				}
+			case <-deadline:
+				t.Fatalf("no tools/list_changed on the listen stream after %s", when)
+			}
+		}
+	}
 	f.writeConfig(t, true, "")
 	if err := f.rt.Reload(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.After(3 * time.Second)
-	for {
-		select {
-		case l := <-lines:
-			if strings.Contains(l, "notifications/tools/list_changed") {
-				return
-			}
-		case <-deadline:
-			t.Fatal("no tools/list_changed on the listen stream after enable")
-		}
+	await("enable")
+	f.writeConfig(t, false, "")
+	if err := f.rt.Reload(context.Background()); err != nil {
+		t.Fatal(err)
 	}
+	await("disable")
 }

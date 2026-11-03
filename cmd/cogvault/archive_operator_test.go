@@ -54,8 +54,13 @@ func TestArchiveOperatorCLIQuarantineBackupRestoreTest(t *testing.T) {
 	if err != nil || !strings.Contains(out, "passed") {
 		t.Fatalf("restore-test: %q %v", out, err)
 	}
-	if _, err := archive.ReadRestoreReport(report); err != nil {
+	rep, err := archive.ReadRestoreReport(report)
+	if err != nil {
 		t.Fatalf("report: %v", err)
+	}
+	// The live log's restore record brings the single object back active.
+	if rep.ObjectsVerified != 1 {
+		t.Fatalf("objects verified = %d, want 1 active object after unquarantine", rep.ObjectsVerified)
 	}
 	if _, _, err := executeCommand("archive", "--root", root, "restore-test", "--backup", bdir, "--report", report); err == nil {
 		t.Fatal("restore-test overwrote an existing report")
