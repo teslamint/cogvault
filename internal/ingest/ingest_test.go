@@ -3194,17 +3194,18 @@ func TestRunDefersInsteadOfFailingWhenTheSourceChanged(t *testing.T) {
 // model call is reported as a read skip, not as changed.
 func TestHashFileRefusesSpecialFilesAndRehashReadErrorsAreSkips(t *testing.T) {
 	fifo := filepath.Join(t.TempDir(), "pipe.md")
-	if err := unix.Mkfifo(fifo, 0o600); err == nil {
-		done := make(chan error, 1)
-		go func() { _, err := hashFile(fifo); done <- err }()
-		select {
-		case err := <-done:
-			if err == nil {
-				t.Fatal("hashed a FIFO")
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatal("hashing a FIFO blocked")
+	if err := unix.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatalf("mkfifo: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { _, err := hashFile(fifo); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("hashed a FIFO")
 		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("hashing a FIFO blocked")
 	}
 	if os.Geteuid() == 0 {
 		t.Skip("root reads mode 000 files")
@@ -3217,6 +3218,26 @@ func TestHashFileRefusesSpecialFilesAndRehashReadErrorsAreSkips(t *testing.T) {
 	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "test"})
 	if err != nil || rep.Skipped != 1 || rep.Deferred != 0 || rep.Digested != 0 {
 		t.Fatalf("unreadable after digest: report=%+v err=%v", rep, err)
+	}
+	if !strings.HasPrefix(rep.PerFile[len(rep.PerFile)-1].Error, "read: ") {
+		t.Fatalf("result = %+v", rep.PerFile)
+	}
+}
+
+// TestRunSkipsASourceDeletedDuringTheDigest checks the re-hash read
+// failure without relying on permission bits (so it also runs as root).
+func TestRunSkipsASourceDeletedDuringTheDigest(t *testing.T) {
+	m := okLLM()
+	h := newHarness(t, []string{"md"}, m)
+	p := h.write(t, "note.md", "---\ntitle: Old\n---\nold body\n")
+	m.ctxFn = func(context.Context) {
+		if err := os.Remove(p); err != nil {
+			t.Error(err)
+		}
+	}
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "test"})
+	if err != nil || rep.Skipped != 1 || rep.Deferred != 0 || rep.Digested != 0 {
+		t.Fatalf("deleted during digest: report=%+v err=%v", rep, err)
 	}
 	if !strings.HasPrefix(rep.PerFile[len(rep.PerFile)-1].Error, "read: ") {
 		t.Fatalf("result = %+v", rep.PerFile)
@@ -3239,9 +3260,14 @@ func TestRunPathInputDefersASourceThatChangedDuringTheDigest(t *testing.T) {
 			}
 		}
 	}
-	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "test"})
+	var events []FileResult
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "test", OnEvent: func(f FileResult) { events = append(events, f) }})
 	if err != nil || rep.Digested != 0 || rep.Deferred != 1 {
 		t.Fatalf("changed during digest: report=%+v err=%v", rep, err)
+	}
+	// Deferred is not a state change, so OnEvent never sees it.
+	if len(events) != 0 {
+		t.Fatalf("OnEvent got %+v for a deferred file", events)
 	}
 	if pages, _ := filepath.Glob(filepath.Join(h.wikiDir, "*", "*.md")); len(pages) != 0 {
 		t.Fatalf("pages written for a changed source: %v", pages)

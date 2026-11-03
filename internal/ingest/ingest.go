@@ -762,12 +762,16 @@ func hashFile(path string) (string, error) {
 // stopIfChanged re-hashes a source after the scan. It reports a read
 // failure as skipped (as the scan does) and a different hash as deferred,
 // and returns true in both cases so nothing is recorded under the scan's
-// hash.
+// hash. Like the scan's hash, this read takes no context: a source mount
+// that stalls mid-read holds the run (and ingest.lock) until the read
+// returns or the process is stopped.
 func (r *Runner) stopIfChanged(entry scanEntry, hash string, report *Report) bool {
 	now, err := hashFile(entry.absPath)
 	if err != nil {
+		// Skipped and deferred are not state changes, so they go to
+		// PerFile only, never to OnEvent (as in the scan).
 		report.Skipped++
-		report.addEvent(FileResult{Path: entry.absPath, Action: actionSkipped, Error: "read: " + sourceErrorText(err)})
+		report.PerFile = append(report.PerFile, FileResult{Path: entry.absPath, Action: actionSkipped, Error: "read: " + sourceErrorText(err)})
 		return true
 	}
 	if now != hash {
@@ -1006,5 +1010,5 @@ func acquireLock(dbPath string) (func(), error) {
 // archive capture keys); the next run sees the new bytes.
 func deferChanged(report *Report, entry scanEntry) {
 	report.Deferred++
-	report.addEvent(FileResult{Path: entry.absPath, Action: actionDeferred, Error: "changed since the scan"})
+	report.PerFile = append(report.PerFile, FileResult{Path: entry.absPath, Action: actionDeferred, Error: "changed since the scan"})
 }

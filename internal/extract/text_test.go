@@ -70,17 +70,18 @@ func TestExtractorTextReadIsBoundedAndRefusesSpecialFiles(t *testing.T) {
 		t.Fatal("followed a symlink")
 	}
 	fifo := filepath.Join(dir, "pipe.md")
-	if err := syscall.Mkfifo(fifo, 0o600); err == nil {
-		done := make(chan error, 1)
-		go func() { _, err := e.Extract(context.Background(), fifo); done <- err }()
-		select {
-		case err := <-done:
-			if err == nil || !strings.Contains(err.Error(), "not a regular file") {
-				t.Fatalf("FIFO: %v", err)
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatal("reading a FIFO blocked")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatalf("mkfifo: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { _, err := e.Extract(context.Background(), fifo); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+			t.Fatalf("FIFO: %v", err)
 		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("reading a FIFO blocked")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

@@ -1508,10 +1508,14 @@ scan source dir (top level only, Lstat: skip dirs/symlinks)
     or model error; a different hash defers the file (no page, ledger row,
     attempt, or archive keys under the old hash), and a file that cannot be read
     or is no longer a regular file is skipped as `read:`. Hashing opens without
-    following symlinks or blocking and reads no more than the size at open. A
-    change that is reverted before this check is not detected for path inputs
-    (PDF, any file the model reads itself); Claude-path markdown is also checked
-    exactly when ingest reads its frontmatter
+    following symlinks or blocking and reads at most one byte past the size at
+    open; a file whose size changed while being read is a read error and no
+    hash is returned. The hash read takes no context, so a source mount that
+    stalls mid-read holds the run and `ingest.lock` until the read returns or
+    the process is stopped (the scan's hash has the same limit). A change that
+    is reverted before this check is not detected for path inputs (PDF, any
+    file the model reads itself); Claude-path markdown is also checked exactly
+    when ingest reads its frontmatter
   → validate page frontmatter from bytes (non-empty map + title)
   → set `ingested_at` to the run's local date (YYYY-MM-DD), replacing any model value
   → drop model `archive_capture_ids`/`archive_object_id`; set them from the archive

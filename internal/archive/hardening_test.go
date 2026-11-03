@@ -114,7 +114,7 @@ func TestOversizedDeletionRecordIsRefusedBeforeWriting(t *testing.T) {
 func TestOpenRegularRefusesAFIFOWithoutBlocking(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "fifo")
 	if err := syscall.Mkfifo(p, 0o600); err != nil {
-		t.Skipf("mkfifo: %v", err)
+		t.Fatalf("mkfifo: %v", err)
 	}
 	done := make(chan error, 1)
 	go func() {
