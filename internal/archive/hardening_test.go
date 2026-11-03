@@ -224,3 +224,63 @@ func TestUnquarantineVerifiesDerivedObjects(t *testing.T) {
 		t.Fatalf("source was restored anyway: %v", err)
 	}
 }
+
+// When another Open creates a managed directory between ensureDir's Lstat
+// and its Mkdir, ensureDir accepts a real directory and still refuses a
+// symlink or file planted in that window.
+func TestEnsureDirRaceAcceptsOnlyARealDirectory(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		plant  func(p string) error
+		wantOK bool
+	}{
+		{"directory", func(p string) error { return os.Mkdir(p, 0o700) }, true},
+		{"symlink", func(p string) error { return os.Symlink(t.TempDir(), p) }, false},
+		{"file", func(p string) error { return os.WriteFile(p, nil, 0o600) }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "objects")
+			lose := func(name string, perm os.FileMode) error {
+				if err := tc.plant(name); err != nil {
+					t.Fatal(err)
+				}
+				return os.Mkdir(name, perm) // loses the race: EEXIST
+			}
+			err := ensureDirWith(p, lose)
+			if tc.wantOK && err != nil {
+				t.Fatalf("ensureDir after a concurrent directory create: %v", err)
+			}
+			if !tc.wantOK && err == nil {
+				t.Fatalf("ensureDir accepted a %s planted in the race window", tc.name)
+			}
+		})
+	}
+}
+
+// Concurrent Opens of one new root all succeed.
+func TestConcurrentOpenOfANewRoot(t *testing.T) {
+	for round := 0; round < 5; round++ {
+		root := filepath.Join(t.TempDir(), "archive")
+		const n = 4
+		errs := make(chan error, n)
+		var wg sync.WaitGroup
+		for i := 0; i < n; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				a, err := Open(root)
+				if err == nil {
+					a.Close()
+				}
+				errs <- err
+			}()
+		}
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			if err != nil {
+				t.Fatalf("round %d: concurrent Open: %v", round, err)
+			}
+		}
+	}
+}

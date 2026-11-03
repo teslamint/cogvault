@@ -353,13 +353,23 @@ func (a *Archive) lock(ctx context.Context, exclusive bool) (func(), error) {
 
 const lockPoll = 5 * time.Millisecond
 
-func ensureDir(p string) error {
+func ensureDir(p string) error { return ensureDirWith(p, os.Mkdir) }
+
+// ensureDirWith is ensureDir with the directory create injected, so a test
+// can lose the create race on purpose without touching shared state.
+func ensureDirWith(p string, mkdir func(string, os.FileMode) error) error {
 	info, err := os.Lstat(p)
 	if errors.Is(err, fs.ErrNotExist) {
-		if err := os.Mkdir(p, 0o700); err != nil {
+		err = mkdir(p, 0o700)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, fs.ErrExist) {
 			return fmt.Errorf("archive: %w", err)
 		}
-		return nil
+		// Another Open created it after our Lstat: check what is there now,
+		// so a symlink or file planted in that window is still refused.
+		info, err = os.Lstat(p)
 	}
 	if err != nil {
 		return fmt.Errorf("archive: %w", err)
