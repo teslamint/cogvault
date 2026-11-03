@@ -296,3 +296,42 @@ func TestRestoreTestFailsOnTamperedBackup(t *testing.T) {
 		t.Fatal("a failed report was accepted")
 	}
 }
+
+// Status takes the archive lock exclusively, so no write (shared) or
+// deletion action (exclusive) lands between its queries: a capture added
+// while a writer holds the lock is either wholly in a later status or the
+// status ran before the writer took the lock.
+func TestStatusIsOnePointInTimeAgainstAConcurrentWrite(t *testing.T) {
+	a, _ := openTest(t)
+	res := mustCapture(t, a, verified("status bytes\n", "s.md", "https://example.org/s"))
+	unlock, err := a.lock(false) // a writer in the middle of its operation
+	if err != nil {
+		t.Fatal(err)
+	}
+	type result struct {
+		c   Capture
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		c, err := a.Status(ctx, res.CaptureID)
+		done <- result{c, err}
+	}()
+	select {
+	case r := <-done:
+		unlock()
+		t.Fatalf("Status ran while a writer held the archive lock: %+v, %v", r.c.SameObject, r.err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	// The writer adds a relation (a second capture of the same bytes);
+	// Capture's own shared lock is compatible with the one held above.
+	two := mustCapture(t, a, verified("status bytes\n", "s.md", "https://example.org/s2"))
+	unlock()
+	r := <-done
+	if r.err != nil {
+		t.Fatalf("Status after the writer finished: %v", r.err)
+	}
+	if len(r.c.SameObject) != 1 || r.c.SameObject[0] != two.CaptureID {
+		t.Fatalf("Status did not see the whole write: same_object = %v, want [%s]", r.c.SameObject, two.CaptureID)
+	}
+}

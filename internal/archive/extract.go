@@ -225,7 +225,7 @@ func (a *Archive) ExtractText(ctx context.Context, captureID string) (Extraction
 		return Extraction{}, err
 	}
 	defer unlock()
-	c, err := a.Status(ctx, captureID)
+	c, err := a.status(ctx, captureID)
 	if err != nil {
 		return Extraction{}, err
 	}

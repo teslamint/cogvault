@@ -853,7 +853,23 @@ func checkText(fields ...string) error {
 
 // Status returns one capture with its relations, recovery history, and
 // ingest view. Captures of a quarantined or purged object are not found.
+// It holds the archive lock exclusively. Every registry write holds the
+// lock (shared to add data, exclusive for deletion actions), and Status
+// reads only the registry, so the view is one point in time: no write lands
+// between its queries.
 func (a *Archive) Status(ctx context.Context, captureID string) (Capture, error) {
+	unlock, err := a.lock(true)
+	if err != nil {
+		return Capture{}, err
+	}
+	defer unlock()
+	return a.status(ctx, captureID)
+}
+
+// status is Status for a caller that already holds the archive lock. Under
+// the shared lock its relations can include writes made between its
+// queries; deletion actions still run wholly before or after it.
+func (a *Archive) status(ctx context.Context, captureID string) (Capture, error) {
 	row := a.db.QueryRowContext(ctx, captureSelect+` WHERE c.capture_id = ?`, captureID)
 	c, err := scanCapture(row)
 	if errors.Is(err, sql.ErrNoRows) {

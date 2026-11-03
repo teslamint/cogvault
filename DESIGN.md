@@ -765,7 +765,9 @@ host's clock can go backwards. No archive code writes the wiki.
 while a file exists at the path.
 
 Operations take `archive.lock` with a fresh descriptor each: writes that add
-data share it; `Backup` and deletion actions hold it exclusively. Deletion
+data share it; `Backup`, deletion actions, and `Status` hold it exclusively,
+so a status view is one point in time (`ExtractText` reads capture fields
+under its own shared lock). Deletion
 actions append a seq-numbered record to `deletions/log.jsonl` and then apply
 it; `Open` re-applies the newest record per object by seq. `Backup` copies
 the registry with `VACUUM INTO`, copies files, and checks every referenced
