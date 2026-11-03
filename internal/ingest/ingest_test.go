@@ -19,6 +19,7 @@ import (
 	"github.com/teslamint/cogvault/internal/adapter/markdown"
 	"github.com/teslamint/cogvault/internal/config"
 	"github.com/teslamint/cogvault/internal/evidence"
+	"github.com/teslamint/cogvault/internal/extract"
 	"github.com/teslamint/cogvault/internal/index"
 	"github.com/teslamint/cogvault/internal/llm"
 	"github.com/teslamint/cogvault/internal/storage"
@@ -126,6 +127,13 @@ type harness struct {
 
 func newHarness(t *testing.T, types []string, m *mockLLM) *harness {
 	t.Helper()
+	return newHarnessWith(t, types, m, nil)
+}
+
+// newHarnessWith is newHarness with a config change applied before New, so
+// a test can exercise what New wires from the config.
+func newHarnessWith(t *testing.T, types []string, m *mockLLM, mutate func(*config.Config)) *harness {
+	t.Helper()
 	root := t.TempDir()
 	wikiDir := filepath.Join(root, "wiki")
 	srcDir := filepath.Join(root, "src")
@@ -142,6 +150,9 @@ func newHarness(t *testing.T, types []string, m *mockLLM) *harness {
 		Sources:       []config.SourceDir{{Path: srcDir, Types: types}},
 		Adapter:       "obsidian",
 		MaxFileSizeMB: 32,
+	}
+	if mutate != nil {
+		mutate(cfg)
 	}
 	store := storage.NewFSStorage(wikiDir, cfg)
 	idx, err := index.NewSQLiteIndex(wikiDir, dbPath, cfg)
@@ -3058,6 +3069,218 @@ func TestRunTextInputExtractsPDFAndSharesContext(t *testing.T) {
 	}
 	if ex.called != 1 || len(m.requests) != 1 || m.requests[0].SourceText != ex.text {
 		t.Fatalf("extractor=%d requests=%+v", ex.called, m.requests)
+	}
+}
+
+func TestRunTextInputDigestsMarkdownSourceVerbatim(t *testing.T) {
+	m := okLLM()
+	m.inputMode = llm.TextInput
+	h := newHarness(t, []string{"md"}, m)
+	content := "---\ntitle: Note\n---\n\n# Note\n\nComplete markdown body.\n"
+	h.write(t, "note.md", content)
+	h.runner.extractor = extract.NewExtractor(1000, extract.Commands{})
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "test"})
+	if err != nil || rep.Digested != 1 {
+		t.Fatalf("Run: report=%+v err=%v", rep, err)
+	}
+	if len(m.requests) != 1 || m.requests[0].SourceText != content {
+		t.Fatalf("requests=%+v", m.requests)
+	}
+}
+
+// TestRunTextInputUsesTheExtractorNewBuilds runs the runner New built,
+// without replacing its extractor, so New's wiring from llm.max_input_chars
+// is what digests the Markdown source.
+func TestRunTextInputUsesTheExtractorNewBuilds(t *testing.T) {
+	m := okLLM()
+	m.inputMode = llm.TextInput
+	content := "---\ntitle: Note\n---\n\n# Note\n\nComplete markdown body.\n"
+	h := newHarnessWith(t, []string{"md"}, m, func(c *config.Config) { c.LLM.MaxInputChars = len(content) })
+	h.write(t, "note.md", content)
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "test"})
+	if err != nil || rep.Digested != 1 {
+		t.Fatalf("Run: report=%+v err=%v", rep, err)
+	}
+	if len(m.requests) != 1 || m.requests[0].SourceText != content {
+		t.Fatalf("requests=%+v", m.requests)
+	}
+}
+
+// changingExtractor rewrites the source once, between the scan's hash and
+// the extraction, then extracts.
+type changingExtractor struct {
+	inner TextExtractor
+	then  string
+	done  *bool
+}
+
+func (c changingExtractor) Extract(ctx context.Context, p string) (string, error) {
+	if !*c.done {
+		*c.done = true
+		if err := os.WriteFile(p, []byte(c.then), 0o644); err != nil {
+			return "", err
+		}
+	}
+	return c.inner.Extract(ctx, p)
+}
+
+// TestRunTextInputDefersASourceThatChangedAfterTheScan: verbatim text whose
+// bytes no longer match the scan's hash is deferred, never digested or
+// recorded under the old hash; the next run digests the new bytes.
+func TestRunTextInputDefersASourceThatChangedAfterTheScan(t *testing.T) {
+	m := okLLM()
+	m.inputMode = llm.TextInput
+	h := newHarness(t, []string{"md"}, m)
+	old := "---\ntitle: Old\n---\nold body\n"
+	p := h.write(t, "note.md", old)
+	changed := "---\ntitle: New\n---\nnew body\n"
+	done := false
+	h.runner.extractor = changingExtractor{inner: extract.NewExtractor(1000, extract.Commands{}), then: changed, done: &done}
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "test"})
+	if err != nil || rep.Digested != 0 || rep.Deferred != 1 || len(m.requests) != 0 {
+		t.Fatalf("changed source: report=%+v requests=%d err=%v", rep, len(m.requests), err)
+	}
+	noOldRow(t, h, p, old)
+	rep, err = h.runner.Run(context.Background(), RunOptions{Origin: "test"})
+	if err != nil || rep.Digested != 1 || len(m.requests) != 1 || m.requests[0].SourceText != changed {
+		t.Fatalf("next run: report=%+v requests=%+v err=%v", rep, m.requests, err)
+	}
+}
+
+// noOldRow fails if the ledger holds a row for the source's old bytes.
+func noOldRow(t *testing.T, h *harness, path, old string) {
+	t.Helper()
+	if _, found, err := h.runner.ledger.lookup(path, contentHash([]byte(old))); err != nil || found {
+		t.Fatalf("ledger row under the old hash: found=%v err=%v", found, err)
+	}
+}
+
+// TestRunDefersInsteadOfFailingWhenTheSourceChanged: an extraction error
+// (the file became invalid UTF-8) or a model error while the file changed
+// defers the file; no attempt is spent under the scan's hash.
+func TestRunDefersInsteadOfFailingWhenTheSourceChanged(t *testing.T) {
+	old := "---\ntitle: Old\n---\nold body\n"
+	t.Run("extract error", func(t *testing.T) {
+		m := okLLM()
+		m.inputMode = llm.TextInput
+		h := newHarness(t, []string{"md"}, m)
+		p := h.write(t, "note.md", old)
+		done := false
+		h.runner.extractor = changingExtractor{inner: extract.NewExtractor(1000, extract.Commands{}), then: "caf\xe9", done: &done}
+		rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "test"})
+		if err != nil || rep.Deferred != 1 || rep.Failed != 0 {
+			t.Fatalf("report=%+v err=%v", rep, err)
+		}
+		noOldRow(t, h, p, old)
+	})
+	t.Run("digest error", func(t *testing.T) {
+		m := okLLM()
+		h := newHarness(t, []string{"md"}, m)
+		p := h.write(t, "note.md", old)
+		m.fn = func(llm.DigestRequest) (*llm.DigestResult, error) {
+			os.WriteFile(p, []byte("---\ntitle: New\n---\nnew body\n"), 0o644)
+			return nil, llm.ErrRefused
+		}
+		rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "test"})
+		if err != nil || rep.Deferred != 1 || rep.Failed != 0 || rep.Refused != 0 {
+			t.Fatalf("report=%+v err=%v", rep, err)
+		}
+		noOldRow(t, h, p, old)
+	})
+}
+
+// TestHashFileRefusesSpecialFilesAndRehashReadErrorsAreSkips: a FIFO is
+// refused without blocking, and a source that cannot be read after the
+// model call is reported as a read skip, not as changed.
+func TestHashFileRefusesSpecialFilesAndRehashReadErrorsAreSkips(t *testing.T) {
+	fifo := filepath.Join(t.TempDir(), "pipe.md")
+	if err := unix.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatalf("mkfifo: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { _, err := hashFile(fifo); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("hashed a FIFO")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("hashing a FIFO blocked")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root reads mode 000 files")
+	}
+	m := okLLM()
+	h := newHarness(t, []string{"md"}, m)
+	p := h.write(t, "note.md", "---\ntitle: Old\n---\nold body\n")
+	m.ctxFn = func(context.Context) { os.Chmod(p, 0) }
+	t.Cleanup(func() { os.Chmod(p, 0o644) })
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "test"})
+	if err != nil || rep.Skipped != 1 || rep.Deferred != 0 || rep.Digested != 0 {
+		t.Fatalf("unreadable after digest: report=%+v err=%v", rep, err)
+	}
+	if !strings.HasPrefix(rep.PerFile[len(rep.PerFile)-1].Error, "read: ") {
+		t.Fatalf("result = %+v", rep.PerFile)
+	}
+}
+
+// TestRunSkipsASourceDeletedDuringTheDigest checks the re-hash read
+// failure without relying on permission bits (so it also runs as root).
+func TestRunSkipsASourceDeletedDuringTheDigest(t *testing.T) {
+	m := okLLM()
+	h := newHarness(t, []string{"md"}, m)
+	p := h.write(t, "note.md", "---\ntitle: Old\n---\nold body\n")
+	m.ctxFn = func(context.Context) {
+		if err := os.Remove(p); err != nil {
+			t.Error(err)
+		}
+	}
+	var events []FileResult
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "test", OnEvent: func(f FileResult) { events = append(events, f) }})
+	if err != nil || rep.Skipped != 1 || rep.Deferred != 0 || rep.Digested != 0 {
+		t.Fatalf("deleted during digest: report=%+v err=%v", rep, err)
+	}
+	// A read skip is not a state change, so OnEvent never sees it.
+	if len(events) != 0 {
+		t.Fatalf("OnEvent got %+v for a skipped file", events)
+	}
+	if !strings.HasPrefix(rep.PerFile[len(rep.PerFile)-1].Error, "read: ") {
+		t.Fatalf("result = %+v", rep.PerFile)
+	}
+}
+
+// TestRunPathInputDefersASourceThatChangedDuringTheDigest: when the model
+// reads the file itself, a file that changed during the call (and stays
+// changed) is deferred and no page or ledger row is written for it.
+func TestRunPathInputDefersASourceThatChangedDuringTheDigest(t *testing.T) {
+	m := okLLM()
+	h := newHarness(t, []string{"md"}, m)
+	p := h.write(t, "note.md", "---\ntitle: Old\n---\nold body\n")
+	changed := false
+	m.ctxFn = func(context.Context) {
+		if !changed {
+			changed = true
+			if err := os.WriteFile(p, []byte("---\ntitle: New\n---\nnew body\n"), 0o644); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	var events []FileResult
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "test", OnEvent: func(f FileResult) { events = append(events, f) }})
+	if err != nil || rep.Digested != 0 || rep.Deferred != 1 {
+		t.Fatalf("changed during digest: report=%+v err=%v", rep, err)
+	}
+	// Deferred is not a state change, so OnEvent never sees it.
+	if len(events) != 0 {
+		t.Fatalf("OnEvent got %+v for a deferred file", events)
+	}
+	if pages, _ := filepath.Glob(filepath.Join(h.wikiDir, "*", "*.md")); len(pages) != 0 {
+		t.Fatalf("pages written for a changed source: %v", pages)
+	}
+	noOldRow(t, h, p, "---\ntitle: Old\n---\nold body\n")
+	rep, err = h.runner.Run(context.Background(), RunOptions{Origin: "test"})
+	if err != nil || rep.Digested != 1 {
+		t.Fatalf("next run: report=%+v err=%v", rep, err)
 	}
 }
 

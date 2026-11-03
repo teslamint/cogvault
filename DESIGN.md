@@ -305,6 +305,10 @@ builds), enforces a rendered-image byte cap, and OCRs each image with
 and preserves page order.
 `ValidatePrerequisites` exposes the command and language names checked by the
 CLI before the OpenAI adapter or ingest ledger is constructed.
+`Extractor` dispatches by extension: `.pdf` goes to `PDFExtractor`; `.md`,
+`.markdown`, and `.txt` are read whole and returned verbatim after a UTF-8 check
+and the same complete-only `max_input_chars` check (over-limit fails, never
+truncates). Ingest constructs `Extractor`; any other extension is an error.
 
 ### 2.8 ingest (new)
 
@@ -695,6 +699,98 @@ accepts a wiki-relative page path, content bytes, and a `FileChecker` interface
 bounded projection without resolving refs or touching storage. The package
 performs no writes, network access, or LLM calls.
 
+### 2.14 archive (experimental prototype, ADR 0027 proposed)
+
+`internal/archive` owns one root with content-addressed immutable objects and
+its own SQLite registry (`objects` with an active/quarantined/purged state,
+`captures`, `citations`, `attempts`, `handoffs`, `receipts`, `derivations`,
+`acquisitions`, `extractions`, `page_links`; `user_version=5` with an
+in-place v1 rebuild and `migrateLinks` for v2 to v4, which (re)links every
+collected receipt in one transaction, so v3 links recorded before the
+receipt-order rule get their lowest-numbered basis, and adds the partial
+unique index `attempts_link_once`; foreign keys on, one connection,
+`_txlock=immediate` so concurrent writers wait on `busy_timeout` instead of
+failing with `SQLITE_BUSY_SNAPSHOT`). The one connection means a query on
+`a.db` while a transaction is open deadlocks, so every non-transaction query
+runs before `BeginTx`, and a query inside a transaction goes through `tx`.
+`derivedObjects(object, action)` returns only the derived objects an action
+moves (not capture originals, not ones another active, or for purge
+quarantined, source still needs). `openRegular` (no-follow, non-blocking,
+regular files only) guards every object read, and `moveIfPresent` keeps the
+hash-verified copy. It depends on
+no other cogvault package. A store stages and hashes the input, then checks
+the request key in a transaction before publishing the object by hard link,
+so conflicts and rejected cites leave no object behind. Every path that
+reuses an existing object (a hard-link collision or an identical repeated
+request) re-verifies its size and SHA-256 through a no-follow open. A registry
+commit failure after publish can leave an unreferenced object; it is harmless
+because the address is its hash.
+
+`Reassess` adds a verified capture of held bytes through `CaptureSource` and
+links it with `RecordAttempt`; the link is checked first, so a rerun after an
+interrupted run links once. `ImportFetched` stages the fetch file before the
+body capture so refusals happen first, then stores the file as an object in
+`derivations`; `apply` extends every deletion action to derived objects
+(`derivedObjects`: derived files and extracted text). `addDerivation`
+re-checks under the lock that the body capture is still active.
+
+`Acquire` (acquire.go) builds a one-shot `http.Transport` with no proxy, no
+jar, no compression, and a `DialContext` that resolves the host, refuses the
+request if any answer fails `PublicAddr`, and dials the first checked
+address; `CheckRedirect` re-runs `checkAcquireURL` and strips credentials.
+`Acquirer.Resolve`/`Dial` are injection points for tests only; the address
+check always runs. `Acquire` writes the download record in the capture's
+transaction. `ExtractText` (extract.go) holds the exclusive lock from the
+status check to the commit, so a deletion action or another extraction of
+the same bytes runs wholly before or after it. `ExtractHTMLText` uses
+`encoding/xml` in non-strict HTML mode after removing raw-text element
+bodies.
+
+The capture map (capturemap.go) is written by `Pickup` and read by
+`internal/ingest` through `CapturesForSource`; `PageRecordsCapture` is the
+frontmatter check `archive_status` uses. `internal/ingest` imports
+`internal/archive` only for these. Ingest sets the page keys in `digestOne`
+next to `ingested_at`; they are a digest-time snapshot. An unchanged success
+row is never rewritten: a frontmatter-only update would need an atomic
+compare-and-write that `storage.Write` (in-place `os.WriteFile` under a
+per-process mutex) cannot give across `serve`, `ingest`, and direct editors.
+The capture-to-page association lives in the registry instead
+(pagelinks.go): `CollectReceipts` sorts receipt files with `receiptLess`
+(capture, then the numeric `receiptSeq` from `<capture>.<n>.json`) and
+inserts the receipt and its `linkReceipt` row in one transaction.
+`linkReceipt` keeps the lowest-numbered linking receipt as the basis, so
+collection and `backfillPageLinks` give the same result in any order.
+`latestObservation` (used by the ingest view and `Current`) picks the
+highest number; `observed_at` is never used for order, because the ingest
+host's clock can go backwards. No archive code writes the wiki.
+`internal/mcp` keeps `ingest.evidence_ref` and a link's `evidence_ref` only
+while a file exists at the path.
+
+Operations take `archive.lock` with a fresh descriptor each: writes that add
+data share it; `Backup`, deletion actions, `Status`, and `ExtractText` hold
+it exclusively, so a status view is one point in time and concurrent
+extractions of the same bytes return one recorded extraction. A wait for the
+lock polls a non-blocking flock and ends with the caller's context. Deletion
+actions append a seq-numbered record to `deletions/log.jsonl` and then apply
+it; `Open` re-applies the newest record per object by seq. `Backup` copies
+the registry with `VACUUM INTO`, copies files, and checks every referenced
+object before it writes `backup.json`. `Restore`/`RestoreTest` merge logs as
+prefixes of one sequence.
+
+Hand-off is file-only: the archive host writes `outbox/` manifests; the
+ingest host's `Pickup` and `WriteReceipts` read the share without opening the
+registry; `CollectReceipts` stores receipts verbatim. `internal/ingest`
+exposes `OpenLedgerReader` (immutable read-only open under an existing
+`ingest.lock`) for receipts.
+
+`internal/mcp` adds `ArchiveTools` and `ArchiveGate`; every archive handler
+enters the gate first. `cmd/cogvault` owns `archiveRuntime`: it opens the
+archive when `archive.root` is set, injects the activation check
+(`productionActivation` in serve, a stub only in tests), and implements the
+SIGHUP reload. `serveListener` runs reloads on one worker, cancels its
+context on shutdown, and waits for it before returning, so `runServe` closes
+the archive only after the last reload ends.
+
 ---
 
 ## 3. Data flow
@@ -780,6 +876,12 @@ resolveConfigPath → Load → bootstrap(store/index/adapter) → CheckConsisten
 | `httpauth/oauth.go` | OAuthValidator (JWT validation via golang-jwt/jwt/v5) |
 | `httpauth/jwks.go` | JWKSCache (OIDC discovery + JWKS fetch, key decode) |
 | `internal/evidence/evidence.go` | research-evidence parsing, validation diagnostics, warnings, and bounded summaries; reuses `terms.Parse`, storage accessed only through `FileChecker.IsFile` |
+| `internal/archive/archive.go` | prototype research archive: object staging/publish, registry DDL and v1–v4 migrations, archive lock, request digest/key idempotency, capture/report/summary/status queries |
+| `internal/archive/{recovery,handoff,deletion,backup}.go` | append-only recovery attempts; manifest/pickup/receipt hand-off; impact, quarantine, purge, seq-ordered deletion log; backup, verification, restore, restore test |
+| `internal/archive/{fetched,acquire,extract,capturemap,pagelinks}.go` | fetch-file import and derivations; SSRF-checked public URL acquisition and re-acquisition; `html-text/1` extraction; pickup capture map and page-record check; receipt-derived capture-to-page links |
+| `internal/ingest/ledger_reader.go` | immutable read-only ledger reader under an existing `ingest.lock`, for archive receipts |
+| `internal/mcp/archive_tools.go` | gated archive MCP tools and `ArchiveGate` |
+| `cmd/cogvault/archive*.go` | archive CLI, operator commands, serve-side `archiveRuntime`, activation check, and SIGHUP reload |
 | `cmd/cogvault/*` | cobra CLI: `--config`, init/search/serve/ingest/status/access-check; `ingest` brackets each run with timestamped stderr lines via one deferred emitter (`recover` → `result=panic`); clock seam `ingestNow`. `--run-log-dir` adds a per-run file (`ingest_run_log.go`) fed by `ingest.RunOptions.OnEvent`, which `internal/ingest` calls synchronously at each state-change result; seam `ingestPID` |
 | `Makefile` | build/install with `CODESIGN_IDENTITY` (default `-`, ad-hoc) and `CODESIGN_IDENTIFIER` (default `dev.tmint.cogvault`) applied to the build artifact and install destination; test, clean |
 | `scripts/install-signed.sh` | select one Developer ID identity, install, verify the installed identifier, and restart the loaded ingest job |

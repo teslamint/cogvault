@@ -112,7 +112,9 @@ llm:
 For a local OpenAI-compatible provider, configure a loopback API root and a
 ready model. Cogvault validates Poppler, Tesseract, and `eng`/`kor`, then
 checks `<base_url>/models` before constructing the adapter; failures occur
-before ledger construction.
+before ledger construction. The `openai` backend accepts `pdf`, `md`,
+`markdown`, and `txt` sources; text over `max_input_chars` fails instead of
+being truncated.
 
 ```yaml
 llm:

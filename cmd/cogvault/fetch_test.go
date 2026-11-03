@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -174,5 +175,32 @@ func TestRunFetchAcceptsMissingContentType(t *testing.T) {
 	stdout, _, err := executeCommand("fetch", "--config", configPath, "--source-dir", srcDir, srv.URL)
 	if err != nil || !strings.Contains(stdout, "saved") {
 		t.Fatalf("err = %v stdout = %q, want success without header", err, stdout)
+	}
+}
+
+func TestRunFetchRejectsBodyOverLimitInsteadOfTruncating(t *testing.T) {
+	configPath, _, _ := testVault(t)
+	for _, tc := range []struct {
+		size int
+		ok   bool
+	}{{10 << 20, true}, {10<<20 + 1, false}} {
+		srcDir := t.TempDir()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = w.Write([]byte(strings.Repeat("a", tc.size)))
+		}))
+		_, _, err := executeCommand("fetch", "--config", configPath, "--source-dir", srcDir, "--name", "big", srv.URL)
+		srv.Close()
+		if tc.ok != (err == nil) {
+			t.Fatalf("size %d: err = %v", tc.size, err)
+		}
+		if !tc.ok {
+			if !strings.Contains(err.Error(), "exceeds 10 MiB") {
+				t.Fatalf("size %d: err = %v, want size limit error", tc.size, err)
+			}
+			if _, statErr := os.Stat(filepath.Join(srcDir, "big.md")); !os.IsNotExist(statErr) {
+				t.Fatalf("size %d: capture written despite rejection: %v", tc.size, statErr)
+			}
+		}
 	}
 }

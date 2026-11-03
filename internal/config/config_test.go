@@ -641,10 +641,17 @@ func TestOpenAIConfigAcceptsMaximumAndPDFOnly(t *testing.T) {
 	}
 }
 
-func TestOpenAIConfigRejectsNonPDFSource(t *testing.T) {
-	p := writeConfigFile(t, "wiki_dir: /data/wiki\ndb_path: /state/db.db\nsources:\n  - path: /data/src\n    types: [pdf, md]\nllm:\n  backend: openai\n  model: m\n  base_url: http://localhost:8888/v1\n  max_input_chars: 100\n")
+func TestOpenAIConfigAcceptsTextSources(t *testing.T) {
+	p := writeConfigFile(t, "wiki_dir: /data/wiki\ndb_path: /state/db.db\nsources:\n  - path: /data/src\n    types: [pdf, md, markdown, txt]\nllm:\n  backend: openai\n  model: m\n  base_url: http://localhost:8888/v1\n  max_input_chars: 100\n")
+	if _, err := Load(p); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenAIConfigRejectsUnsupportedSource(t *testing.T) {
+	p := writeConfigFile(t, "wiki_dir: /data/wiki\ndb_path: /state/db.db\nsources:\n  - path: /data/src\n    types: [pdf, html]\nllm:\n  backend: openai\n  model: m\n  base_url: http://localhost:8888/v1\n  max_input_chars: 100\n")
 	_, err := Load(p)
-	if err == nil || !strings.Contains(err.Error(), "pdf") {
+	if err == nil || !strings.Contains(err.Error(), "sources[0].types") || !strings.Contains(err.Error(), "html") {
 		t.Fatalf("err=%v", err)
 	}
 }

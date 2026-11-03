@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/teslamint/cogvault/internal/adapter/obsidian"
+	"github.com/teslamint/cogvault/internal/archive"
 	"github.com/teslamint/cogvault/internal/config"
 	cverr "github.com/teslamint/cogvault/internal/errors"
 	"github.com/teslamint/cogvault/internal/extract"
@@ -99,7 +100,7 @@ func New(cfg *config.Config, store storage.Storage, idx index.Index, llmAdapter 
 	}
 	r := &Runner{
 		cfg: cfg, store: store, idx: idx, llm: llmAdapter,
-		extractor: extract.NewPDFExtractor(cfg.LLM.MaxInputChars, extract.Commands{}),
+		extractor: extract.NewExtractor(cfg.LLM.MaxInputChars, extract.Commands{}),
 		ledger:    l, dbPath: dbPath, settleWindow: settleWindow,
 		maxFileSize: int64(cfg.MaxFileSizeMB) << 20, now: time.Now,
 		readDir: os.ReadDir, notifyFunc: defaultNotify, withTimeout: context.WithTimeout,
@@ -323,12 +324,25 @@ func (r *Runner) digestOne(parent context.Context, entry scanEntry, hash, schema
 		var err error
 		sourceText, err = r.extractor.Extract(ctx, entry.absPath)
 		if err != nil {
+			// A file that changed after the scan (for example into invalid
+			// UTF-8) must not consume an attempt under the old hash.
+			if r.stopIfChanged(entry, hash, report) {
+				return
+			}
 			class := classPermanent
 			if errors.Is(err, extract.ErrTransient) {
 				class = classTransient
 			}
 			r.recordFailure(entry, hash, origin, prev, report, "extract: "+err.Error(), class)
 			return
+		}
+		// Markdown and text are passed verbatim, so their text is the bytes
+		// the model reads: an exact check against the scan's hash.
+		if ext := strings.ToLower(filepath.Ext(entry.absPath)); ext != ".pdf" {
+			if fmt.Sprintf("%x", sha256.Sum256([]byte(sourceText))) != hash {
+				deferChanged(report, entry)
+				return
+			}
 		}
 		source, _, err = terms.Parse([]byte(sourceText))
 		if err != nil {
@@ -341,6 +355,10 @@ func (r *Runner) digestOne(parent context.Context, entry scanEntry, hash, schema
 			r.recordFailure(entry, hash, origin, prev, report, "source: "+sourceErrorText(err), classPermanent)
 			return
 		}
+		if fmt.Sprintf("%x", sha256.Sum256(content)) != hash {
+			deferChanged(report, entry)
+			return
+		}
 		source, _, err = terms.Parse(content)
 		if err != nil {
 			r.recordFailure(entry, hash, origin, prev, report, "source: "+err.Error(), classPermanent)
@@ -350,6 +368,9 @@ func (r *Runner) digestOne(parent context.Context, entry scanEntry, hash, schema
 	slug := slugFor(entry.absPath, hash)
 	res, err := r.llm.Digest(ctx, llm.DigestRequest{SourcePath: entry.absPath, SourceText: sourceText, SchemaText: schemaText, PageSlug: slug, SourceExt: filepath.Ext(entry.absPath)})
 	if err != nil {
+		if r.stopIfChanged(entry, hash, report) {
+			return
+		}
 		class := classPermanent
 		if errors.Is(err, llm.ErrTransient) {
 			class = classTransient
@@ -357,6 +378,14 @@ func (r *Runner) digestOne(parent context.Context, entry scanEntry, hash, schema
 			class = classRefused
 		}
 		r.recordFailure(entry, hash, origin, prev, report, "digest: "+err.Error(), class)
+		return
+	}
+	// Path inputs (a PDF read by the extractor, any file the model reads
+	// itself) are re-hashed after the model call. This catches a file that
+	// changed after the scan and is still different now; a change that was
+	// reverted before this check is not detected. Verbatim text is also
+	// checked exactly above.
+	if r.stopIfChanged(entry, hash, report) {
 		return
 	}
 	fm, title, body, err := checkPage(res.PageContent)
@@ -396,6 +425,17 @@ func (r *Runner) digestOne(parent context.Context, entry scanEntry, hash, schema
 	}
 	// Models invent this date (observed: today's date from a stale prompt, or the document's own date).
 	fm["ingested_at"] = r.now().Format("2006-01-02")
+	// Archive provenance comes only from the capture map Pickup wrote next to
+	// the source, and only when its object ID is these bytes' hash; a value
+	// from the model or an older run never survives.
+	delete(fm, archive.PageCaptureIDsKey)
+	delete(fm, archive.PageObjectIDKey)
+	if obj, ids, err := archive.CapturesForSource(entry.absPath, hash); err != nil {
+		slog.Warn("ingest: archive capture map unreadable; capture IDs not recorded", "source", entry.absPath, "err", err)
+	} else if obj != "" {
+		fm[archive.PageCaptureIDsKey] = ids
+		fm[archive.PageObjectIDKey] = obj
+	}
 	// The model cannot see the page list, so it invents link targets. Keep the
 	// links that resolve and turn the rest into plain display text.
 	pages, err := r.listPages()
@@ -690,18 +730,55 @@ func contentHash(data []byte) string {
 }
 
 // hashFile streams the file into a sha256 hasher so full contents are never
-// retained in memory. Only the hex digest is kept per scan entry.
+// retained in memory. Only the hex digest is kept per scan entry. It opens
+// without following a final symlink and without blocking, and refuses
+// anything but a regular file, so a FIFO swapped in cannot hang the run.
 func hashFile(path string) (string, error) {
-	f, err := os.Open(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	info, err := f.Stat()
+	if err != nil {
 		return "", err
 	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("%s is not a regular file", filepath.Base(path))
+	}
+	// Read at most one byte past the size at open, so a file that keeps
+	// growing cannot keep the hash reading; a size change is an error.
+	h := sha256.New()
+	n, err := io.Copy(h, io.LimitReader(f, info.Size()+1))
+	if err != nil {
+		return "", err
+	}
+	if n != info.Size() {
+		return "", fmt.Errorf("%s changed size while being read", filepath.Base(path))
+	}
 	return fmt.Sprintf("%x", h.Sum(nil)), nil
+}
+
+// stopIfChanged re-hashes a source after the scan. It reports a read
+// failure as skipped (as the scan does) and a different hash as deferred,
+// and returns true in both cases so nothing is recorded under the scan's
+// hash. Like the scan's hash, this read takes no context: a source mount
+// that stalls mid-read holds the run (and ingest.lock) until the read
+// returns or the process is stopped.
+func (r *Runner) stopIfChanged(entry scanEntry, hash string, report *Report) bool {
+	now, err := hashFile(entry.absPath)
+	if err != nil {
+		// Skipped and deferred are not state changes, so they go to
+		// PerFile only, never to OnEvent (as in the scan).
+		report.Skipped++
+		report.PerFile = append(report.PerFile, FileResult{Path: entry.absPath, Action: actionSkipped, Error: "read: " + sourceErrorText(err)})
+		return true
+	}
+	if now != hash {
+		deferChanged(report, entry)
+		return true
+	}
+	return false
 }
 func sourceErrorText(err error) string {
 	if !errors.Is(err, fs.ErrPermission) {
@@ -926,4 +1003,12 @@ func acquireLock(dbPath string) (func(), error) {
 		unix.Flock(int(f.Fd()), unix.LOCK_UN)
 		f.Close()
 	}, nil
+}
+
+// deferChanged reports a source whose bytes no longer hash to the scan's
+// hash. Nothing is recorded under the old hash (no page, ledger row, or
+// archive capture keys); the next run sees the new bytes.
+func deferChanged(report *Report, entry scanEntry) {
+	report.Deferred++
+	report.PerFile = append(report.PerFile, FileResult{Path: entry.absPath, Action: actionDeferred, Error: "changed since the scan"})
 }

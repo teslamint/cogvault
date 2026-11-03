@@ -56,17 +56,64 @@ type GitConfig struct {
 }
 
 type Config struct {
-	WikiDir             string      `yaml:"wiki_dir"`
-	DBPath              string      `yaml:"db_path"`
-	Sources             []SourceDir `yaml:"sources"`
-	Exclude             []string    `yaml:"exclude"`
-	ExcludeRead         []string    `yaml:"exclude_read"`
-	Adapter             string      `yaml:"adapter"`
-	ConsistencyInterval int         `yaml:"consistency_interval"`
-	MaxFileSizeMB       int         `yaml:"max_file_size_mb"`
-	LLM                 LLMConfig   `yaml:"llm"`
-	Auth                AuthConfig  `yaml:"auth"`
-	Git                 GitConfig   `yaml:"git"`
+	WikiDir             string        `yaml:"wiki_dir"`
+	DBPath              string        `yaml:"db_path"`
+	Sources             []SourceDir   `yaml:"sources"`
+	Exclude             []string      `yaml:"exclude"`
+	ExcludeRead         []string      `yaml:"exclude_read"`
+	Adapter             string        `yaml:"adapter"`
+	ConsistencyInterval int           `yaml:"consistency_interval"`
+	MaxFileSizeMB       int           `yaml:"max_file_size_mb"`
+	LLM                 LLMConfig     `yaml:"llm"`
+	Auth                AuthConfig    `yaml:"auth"`
+	Git                 GitConfig     `yaml:"git"`
+	Archive             ArchiveConfig `yaml:"archive,omitempty"`
+}
+
+// ArchiveConfig configures the research source archive (ADR 0027,
+// proposed). Only CaptureEnabled can change without a restart, through an
+// explicit operator reload; every other key is read at startup.
+type ArchiveConfig struct {
+	// Root is the archive root. Empty means no archive.
+	Root string `yaml:"root"`
+	// CaptureEnabled exposes the archive MCP tools. Default false.
+	CaptureEnabled bool `yaml:"capture_enabled"`
+	// Deployment holds the settings capture requires (ADR 0027 item 14).
+	// serve refuses to enable capture while any of them is empty or the
+	// restore test report did not pass. No config key bypasses this; only
+	// tests inject a different activation check.
+	Deployment ArchiveDeployment `yaml:"deployment"`
+}
+
+// ArchiveDeployment holds operator-supplied deployment attestations. serve
+// checks that each is present (and the narrow file checks listed in
+// productionActivation); it cannot verify the deployment behind them.
+type ArchiveDeployment struct {
+	BackupTarget      string `yaml:"backup_target"`
+	BackupSchedule    string `yaml:"backup_schedule"`
+	RestoreTestReport string `yaml:"restore_test_report"`
+	PermissionsOwner  string `yaml:"permissions_owner"`
+	HandoffMount      string `yaml:"handoff_mount"`
+	// DeletionLogReplica is a copy of the deletion log kept off the NAS, so
+	// the newest deletion records survive the loss of the NAS and can be
+	// re-applied to an older backup. How it stays current is ADR 0027 open
+	// question 1.
+	DeletionLogReplica string `yaml:"deletion_log_replica"`
+}
+
+// MissingDeploymentSettings names the empty deployment settings.
+func (d ArchiveDeployment) MissingDeploymentSettings() []string {
+	var missing []string
+	for _, kv := range [][2]string{
+		{"backup_target", d.BackupTarget}, {"backup_schedule", d.BackupSchedule},
+		{"restore_test_report", d.RestoreTestReport}, {"permissions_owner", d.PermissionsOwner},
+		{"handoff_mount", d.HandoffMount}, {"deletion_log_replica", d.DeletionLogReplica},
+	} {
+		if strings.TrimSpace(kv[1]) == "" {
+			missing = append(missing, "archive.deployment."+kv[0])
+		}
+	}
+	return missing
 }
 
 const archiveExcludePath = "sources/_archived"
@@ -173,6 +220,7 @@ func Save(configPath string) error {
 func (c *Config) applyDefaults() {
 	c.WikiDir = expandTilde(c.WikiDir)
 	c.DBPath = expandTilde(c.DBPath)
+	c.Archive.Root = expandTilde(c.Archive.Root)
 	for i := range c.Sources {
 		c.Sources[i].Path = expandTilde(c.Sources[i].Path)
 		for j := range c.Sources[i].Types {
@@ -311,8 +359,10 @@ func (c *Config) validate() error {
 		}
 		for i, source := range c.Sources {
 			for _, typ := range source.Types {
-				if typ != "pdf" {
-					return fmt.Errorf("sources[%d].types: openai supports pdf sources only", i)
+				switch typ {
+				case "pdf", "md", "markdown", "txt":
+				default:
+					return fmt.Errorf("sources[%d].types: openai does not support %q; allowed: pdf, md, markdown, txt", i, typ)
 				}
 			}
 		}
@@ -345,6 +395,51 @@ func (c *Config) validate() error {
 	}
 	if !slices.Contains(ValidGitAutoCommitModes(), c.Git.AutoCommit) {
 		return fmt.Errorf("git.auto_commit: %q not supported; use \"off\", \"write\", or \"write+ingest\"", c.Git.AutoCommit)
+	}
+	return c.validateArchive(cleanWiki, cleanedDB)
+}
+
+// validateArchive checks archive path strings only; the archive package
+// checks the file system when it opens the root.
+func (c *Config) validateArchive(cleanWiki, cleanDB string) error {
+	a := c.Archive
+	if a.Root == "" {
+		if a.CaptureEnabled {
+			return fmt.Errorf("archive.capture_enabled: requires archive.root")
+		}
+		return nil
+	}
+	if hasUnexpandedTilde(a.Root) {
+		return fmt.Errorf("archive.root: cannot expand \"~\": home directory not available")
+	}
+	if err := validateAbsPath("archive.root", a.Root); err != nil {
+		return err
+	}
+	root := filepath.Clean(a.Root)
+	if adapter.HasPathPrefix(root, cleanWiki) || adapter.HasPathPrefix(cleanWiki, root) {
+		return fmt.Errorf("archive.root: must not overlap wiki_dir")
+	}
+	if adapter.HasPathPrefix(cleanDB, root) {
+		return fmt.Errorf("archive.root: must not contain db_path")
+	}
+	for i, s := range c.Sources {
+		src := filepath.Clean(s.Path)
+		if adapter.HasPathPrefix(root, src) || adapter.HasPathPrefix(src, root) {
+			return fmt.Errorf("archive.root: must not overlap sources[%d].path", i)
+		}
+	}
+	if p := a.Deployment.RestoreTestReport; p != "" {
+		if err := validateAbsPath("archive.deployment.restore_test_report", p); err != nil {
+			return err
+		}
+	}
+	if p := a.Deployment.DeletionLogReplica; p != "" {
+		if err := validateAbsPath("archive.deployment.deletion_log_replica", p); err != nil {
+			return err
+		}
+		if adapter.HasPathPrefix(filepath.Clean(p), root) {
+			return fmt.Errorf("archive.deployment.deletion_log_replica: must be outside archive.root")
+		}
 	}
 	return nil
 }

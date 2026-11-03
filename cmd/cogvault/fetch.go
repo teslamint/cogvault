@@ -18,6 +18,10 @@ import (
 	"github.com/teslamint/cogvault/internal/terms"
 )
 
+// maxFetchBytes bounds a fetched body; larger responses are rejected rather
+// than truncated so a capture is never a silently shortened page.
+const maxFetchBytes = 10 << 20
+
 func newFetchCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "fetch <url>",
@@ -64,9 +68,12 @@ func runFetch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("fetch %s: HTTP %d", rawURL, resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxFetchBytes+1))
 	if err != nil {
 		return fmt.Errorf("read response: %w", err)
+	}
+	if len(body) > maxFetchBytes {
+		return fmt.Errorf("fetch %s: response body exceeds 10 MiB limit", rawURL)
 	}
 	// A URL that returns binary media (PDF, image) would otherwise be
 	// deposited as a .md capture and pushed to the LLM digest as garbage.
