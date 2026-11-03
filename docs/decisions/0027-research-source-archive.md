@@ -333,8 +333,8 @@ are listed separately.
 
 ## Prototype status
 
-Implemented locally on branch `proto/research-archive`, uncommitted, not
-deployed: items 2–4, 6–12, and the mechanisms of 13 and 14 (`SPEC.md` §9.16,
+Implemented on branch `proto/research-archive` (PR #59), not deployed:
+items 2–4, 6–12, and the mechanisms of 13 and 14 (`SPEC.md` §9.16,
 `DESIGN.md` §2.14). Also implemented without settling an open question:
 
 - An operator reassessment that adds a linked verified capture of held

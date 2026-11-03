@@ -704,13 +704,20 @@ performs no writes, network access, or LLM calls.
 `internal/archive` owns one root with content-addressed immutable objects and
 its own SQLite registry (`objects` with an active/quarantined/purged state,
 `captures`, `citations`, `attempts`, `handoffs`, `receipts`, `derivations`,
-`acquisitions`, `extractions`, `page_links`; `user_version=4` with an
-in-place v1 rebuild and `migrateLinks` for v2 and v3, which (re)links every
+`acquisitions`, `extractions`, `page_links`; `user_version=5` with an
+in-place v1 rebuild and `migrateLinks` for v2 to v4, which (re)links every
 collected receipt in one transaction, so v3 links recorded before the
-receipt-order rule get their lowest-numbered basis,
-foreign keys on, one connection). The one connection means a query on
+receipt-order rule get their lowest-numbered basis, and adds the partial
+unique index `attempts_link_once`; foreign keys on, one connection,
+`_txlock=immediate` so concurrent writers wait on `busy_timeout` instead of
+failing with `SQLITE_BUSY_SNAPSHOT`). The one connection means a query on
 `a.db` while a transaction is open deadlocks, so every non-transaction query
-runs before `BeginTx`. It depends on
+runs before `BeginTx`, and a query inside a transaction goes through `tx`.
+`derivedObjects(object, action)` returns only the derived objects an action
+moves (not capture originals, not ones another active, or for purge
+quarantined, source still needs). `openRegular` (no-follow, non-blocking,
+regular files only) guards every object read, and `moveIfPresent` keeps the
+hash-verified copy. It depends on
 no other cogvault package. A store stages and hashes the input, then checks
 the request key in a transaction before publishing the object by hard link,
 so conflicts and rejected cites leave no object behind. Every path that
@@ -864,7 +871,7 @@ resolveConfigPath → Load → bootstrap(store/index/adapter) → CheckConsisten
 | `httpauth/oauth.go` | OAuthValidator (JWT validation via golang-jwt/jwt/v5) |
 | `httpauth/jwks.go` | JWKSCache (OIDC discovery + JWKS fetch, key decode) |
 | `internal/evidence/evidence.go` | research-evidence parsing, validation diagnostics, warnings, and bounded summaries; reuses `terms.Parse`, storage accessed only through `FileChecker.IsFile` |
-| `internal/archive/archive.go` | prototype research archive: object staging/publish, registry DDL and v1/v2/v3 migrations, archive lock, request digest/key idempotency, capture/report/summary/status queries |
+| `internal/archive/archive.go` | prototype research archive: object staging/publish, registry DDL and v1–v4 migrations, archive lock, request digest/key idempotency, capture/report/summary/status queries |
 | `internal/archive/{recovery,handoff,deletion,backup}.go` | append-only recovery attempts; manifest/pickup/receipt hand-off; impact, quarantine, purge, seq-ordered deletion log; backup, verification, restore, restore test |
 | `internal/archive/{fetched,acquire,extract,capturemap,pagelinks}.go` | fetch-file import and derivations; SSRF-checked public URL acquisition and re-acquisition; `html-text/1` extraction; pickup capture map and page-record check; receipt-derived capture-to-page links |
 | `internal/ingest/ledger_reader.go` | immutable read-only ledger reader under an existing `ingest.lock`, for archive receipts |

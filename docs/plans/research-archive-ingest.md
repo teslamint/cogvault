@@ -50,11 +50,12 @@ Claude·ChatGPT 심층 리서치와 웹 검색에서 발견한 자료를 보관�
 
 프로토타입은 이 차단을 `archive.deployment` 설정의 **운영자 제출 attestation 존재 검사**로만 강제한다: 모든 항목 존재, 복원 시험 보고서 통과·`backup_target` 아래 백업 대상·`deletion_log_replica` 사용, 활성화 시점에 replica가 live 로그 전체를 포함. 코드는 대상·replica가 실제로 NAS 밖인지, 백업이 매일 도는지, replica가 계속 최신인지, 권한·마운트가 맞는지, 보고서가 최신인지 확인하지 못한다. 검사 통과는 배포 승인이 아니며 운영 enable에는 별도 사람 검토가 필요하다. 어떤 설정 키로도 이 검사를 건너뛸 수 없다.
 
-## 프로토타입 구현 현황 (`proto/research-archive`, 미커밋, 미배포)
+## 프로토타입 구현 현황 (`proto/research-archive`, PR #59, 미배포)
 
 ADR 0027은 proposed 그대로이고 운영 경로·NAS·live wiki·자격 증명은 건드리지 않았다. 계약은 `SPEC.md` §3.1·§9.3·§9.16, 구조는 `DESIGN.md` §2.14.
 
-- 구현: A 통합(작업 트리), registry v4(v1·v2·v3 이전; v3의 기존 연결은 열 때 receipt 번호 규칙으로 basis를 고친다), summary, 복구 시도, manifest/pickup/receipt 인계(객체당 확장자 고정, backend별 타입, 읽기 전용 ledger reader), 기본 off MCP 도구 5개와 gate, SIGHUP reload, 영향 보고·격리·복구·건별 purge·seq 삭제 기록, archive lock, 백업·검증·복원·복원 시험, 운영 활성화 attestation 검사.
+- 구현: A 통합, registry v5(v1~v4 이전; v3의 기존 연결은 열 때 receipt 번호 규칙으로 basis를 고친다; 같은 보류·결과 capture 쌍의 연결은 한 번만), summary, 복구 시도, manifest/pickup/receipt 인계(객체당 확장자 고정, backend별 타입, 읽기 전용 ledger reader), 기본 off MCP 도구 5개와 gate, SIGHUP reload, 영향 보고·격리·복구·건별 purge·seq 삭제 기록, archive lock, 백업·검증·복원·복원 시험, 운영 활성화 attestation 검사.
+- 리뷰 반영(PR #59): 여러 원본이 공유하는 파생 텍스트는 다른 원본이 필요로 하면 격리·purge하지 않는다. 복구는 크기·해시가 맞는 파일이 있을 때만 기록한다. 두 위치에 파일이 있으면 검증된 사본을 남긴다. 삭제 기록 한 줄이 로그 한도를 넘으면 쓰기 전에 거부한다. FIFO·비정규 파일은 막히지 않고 거부한다. capture map 갱신은 대상 디렉터리 flock으로 직렬화하고 16 MiB를 넘으면 거부한다. 텍스트 소스 읽기는 상한·no-follow로 바꿨다. 실패한 추출을 다시 요청하면 기록된 실패를 오류로 돌려준다.
 - 추가 구현(미결을 정하지 않는 범위): 보류 capture의 운영자 재평가(`reassess`: 같은 바이트·같은 provenance의 verified capture를 새로 만들고 attempt로 연결, basis는 운영자 진술이며 cogvault가 독립 검증하지 않음), 기존 fetch `.md`의 로컬 반입(`import-fetched`: 바이트 그대로 재인코딩될 때만 본문을 형식 불명 `.response` 원본으로, fetch 파일은 derived 객체로 보존, 삭제 시 함께 처리), `archive_status`의 `evidence_ref_path_exists`(ref 경로에 파일이 있는지만; 페이지가 그 capture를 기술한다는 뜻 아님).
 - E 단계 추가 구현(미결을 정하지 않는 범위):
   - capture map: Pickup이 source 디렉터리에 `.cogvault-archive-captures.json`을 원자적으로 기록한다. 신뢰 범위는 source 디렉터리와 같다.

@@ -1210,8 +1210,12 @@ scheduling, or backup expiry.
   non-regular entries. Symlinks in the root's ancestors are trusted. The
   check runs at open only: another same-user process that swaps entries
   inside the root while a command runs is out of scope. Use a local disk;
-  the registry must not live on SMB. Registry schema 4; schema-1, -2, and
-  -3 registries are migrated in place, and capture IDs are unchanged.
+  the registry must not live on SMB. Registry schema 5; schema-1 through
+  -4 registries are migrated in place, and capture IDs are unchanged.
+  Registry transactions take the write lock at `BEGIN` (`_txlock=immediate`),
+  so concurrent writers wait instead of failing. Schema 5 allows one linking
+  attempt per (held capture, result capture) pair; a repeated link is a
+  conflict, and `reassess` treats it as already linked.
 - **Locking.** Captures, attempts, hand-offs, and receipt collection share
   `archive.lock` (flock, one descriptor per operation, so it orders
   processes too); backups and deletion actions take it exclusively.
@@ -1294,10 +1298,13 @@ scheduling, or backup expiry.
   fields, trailing data, or one object under two extensions are rejected.
   Pickup then adds each copied or matching capture to the **capture map**
   `<dest>/.cogvault-archive-captures.json` (`version` 1; `entries` keyed by
-  copy file name: `object_id`, sorted `capture_ids`), replaced atomically.
-  IDs only accumulate; an entry for other bytes is a conflict. The map is
-  trusted as far as the source directory is: whoever can write source files
-  can write it.
+  copy file name: `object_id`, sorted `capture_ids`), replaced atomically
+  under an exclusive `flock` on the destination directory, so overlapping
+  pickups keep each other's entries. A map that would pass 16 MiB is refused
+  before writing. Pickup opens objects without following symlinks or
+  blocking, and refuses non-regular files. IDs only accumulate; an entry for
+  other bytes is a conflict. The map is trusted as far as the source
+  directory is: whoever can write source files can write it.
 - **Capture IDs on source pages** (ingest, §10): on every digest ingest
   removes `archive_capture_ids` and `archive_object_id` from the generated
   frontmatter, then sets them from the capture map only if the map entry for
@@ -1307,8 +1314,9 @@ scheduling, or backup expiry.
   page was digested, not the full list: ingest never rewrites a page for an
   unchanged success row, so a capture handed off later is not added to it.
 - **Page links** (`page_links` in the registry, added in schema version 3;
-  version 4 applies the receipt-order rule below to links already
-  recorded, by relinking every collected receipt once on open): the
+  upgrading a schema 2, 3, or 4 registry applies the receipt-order rule
+  below to links already recorded, by relinking every collected receipt once
+  on open): the
   archive's own record of which captures belong to which wiki source page,
   and the full list for a page (`page-links <wiki-page>`). A link is
   recorded only from a collected receipt whose ledger status is `success`
@@ -1357,11 +1365,14 @@ scheduling, or backup expiry.
   `math`, `head` content except `title`, and attributes are dropped; block
   elements become line breaks, headings `#`, list items `- `. The text is
   stored as its own object with the extractor version and limits; a parse
-  failure is recorded and returned, never guessed. The original is not
+  failure is recorded and returned, never guessed; repeating a failed
+  extraction returns the recorded failure as an error. Only a `title` whose
+  parent is `head` (or `html`) becomes the heading. The original is not
   changed, extraction is per object and repeatable, and derived text is
   never handed off. Extraction holds the shared lock from the source check
   to the commit, so it never records output for a quarantined or purged
-  source; deletion actions apply to extracted text with its source.
+  source; deletion actions apply to extracted text with its source (see
+  *Deletion* for text shared by several sources).
 - **Receipts** (ingest host): opens the ingest ledger read-only
   (`mode=ro&immutable=1`) under the existing `ingest.lock`, which it never
   creates; refuses a missing DB, a missing ledger table, a missing lock file,
@@ -1388,14 +1399,25 @@ scheduling, or backup expiry.
   current; the CLI does not check that the page exists.
 - **Deletion** (operator only, never MCP): `impact` lists dependents
   (captures, reports, summaries, attempts, manifests, ingest-host copies,
-  source pages) with a digest. `quarantine` needs the current digest, moves
-  the object to `quarantine/`, removes its manifests, and hides its captures
-  from status, list, hand-off, and MCP. `unquarantine` restores it. `purge`
-  needs `--confirm` with the object ID and at least 30 days in quarantine;
-  nothing purges automatically. Purge removes this archive's bytes only, not
-  backups or ingest-host copies. Every action first appends a record (seq,
-  action, object ID, capture IDs, time; no content) to `deletions/log.jsonl`;
-  open re-applies the log, ordered by seq, never by time.
+  source pages, and the derived objects the next action would move) with a
+  digest. `quarantine` needs the current digest, moves the object to
+  `quarantine/`, removes its manifests, and hides its captures from status,
+  list, hand-off, and MCP. `unquarantine` restores it only when a
+  quarantined or active file matches the object's size and SHA-256
+  (otherwise an integrity error and no record). `purge` needs `--confirm`
+  with the object ID and at least 30 days in quarantine; nothing purges
+  automatically. Purge removes this archive's bytes only, not backups or
+  ingest-host copies. **Derived objects** (fetch files, extracted text) move
+  with their source, except one that is itself a capture's original, or one
+  another source still needs: quarantine keeps it while another source is
+  active, purge while another source is active or quarantined; restore
+  brings back every derived object that is not a capture's original. Every
+  action first appends a record (seq, action, object ID, capture IDs, time;
+  no content) to `deletions/log.jsonl`; a record longer than the log's
+  64 KiB line limit is refused before writing, so the log stays readable.
+  Open re-applies the log, ordered by seq, never by time. When a file exists
+  both active and in quarantine, the copy that matches the object's size and
+  hash is kept; if neither matches, nothing is removed and the action fails.
 - **Backup** (`backup`): under the exclusive lock, `VACUUM INTO` copies the
   registry, then objects, quarantine, receipts, and the deletion log are
   copied and every object the registry copy references is checked by size
@@ -1839,6 +1861,16 @@ sends `reasoning_effort: "none"` and `max_tokens: 4096`; a response with
   `.2`; a schema-2 backfill gives the same basis and latest state; a
   schema-3 registry holding a `.10` basis with `.2` already collected
   (which re-collection does not change) gets basis `.2` on open.
+- Deletion and pickup hardening: text shared by two HTML sources stays
+  while either needs it and goes with the last; a damaged or missing
+  quarantined file blocks `unquarantine` with no log record; when a file
+  exists in both places, the verified copy wins and two damaged copies are
+  an error with nothing removed; an oversized deletion record is refused
+  and the log stays readable; FIFOs are refused without blocking;
+  overlapping capture-map updates keep every entry and an oversized map is
+  refused unchanged; backups keep objects read-only; concurrent
+  reassessments from two handles link once; a repeated failed extraction
+  returns the failure; an svg `title` is not the document title.
 - Acquire: public-address table; loopback, private, mixed, metadata,
   mapped, and literal hosts refused with no unchecked dial; the dial goes to
   the checked address when DNS rebinds; queries, bare `?`, fragments,
