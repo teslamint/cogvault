@@ -3235,9 +3235,14 @@ func TestRunSkipsASourceDeletedDuringTheDigest(t *testing.T) {
 			t.Error(err)
 		}
 	}
-	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "test"})
+	var events []FileResult
+	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "test", OnEvent: func(f FileResult) { events = append(events, f) }})
 	if err != nil || rep.Skipped != 1 || rep.Deferred != 0 || rep.Digested != 0 {
 		t.Fatalf("deleted during digest: report=%+v err=%v", rep, err)
+	}
+	// A read skip is not a state change, so OnEvent never sees it.
+	if len(events) != 0 {
+		t.Fatalf("OnEvent got %+v for a skipped file", events)
 	}
 	if !strings.HasPrefix(rep.PerFile[len(rep.PerFile)-1].Error, "read: ") {
 		t.Fatalf("result = %+v", rep.PerFile)
