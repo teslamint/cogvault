@@ -94,6 +94,41 @@ func TestExtractTextKeepsOriginalAndRecordsVersion(t *testing.T) {
 	}
 }
 
+// Concurrent extractions of the same bytes all return the one recorded
+// extraction; none sees a cache miss and then a primary-key conflict.
+func TestConcurrentExtractTextReturnsOneRecordedExtraction(t *testing.T) {
+	a, _ := openTest(t)
+	res := htmlCapture(t, a, "<html><body><p>Concurrent</p></body></html>")
+	const n = 8
+	type result struct {
+		e   Extraction
+		err error
+	}
+	out := make(chan result, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			e, err := a.ExtractText(ctx, res.CaptureID)
+			out <- result{e, err}
+		}()
+	}
+	var first string
+	for i := 0; i < n; i++ {
+		r := <-out
+		if r.err != nil {
+			t.Fatalf("concurrent ExtractText: %v", r.err)
+		}
+		if first == "" {
+			first = r.e.OutputObjectID
+		}
+		if r.e.OutputObjectID != first || r.e.RecordedAt == "" {
+			t.Fatalf("extraction %+v differs from %s", r.e, first)
+		}
+	}
+	if c := mustStatus(t, a, res.CaptureID); len(c.Extractions) != 1 {
+		t.Fatalf("extractions = %+v", c.Extractions)
+	}
+}
+
 func TestExtractionFollowsSourceDeletion(t *testing.T) {
 	a, root := openTest(t)
 	res := htmlCapture(t, a, "<p>to delete</p>")

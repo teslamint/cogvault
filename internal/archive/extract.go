@@ -216,11 +216,13 @@ func htmlInput(c Capture, src []byte) error {
 // nothing is guessed. Extraction is per object: every capture of the same
 // bytes shares it. Repeating it returns the recorded extraction.
 //
-// The shared archive lock is held from the status check to the commit, so
-// a quarantine or purge (exclusive) runs entirely before or after: an
-// extraction never records output for a deleted source.
+// The archive lock is held exclusively from the status check to the
+// commit, so a quarantine or purge runs entirely before or after (an
+// extraction never records output for a deleted source), and a concurrent
+// extraction of the same bytes waits and then returns the recorded one
+// instead of failing on the extractions primary key.
 func (a *Archive) ExtractText(ctx context.Context, captureID string) (Extraction, error) {
-	unlock, err := a.lock(false)
+	unlock, err := a.lock(ctx, true)
 	if err != nil {
 		return Extraction{}, err
 	}
@@ -255,8 +257,8 @@ func (a *Archive) ExtractText(ctx context.Context, captureID string) (Extraction
 	text, extractErr := ExtractHTMLText(src)
 	e := Extraction{Extractor: HTMLTextExtractor, RecordedAt: a.now().UTC().Format(time.RFC3339Nano)}
 	// The registry pool has one connection, so every query outside the
-	// transaction runs before it begins; the shared lock keeps the results
-	// valid until the commit.
+	// transaction runs before it begins; the exclusive lock keeps the
+	// results valid until the commit.
 	var staged stagedObject
 	if extractErr == nil {
 		if staged, err = a.stage(strings.NewReader(text)); err != nil {
