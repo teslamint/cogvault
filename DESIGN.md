@@ -739,10 +739,12 @@ jar, no compression, and a `DialContext` that resolves the host, refuses the
 request if any answer fails `PublicAddr`, and dials the first checked
 address; `CheckRedirect` re-runs `checkAcquireURL` and strips credentials.
 `Acquirer.Resolve`/`Dial` are injection points for tests only; the address
-check always runs. `ExtractText` (extract.go) holds the shared lock from
-`Status` to the commit, so an exclusive deletion action runs wholly before
-or after it. `ExtractHTMLText` uses `encoding/xml` in non-strict HTML mode
-after removing raw-text element bodies.
+check always runs. `Acquire` writes the download record in the capture's
+transaction. `ExtractText` (extract.go) holds the exclusive lock from the
+status check to the commit, so a deletion action or another extraction of
+the same bytes runs wholly before or after it. `ExtractHTMLText` uses
+`encoding/xml` in non-strict HTML mode after removing raw-text element
+bodies.
 
 The capture map (capturemap.go) is written by `Pickup` and read by
 `internal/ingest` through `CapturesForSource`; `PageRecordsCapture` is the

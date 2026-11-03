@@ -122,6 +122,24 @@ func TestAcquireStoresExactBytesWithProvenance(t *testing.T) {
 	}
 }
 
+// A capture from Acquire and its download record are one write: when the
+// record cannot be stored, no capture is left without its provenance.
+func TestAcquireStoresTheCaptureAndItsDownloadRecordTogether(t *testing.T) {
+	a, _ := openTest(t)
+	f, q := newFakeNet(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "body")
+	}))
+	if _, err := a.db.Exec(`CREATE TRIGGER no_acq BEFORE INSERT ON acquisitions BEGIN SELECT RAISE(ABORT, 'refused'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := a.Acquire(ctx, q, "http://public.test:"+port(t, f)+"/doc"); err == nil {
+		t.Fatal("Acquire succeeded although the download record was refused")
+	}
+	if list, err := a.List(ctx); err != nil || len(list) != 0 {
+		t.Fatalf("captures left after a refused download record: %+v, %v", list, err)
+	}
+}
+
 func TestAcquireRefusesNonPublicDestinations(t *testing.T) {
 	a, _ := openTest(t)
 	f, q := newFakeNet(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

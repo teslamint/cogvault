@@ -367,24 +367,18 @@ func (a *Archive) Acquire(ctx context.Context, q Acquirer, rawURL string) (Resul
 	if stored == "" {
 		stored = http.DetectContentType(body)
 	}
-	res, err := a.captureSource(ctx, SourceRequest{
-		Content: bytes.NewReader(body), OriginalName: acquiredName(final, mediaType, rec.Headers["Content-Encoding"]),
-		URL: rec.FinalURL, Supplier: AcquireSupplier, MediaType: stored,
-	}, rec.FetchedAt)
+	download, err := json.Marshal(rec)
 	if err != nil {
 		return Result{}, rec, err
 	}
-	body2, err := json.Marshal(rec)
+	// The response record is written in the capture's transaction, so a
+	// capture never exists without it.
+	res, err := a.captureSource(ctx, SourceRequest{
+		Content: bytes.NewReader(body), OriginalName: acquiredName(final, mediaType, rec.Headers["Content-Encoding"]),
+		URL: rec.FinalURL, Supplier: AcquireSupplier, MediaType: stored,
+	}, rec.FetchedAt, string(download))
 	if err != nil {
-		return res, rec, err
-	}
-	unlock, err := a.lock(ctx, false)
-	if err != nil {
-		return res, rec, err
-	}
-	defer unlock()
-	if _, err := a.db.ExecContext(ctx, `INSERT OR IGNORE INTO acquisitions (capture_id, record) VALUES (?, ?)`, res.CaptureID, string(body2)); err != nil {
-		return res, rec, fmt.Errorf("capture %s stored but its response record was not: %w", res.CaptureID, err)
+		return Result{}, rec, err
 	}
 	return res, rec, nil
 }

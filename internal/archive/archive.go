@@ -284,15 +284,18 @@ func Open(root string) (*Archive, error) {
 		return nil, fmt.Errorf("archive registry: %w", err)
 	}
 	db.SetMaxOpenConns(1)
-	if err := migrate(db); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("archive registry: %w", err)
-	}
 	a := &Archive{root: root, db: db, now: time.Now}
+	// Migration and the deletion re-apply run under the exclusive lock, so
+	// a second Open of an old registry waits instead of racing the first.
 	unlock, err := a.lock(context.Background(), true)
 	if err != nil {
 		db.Close()
 		return nil, err
+	}
+	if err := migrate(db); err != nil {
+		unlock()
+		db.Close()
+		return nil, fmt.Errorf("archive registry: %w", err)
 	}
 	_, err = a.applyDeletions(context.Background())
 	unlock()
@@ -471,12 +474,13 @@ func (a *Archive) Close() error { return a.db.Close() }
 
 // CaptureSource stores the original bytes and records their provenance.
 func (a *Archive) CaptureSource(ctx context.Context, req SourceRequest) (Result, error) {
-	return a.captureSource(ctx, req, "")
+	return a.captureSource(ctx, req, "", "")
 }
 
 // captureSource is CaptureSource with an optional acquisition time that
-// becomes part of the request identity.
-func (a *Archive) captureSource(ctx context.Context, req SourceRequest, acquiredAt string) (Result, error) {
+// becomes part of the request identity, and an optional download response
+// record (JSON) stored in the same transaction as the capture.
+func (a *Archive) captureSource(ctx context.Context, req SourceRequest, acquiredAt, download string) (Result, error) {
 	completeness := req.Completeness
 	if completeness == "" {
 		completeness = "unknown"
@@ -506,7 +510,7 @@ func (a *Archive) captureSource(ctx context.Context, req SourceRequest, acquired
 	rec := record{
 		Kind: "source", OriginalName: req.OriginalName, URL: req.URL, Supplier: req.Supplier,
 		Title: req.Title, MediaType: req.MediaType, Acquisition: acquisition,
-		Completeness: completeness, Basis: req.Basis, AcquiredAt: acquiredAt,
+		Completeness: completeness, Basis: req.Basis, AcquiredAt: acquiredAt, download: download,
 	}
 	return a.store(ctx, req.Key, req.Content, rec)
 }
@@ -591,6 +595,9 @@ type record struct {
 	// AcquiredAt is set only when the request states when the bytes were
 	// acquired (a fetch time); omitted otherwise so older digests hold.
 	AcquiredAt string `json:"acquired_at,omitempty"`
+	// download is the acquisition response record (JSON) written in the
+	// capture's transaction; unexported, so it is not part of the digest.
+	download string
 }
 
 func (a *Archive) store(ctx context.Context, key string, content io.Reader, rec record) (Result, error) {
@@ -650,6 +657,14 @@ func (a *Archive) store(ctx context.Context, key string, content io.Reader, rec 
 		if err := a.verifyObject(staged); err != nil {
 			return Result{}, err
 		}
+		if rec.download != "" {
+			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO acquisitions (capture_id, record) VALUES (?, ?)`, existingID, rec.download); err != nil {
+				return Result{}, err
+			}
+			if err := tx.Commit(); err != nil {
+				return Result{}, err
+			}
+		}
 		return Result{CaptureID: existingID, ObjectID: existingObject, Existing: true}, nil
 	case !errors.Is(err, sql.ErrNoRows):
 		return Result{}, err
@@ -688,6 +703,11 @@ func (a *Archive) store(ctx context.Context, key string, content io.Reader, rec 
 			capID, citedURL = cite, ""
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO citations (report_id, position, cited_capture_id, cited_url) VALUES (?,?,?,?)`, captureID, i+1, capID, citedURL); err != nil {
+			return Result{}, err
+		}
+	}
+	if rec.download != "" {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO acquisitions (capture_id, record) VALUES (?, ?)`, captureID, rec.download); err != nil {
 			return Result{}, err
 		}
 	}

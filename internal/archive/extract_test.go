@@ -94,10 +94,17 @@ func TestExtractTextKeepsOriginalAndRecordsVersion(t *testing.T) {
 	}
 }
 
-// Concurrent extractions of the same bytes all return the one recorded
-// extraction; none sees a cache miss and then a primary-key conflict.
+// Concurrent extractions of the same bytes, through two handles on one
+// root, all return the one recorded extraction; none sees a cache miss and
+// then a primary-key conflict. Two handles prove the serialization is the
+// root's flock, not a per-handle mutex.
 func TestConcurrentExtractTextReturnsOneRecordedExtraction(t *testing.T) {
-	a, _ := openTest(t)
+	a, root := openTest(t)
+	b, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
 	res := htmlCapture(t, a, "<html><body><p>Concurrent</p></body></html>")
 	const n = 8
 	type result struct {
@@ -106,8 +113,12 @@ func TestConcurrentExtractTextReturnsOneRecordedExtraction(t *testing.T) {
 	}
 	out := make(chan result, n)
 	for i := 0; i < n; i++ {
+		h := a
+		if i%2 == 1 {
+			h = b
+		}
 		go func() {
-			e, err := a.ExtractText(ctx, res.CaptureID)
+			e, err := h.ExtractText(ctx, res.CaptureID)
 			out <- result{e, err}
 		}()
 	}

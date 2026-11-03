@@ -364,3 +364,37 @@ func TestLockWaitEndsWithTheContext(t *testing.T) {
 		t.Fatalf("Status waited %v after its context ended", waited)
 	}
 }
+
+// Open migrates an old registry only under the exclusive archive lock, so
+// a second Open waits for a holder instead of racing its migration.
+func TestOpenMigratesUnderTheArchiveLock(t *testing.T) {
+	a, root := openTest(t)
+	if _, err := a.db.Exec(`DROP TABLE page_links; PRAGMA user_version = 2`); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := a.lock(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened := make(chan error, 1)
+	var up *Archive
+	go func() {
+		var err error
+		up, err = Open(root)
+		opened <- err
+	}()
+	time.Sleep(200 * time.Millisecond)
+	var v int
+	if err := a.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != 2 {
+		unlock()
+		t.Fatalf("Open migrated while another holder had the lock: user_version = %d, %v", v, err)
+	}
+	unlock()
+	if err := <-opened; err != nil {
+		t.Fatalf("Open after the lock was released: %v", err)
+	}
+	defer up.Close()
+	if err := up.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != schemaVersion {
+		t.Fatalf("user_version after Open = %d, %v", v, err)
+	}
+}

@@ -93,7 +93,7 @@ func (a *Archive) ImportFetched(ctx context.Context, req FetchedRequest) (Result
 		Key: req.Key, Content: bytes.NewReader(req.Body),
 		OriginalName: strings.TrimSuffix(req.DerivedName, path.Ext(req.DerivedName)) + fetchedBodyExt,
 		URL:          req.URL, Supplier: FetchedSupplier,
-	}, req.FetchedAt)
+	}, req.FetchedAt, "")
 	if err != nil {
 		return Result{}, err
 	}

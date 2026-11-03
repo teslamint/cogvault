@@ -257,7 +257,7 @@ func TestImportFetchedRefusesBeforeStoringAndRecoversAPartialImport(t *testing.T
 	// An earlier run stored the body capture and failed before recording
 	// the derivation; the same import repeated completes it once.
 	derived := []byte("---\nfetched_at: d\nsource_url: https://e.org/x\n---\n" + string(body))
-	partial, err := a.captureSource(ctx, SourceRequest{Content: strings.NewReader(string(body)), OriginalName: "x.response", URL: "https://e.org/x", Supplier: FetchedSupplier}, "d")
+	partial, err := a.captureSource(ctx, SourceRequest{Content: strings.NewReader(string(body)), OriginalName: "x.response", URL: "https://e.org/x", Supplier: FetchedSupplier}, "d", "")
 	if err != nil {
 		t.Fatal(err)
 	}
