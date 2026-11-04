@@ -3190,54 +3190,43 @@ func TestPDFLinkFailureKeepsDeclaredFields(t *testing.T) {
 	}
 }
 
-// A hung pdfinfo must not spend the digest budget: metadata has its own
-// short deadline, and the model call still gets a live context.
+// A hung pdfinfo must not spend the digest budget, whether its own deadline
+// is shorter or longer than the budget: the metadata read ends before the
+// budget starts, and the model call still gets a live context.
 func TestHungPDFInfoLeavesTheDigestBudget(t *testing.T) {
-	var digestCtxErr error
-	m := &mockLLM{inputMode: llm.TextInput, ctxFn: func(ctx context.Context) { digestCtxErr = ctx.Err() }, fn: func(req llm.DigestRequest) (*llm.DigestResult, error) {
-		return &llm.DigestResult{PageContent: "---\ntitle: Test\ntype: source\n---\n\n## 요약\nbody\n"}, nil
-	}}
-	h := newHarnessWith(t, []string{"pdf"}, m, func(c *config.Config) { c.LLM.TimeoutSeconds = 1 })
-	h.runner.extractor = &mockExtractor{text: "source text"}
-	h.runner.pdfMetadataTimeout = 50 * time.Millisecond
-	h.runner.pdfCommands = extract.Commands{CommandContext: func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "sleep", "3")
-	}}
-	h.write(t, "hung.pdf", "PDF bytes")
-	if rep, err := h.runner.Run(context.Background(), RunOptions{}); err != nil || rep.Digested != 1 {
-		t.Fatalf("Run: report=%+v err=%v", rep, err)
-	}
-	if digestCtxErr != nil {
-		t.Fatalf("digest context already done after the metadata read: %v", digestCtxErr)
-	}
-	got, err := h.store.Read("sources/hung.md")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(got), "pdf_metadata_status: unavailable") {
-		t.Fatalf("hung pdfinfo not recorded as unavailable:\n%s", got)
-	}
-}
-
-// A metadata deadline longer than the digest budget must not shorten the
-// model call's context: the budget starts after the metadata read.
-func TestSlowPDFInfoDoesNotShortenTheDigestBudget(t *testing.T) {
-	var digestCtxErr error
-	m := &mockLLM{inputMode: llm.TextInput, ctxFn: func(ctx context.Context) { digestCtxErr = ctx.Err() }, fn: func(req llm.DigestRequest) (*llm.DigestResult, error) {
-		return &llm.DigestResult{PageContent: "---\ntitle: Test\ntype: source\n---\n\n## 요약\nbody\n"}, nil
-	}}
-	h := newHarnessWith(t, []string{"pdf"}, m, func(c *config.Config) { c.LLM.TimeoutSeconds = 1 })
-	h.runner.extractor = &mockExtractor{text: "source text"}
-	h.runner.pdfMetadataTimeout = 1500 * time.Millisecond
-	h.runner.pdfCommands = extract.Commands{CommandContext: func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "sleep", "3")
-	}}
-	h.write(t, "slow.pdf", "PDF bytes")
-	if rep, err := h.runner.Run(context.Background(), RunOptions{}); err != nil || rep.Digested != 1 {
-		t.Fatalf("Run: report=%+v err=%v", rep, err)
-	}
-	if digestCtxErr != nil {
-		t.Fatalf("digest context already done after the metadata read: %v", digestCtxErr)
+	for _, tc := range []struct {
+		name            string
+		metadataTimeout time.Duration
+	}{
+		{"deadline shorter than budget", 50 * time.Millisecond},
+		{"deadline longer than budget", 1500 * time.Millisecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var digestCtxErr error
+			m := &mockLLM{inputMode: llm.TextInput, ctxFn: func(ctx context.Context) { digestCtxErr = ctx.Err() }, fn: func(req llm.DigestRequest) (*llm.DigestResult, error) {
+				return &llm.DigestResult{PageContent: "---\ntitle: Test\ntype: source\n---\n\n## 요약\nbody\n"}, nil
+			}}
+			h := newHarnessWith(t, []string{"pdf"}, m, func(c *config.Config) { c.LLM.TimeoutSeconds = 1 })
+			h.runner.extractor = &mockExtractor{text: "source text"}
+			h.runner.pdfMetadataTimeout = tc.metadataTimeout
+			h.runner.pdfCommands = extract.Commands{CommandContext: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+				return exec.CommandContext(ctx, "sleep", "3")
+			}}
+			h.write(t, "hung.pdf", "PDF bytes")
+			if rep, err := h.runner.Run(context.Background(), RunOptions{}); err != nil || rep.Digested != 1 {
+				t.Fatalf("Run: report=%+v err=%v", rep, err)
+			}
+			if digestCtxErr != nil {
+				t.Fatalf("digest context already done after the metadata read: %v", digestCtxErr)
+			}
+			got, err := h.store.Read("sources/hung.md")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(got), "pdf_metadata_status: unavailable") {
+				t.Fatalf("hung pdfinfo not recorded as unavailable:\n%s", got)
+			}
+		})
 	}
 }
 
