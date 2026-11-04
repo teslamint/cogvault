@@ -361,6 +361,13 @@ func (r *Runner) digestOne(parent context.Context, entry scanEntry, hash, schema
 			"extraction_ms", extractElapsed.Milliseconds(), "inference_ms", inferElapsed.Milliseconds(),
 			"postprocess_ms", postElapsed.Milliseconds())
 	}()
+	// Metadata is read before the digest budget starts, under its own
+	// deadline, so a slow pdfinfo never shortens the model call's budget.
+	var pdfMetadata extract.PDFMetadata
+	pdfMetadataStatus := ""
+	if strings.EqualFold(filepath.Ext(entry.absPath), ".pdf") {
+		pdfMetadata, pdfMetadataStatus = r.readPDFMetadata(parent, entry.absPath, hash)
+	}
 	budget := 5 * time.Minute
 	if r.cfg.LLM.TimeoutSeconds > 0 {
 		budget = time.Duration(r.cfg.LLM.TimeoutSeconds) * time.Second
@@ -369,8 +376,6 @@ func (r *Runner) digestOne(parent context.Context, entry scanEntry, hash, schema
 	defer cancel()
 	sourceText := ""
 	source := map[string]any{}
-	var pdfMetadata extract.PDFMetadata
-	pdfMetadataStatus := ""
 	if inputMode == llm.TextInput {
 		var err error
 		sourceText, err = r.extractor.Extract(ctx, entry.absPath)
@@ -415,9 +420,6 @@ func (r *Runner) digestOne(parent context.Context, entry scanEntry, hash, schema
 			r.recordFailure(entry, hash, origin, prev, report, "source: "+err.Error(), classPermanent)
 			return
 		}
-	}
-	if strings.EqualFold(filepath.Ext(entry.absPath), ".pdf") {
-		pdfMetadata, pdfMetadataStatus = r.readPDFMetadata(ctx, entry.absPath, hash)
 	}
 	extractElapsed = time.Since(started)
 	stage = "inference"

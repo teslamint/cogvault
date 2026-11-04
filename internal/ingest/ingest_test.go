@@ -3131,18 +3131,18 @@ func TestPDFMetadataIsWrittenFromPDFBytes(t *testing.T) {
 	h := newHarness(t, []string{"pdf"}, m)
 	h.runner.extractor = &mockExtractor{text: "source text"}
 	h.runner.pdfCommands = extract.Commands{CommandContext: func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		if name != "pdfinfo" || len(args) == 0 || filepath.Base(args[len(args)-1]) != "declared.pdf" {
+		if name != "pdfinfo" || len(args) == 0 || args[len(args)-1] != "/dev/fd/3" {
 			t.Errorf("unexpected pdfinfo call: %s %v", name, args)
 		}
-		out := "Title: Declared title\nAuthor: Declared author\n"
+		// The title is the source file's bytes read through fd 3, which
+		// proves pdfinfo gets the scanned file's descriptor.
+		script := `printf 'Title: %s\nAuthor: Declared author\n' "$(cat /dev/fd/3)"`
 		if len(args) > 0 && args[0] == "-url" {
-			out = "Page  Type          URL\n   1  Annotation    https://example.org/a\n   2  Annotation    https://example.org/b\n"
+			script = `printf 'Page  Type          URL\n   1  Annotation    https://example.org/a\n   2  Annotation    https://example.org/b\n'`
 		}
-		cmd := exec.CommandContext(ctx, "sh", "-c", `printf '%s' "$OUT"`)
-		cmd.Env = append(os.Environ(), "OUT="+out)
-		return cmd
+		return exec.CommandContext(ctx, "sh", "-c", script)
 	}}
-	h.write(t, "declared.pdf", "PDF bytes")
+	h.write(t, "declared.pdf", "Declared title")
 	if rep, err := h.runner.Run(context.Background(), RunOptions{}); err != nil || rep.Digested != 1 {
 		t.Fatalf("Run: report=%+v err=%v", rep, err)
 	}
@@ -3216,6 +3216,28 @@ func TestHungPDFInfoLeavesTheDigestBudget(t *testing.T) {
 	}
 	if !strings.Contains(string(got), "pdf_metadata_status: unavailable") {
 		t.Fatalf("hung pdfinfo not recorded as unavailable:\n%s", got)
+	}
+}
+
+// A metadata deadline longer than the digest budget must not shorten the
+// model call's context: the budget starts after the metadata read.
+func TestSlowPDFInfoDoesNotShortenTheDigestBudget(t *testing.T) {
+	var digestCtxErr error
+	m := &mockLLM{inputMode: llm.TextInput, ctxFn: func(ctx context.Context) { digestCtxErr = ctx.Err() }, fn: func(req llm.DigestRequest) (*llm.DigestResult, error) {
+		return &llm.DigestResult{PageContent: "---\ntitle: Test\ntype: source\n---\n\n## 요약\nbody\n"}, nil
+	}}
+	h := newHarnessWith(t, []string{"pdf"}, m, func(c *config.Config) { c.LLM.TimeoutSeconds = 1 })
+	h.runner.extractor = &mockExtractor{text: "source text"}
+	h.runner.pdfMetadataTimeout = 1500 * time.Millisecond
+	h.runner.pdfCommands = extract.Commands{CommandContext: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sleep", "3")
+	}}
+	h.write(t, "slow.pdf", "PDF bytes")
+	if rep, err := h.runner.Run(context.Background(), RunOptions{}); err != nil || rep.Digested != 1 {
+		t.Fatalf("Run: report=%+v err=%v", rep, err)
+	}
+	if digestCtxErr != nil {
+		t.Fatalf("digest context already done after the metadata read: %v", digestCtxErr)
 	}
 }
 

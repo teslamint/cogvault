@@ -1691,7 +1691,8 @@ link listing; it does not identify a canonical URL or verify
 the linked content. `pdf_author` is only a declared PDF metadata value, never a
 person inferred from article text. `pdf_metadata_status` is `extracted`,
 `partial` (title and author read, link listing unavailable), or `unavailable`.
-The metadata read has its own 30-second deadline inside the digest budget.
+The metadata read has its own 30-second deadline and runs before the digest
+budget starts. It refuses a source that is a symlink or not a regular file.
 Metadata read failure leaves the digest usable but does not
 silently promote model-provided values into these fields. Re-ingest replaces
 these fields from the current PDF. Existing pages are not migrated. A page

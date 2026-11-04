@@ -76,7 +76,7 @@ func TestReadPDFMetadataKeepsFieldsWhenLinkOutputExceedsTheCap(t *testing.T) {
 		}
 		return envCmd("Title: Declared\nAuthor: Someone\n", name, args...)
 	}}
-	meta, err := ReadPDFMetadata(context.Background(), "f.pdf", cmds)
+	meta, err := ReadPDFMetadata(context.Background(), regularFile(t), cmds)
 	if err != nil {
 		t.Fatalf("ReadPDFMetadata: %v", err)
 	}
@@ -94,11 +94,37 @@ func TestReadPDFMetadataKeepsFieldsWhenLinksFail(t *testing.T) {
 		}
 		return envCmd("Title: Declared\nAuthor: Someone\n", name, args...)
 	}}
-	meta, err := ReadPDFMetadata(context.Background(), "f.pdf", cmds)
+	meta, err := ReadPDFMetadata(context.Background(), regularFile(t), cmds)
 	if !errors.Is(err, ErrPDFLinksUnavailable) {
 		t.Fatalf("err = %v, want ErrPDFLinksUnavailable", err)
 	}
 	if meta.Title != "Declared" || meta.Author != "Someone" || meta.Links != nil {
 		t.Fatalf("metadata = %+v", meta)
 	}
+}
+
+// The scan skipped symlinks, so a symlink at read time means the source was
+// swapped: pdfinfo must not read the file it points to.
+func TestReadPDFMetadataRefusesASymlink(t *testing.T) {
+	link := filepath.Join(t.TempDir(), "swapped.pdf")
+	if err := os.Symlink(regularFile(t), link); err != nil {
+		t.Fatal(err)
+	}
+	ran := false
+	cmds := Commands{CommandContext: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		ran = true
+		return envCmd("Title: Other file\n", name, args...)
+	}}
+	if meta, err := ReadPDFMetadata(context.Background(), link, cmds); err == nil || ran {
+		t.Fatalf("symlink read: meta=%+v err=%v pdfinfo ran=%v", meta, err, ran)
+	}
+}
+
+func regularFile(t *testing.T) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "f.pdf")
+	if err := os.WriteFile(p, []byte("%PDF"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
 }

@@ -263,9 +263,12 @@ The ingest runner appends common source-fidelity guidance to the schema text
 passed to every adapter, retaining each backend's existing text/path input
 contract. PDF metadata and HTTP(S) link annotation destinations are read by
 `internal/extract` with `pdfinfo` (128 KiB output cap, its own 30-second
-deadline derived from the digest context) and written as reserved frontmatter
-by ingest after model output validation, so a hung `pdfinfo` cannot spend the
-digest budget. Metadata output over the cap fails the read; link output over
+deadline) and written as reserved frontmatter by ingest after model output
+validation. The read happens before the digest budget starts, so a slow
+`pdfinfo` never shortens the model call. The source is opened without
+following a final symlink, must be a regular file, and reaches `pdfinfo` as
+descriptor 3 (`/dev/fd/3`), so a path swapped to a symlink after the scan is
+refused. Metadata output over the cap fails the read; link output over
 the cap is cut at the last complete line, so a link-heavy PDF keeps its title
 and author. A failed link listing keeps the title and author with status
 `partial`. The first PDF link is not promoted to a canonical URL. Missing

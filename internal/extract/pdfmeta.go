@@ -7,9 +7,12 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"os"
 	"os/exec"
 	"strings"
 	"unicode"
+
+	"golang.org/x/sys/unix"
 )
 
 // PDFMetadata contains only values read from PDF metadata and link annotations.
@@ -28,22 +31,37 @@ var ErrPDFLinksUnavailable = errors.New("pdf links unavailable")
 // pdfInfoCap bounds each pdfinfo output read.
 const pdfInfoCap = 128 << 10
 
+// pdfInfoSource is the path pdfinfo reads: the source descriptor passed as
+// its first extra file, so pdfinfo never resolves the source path itself.
+const pdfInfoSource = "/dev/fd/3"
+
 // ReadPDFMetadata reads the declared title and author and the link
 // annotations. When only the link listing fails, it returns the declared
-// fields with an error wrapping ErrPDFLinksUnavailable.
+// fields with an error wrapping ErrPDFLinksUnavailable. The source is opened
+// without following a final symlink and must be a regular file.
 func ReadPDFMetadata(ctx context.Context, path string, commands Commands) (PDFMetadata, error) {
 	command := commands.CommandContext
 	if command == nil {
 		command = exec.CommandContext
 	}
-	info, err := runPDFInfo(ctx, command, false, path)
+	src, err := os.OpenFile(path, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return PDFMetadata{}, fmt.Errorf("pdf metadata source: %w", err)
+	}
+	defer src.Close()
+	if info, err := src.Stat(); err != nil {
+		return PDFMetadata{}, fmt.Errorf("pdf metadata source: %w", err)
+	} else if !info.Mode().IsRegular() {
+		return PDFMetadata{}, errors.New("pdf metadata source is not a regular file")
+	}
+	info, err := runPDFInfo(ctx, command, src, false, pdfInfoSource)
 	if err != nil {
 		return PDFMetadata{}, fmt.Errorf("pdfinfo metadata: %w", err)
 	}
 	result := parsePDFInfo(string(info))
 	// Only the first 64 links are kept, so a link list over the cap is cut
 	// rather than failing the read and losing the declared title and author.
-	links, err := runPDFInfo(ctx, command, true, "-url", path)
+	links, err := runPDFInfo(ctx, command, src, true, "-url", pdfInfoSource)
 	if err != nil {
 		return result, fmt.Errorf("%w: pdfinfo links: %v", ErrPDFLinksUnavailable, err)
 	}
@@ -53,8 +71,9 @@ func ReadPDFMetadata(ctx context.Context, path string, commands Commands) (PDFMe
 
 // runPDFInfo returns pdfinfo stdout. Over pdfInfoCap it fails, unless cut is
 // set: then it stops pdfinfo and keeps the complete lines read so far.
-func runPDFInfo(ctx context.Context, command func(context.Context, string, ...string) *exec.Cmd, cut bool, args ...string) ([]byte, error) {
+func runPDFInfo(ctx context.Context, command func(context.Context, string, ...string) *exec.Cmd, src *os.File, cut bool, args ...string) ([]byte, error) {
 	cmd := command(ctx, "pdfinfo", args...)
+	cmd.ExtraFiles = []*os.File{src}
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
