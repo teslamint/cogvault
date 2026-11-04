@@ -262,12 +262,15 @@ truncate again. HTTP classification matches `ollama`, plus an unloaded-model
 The ingest runner appends common source-fidelity guidance to the schema text
 passed to every adapter, retaining each backend's existing text/path input
 contract. PDF metadata and HTTP(S) link annotation destinations are read by
-`internal/extract` with `pdfinfo` (128 KiB output cap, same digest context)
-and written as reserved frontmatter by ingest after model output validation.
-Metadata output over the cap fails the read; link output over the cap is cut
-at the last complete line, so a link-heavy PDF keeps its title and author. The
-first PDF link is not promoted to a canonical URL. Missing auxiliary metadata
-does not consume a digest retry; `pdf_metadata_status` records availability.
+`internal/extract` with `pdfinfo` (128 KiB output cap, its own 30-second
+deadline derived from the digest context) and written as reserved frontmatter
+by ingest after model output validation, so a hung `pdfinfo` cannot spend the
+digest budget. Metadata output over the cap fails the read; link output over
+the cap is cut at the last complete line, so a link-heavy PDF keeps its title
+and author. A failed link listing keeps the title and author with status
+`partial`. The first PDF link is not promoted to a canonical URL. Missing
+auxiliary metadata does not consume a digest retry; `pdf_metadata_status`
+records availability.
 Per-file stage durations are logged for extraction (including metadata), model
 inference, and post-processing using only duration values and a source hash
 prefix, without source text or URL values. A failed model call is logged as

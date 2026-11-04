@@ -1689,10 +1689,16 @@ model response. `pdf_links` is an ordered, de-duplicated list of at most 64
 HTTP(S) annotation destinations, read from at most the first 128 KiB of the
 link listing; it does not identify a canonical URL or verify
 the linked content. `pdf_author` is only a declared PDF metadata value, never a
-person inferred from article text. `pdf_metadata_status` is `extracted` or
-`unavailable`; metadata read failure leaves the digest usable but does not
+person inferred from article text. `pdf_metadata_status` is `extracted`,
+`partial` (title and author read, link listing unavailable), or `unavailable`.
+The metadata read has its own 30-second deadline inside the digest budget.
+Metadata read failure leaves the digest usable but does not
 silently promote model-provided values into these fields. Re-ingest replaces
-these fields from the current PDF. Existing pages are not migrated. For new PDF
+these fields from the current PDF. Existing pages are not migrated. A page
+recorded as `partial` or `unavailable` keeps that status while its source bytes
+are unchanged, because ingest does not digest an unchanged source again; there
+is no metadata-only refresh, since no wiki writer can rewrite page frontmatter
+without risking a concurrent user edit. For new PDF
 pages, model-generated `url`, `source_url`, `canonical_url`, and `author` fields
 are discarded; values already on an existing page are carried forward without
 claiming independent verification. Source-page

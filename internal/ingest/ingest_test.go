@@ -3078,7 +3078,7 @@ func TestPDFProvenanceCannotComeFromModelOutput(t *testing.T) {
 		if !strings.Contains(req.SchemaText, "Distinguish the author's observations") {
 			t.Fatal("source-fidelity guidance missing from digest request")
 		}
-		return &llm.DigestResult{PageContent: "---\ntitle: Test\ntype: source\nauthor: Invented author\nurl: https://invented.invalid/\npdf_author: Invented author\npdf_links:\n  - https://invented.invalid/\npdf_metadata_status: extracted\n---\n\n## 요약\nbody\n"}, nil
+		return &llm.DigestResult{PageContent: "---\ntitle: Test\ntype: source\nauthor: Invented author\nurl: https://invented.invalid/\nsource_url: https://invented.invalid/source\ncanonical_url: https://invented.invalid/canonical\npdf_author: Invented author\npdf_links:\n  - https://invented.invalid/\npdf_metadata_status: extracted\n---\n\n## 요약\nbody\n"}, nil
 	}}
 	h := newHarness(t, []string{"pdf"}, m)
 	h.write(t, "not-a-real.pdf", "invalid PDF bytes")
@@ -3131,6 +3131,9 @@ func TestPDFMetadataIsWrittenFromPDFBytes(t *testing.T) {
 	h := newHarness(t, []string{"pdf"}, m)
 	h.runner.extractor = &mockExtractor{text: "source text"}
 	h.runner.pdfCommands = extract.Commands{CommandContext: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		if name != "pdfinfo" || len(args) == 0 || filepath.Base(args[len(args)-1]) != "declared.pdf" {
+			t.Errorf("unexpected pdfinfo call: %s %v", name, args)
+		}
 		out := "Title: Declared title\nAuthor: Declared author\n"
 		if len(args) > 0 && args[0] == "-url" {
 			out = "Page  Type          URL\n   1  Annotation    https://example.org/a\n   2  Annotation    https://example.org/b\n"
@@ -3154,6 +3157,65 @@ func TestPDFMetadataIsWrittenFromPDFBytes(t *testing.T) {
 	}
 	if strings.Contains(string(got), "model.invalid") {
 		t.Fatalf("model URL survived on a new PDF page:\n%s", got)
+	}
+}
+
+func TestPDFLinkFailureKeepsDeclaredFields(t *testing.T) {
+	m := &mockLLM{inputMode: llm.TextInput, fn: func(req llm.DigestRequest) (*llm.DigestResult, error) {
+		return &llm.DigestResult{PageContent: "---\ntitle: Test\ntype: source\n---\n\n## 요약\nbody\n"}, nil
+	}}
+	h := newHarness(t, []string{"pdf"}, m)
+	h.runner.extractor = &mockExtractor{text: "source text"}
+	h.runner.pdfCommands = extract.Commands{CommandContext: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		if len(args) > 0 && args[0] == "-url" {
+			return exec.CommandContext(ctx, "false")
+		}
+		return exec.CommandContext(ctx, "sh", "-c", `printf 'Title: Declared title\nAuthor: Declared author\n'`)
+	}}
+	h.write(t, "partial.pdf", "PDF bytes")
+	if rep, err := h.runner.Run(context.Background(), RunOptions{}); err != nil || rep.Digested != 1 {
+		t.Fatalf("Run: report=%+v err=%v", rep, err)
+	}
+	got, err := h.store.Read("sources/partial.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"pdf_metadata_status: partial", "pdf_title: Declared title", "pdf_author: Declared author"} {
+		if !strings.Contains(string(got), want) {
+			t.Fatalf("page lacks %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(string(got), "pdf_links") {
+		t.Fatalf("links written although the link listing failed:\n%s", got)
+	}
+}
+
+// A hung pdfinfo must not spend the digest budget: metadata has its own
+// short deadline, and the model call still gets a live context.
+func TestHungPDFInfoLeavesTheDigestBudget(t *testing.T) {
+	var digestCtxErr error
+	m := &mockLLM{inputMode: llm.TextInput, ctxFn: func(ctx context.Context) { digestCtxErr = ctx.Err() }, fn: func(req llm.DigestRequest) (*llm.DigestResult, error) {
+		return &llm.DigestResult{PageContent: "---\ntitle: Test\ntype: source\n---\n\n## 요약\nbody\n"}, nil
+	}}
+	h := newHarnessWith(t, []string{"pdf"}, m, func(c *config.Config) { c.LLM.TimeoutSeconds = 1 })
+	h.runner.extractor = &mockExtractor{text: "source text"}
+	h.runner.pdfMetadataTimeout = 50 * time.Millisecond
+	h.runner.pdfCommands = extract.Commands{CommandContext: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sleep", "3")
+	}}
+	h.write(t, "hung.pdf", "PDF bytes")
+	if rep, err := h.runner.Run(context.Background(), RunOptions{}); err != nil || rep.Digested != 1 {
+		t.Fatalf("Run: report=%+v err=%v", rep, err)
+	}
+	if digestCtxErr != nil {
+		t.Fatalf("digest context already done after the metadata read: %v", digestCtxErr)
+	}
+	got, err := h.store.Read("sources/hung.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "pdf_metadata_status: unavailable") {
+		t.Fatalf("hung pdfinfo not recorded as unavailable:\n%s", got)
 	}
 }
 

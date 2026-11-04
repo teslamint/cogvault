@@ -2,6 +2,7 @@ package extract
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -79,7 +80,25 @@ func TestReadPDFMetadataKeepsFieldsWhenLinkOutputExceedsTheCap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadPDFMetadata: %v", err)
 	}
-	if meta.Title != "Declared" || meta.Author != "Someone" || len(meta.Links) == 0 || len(meta.Links) > 64 {
+	if meta.Title != "Declared" || meta.Author != "Someone" || len(meta.Links) != 64 {
 		t.Fatalf("metadata = title %q author %q links %d", meta.Title, meta.Author, len(meta.Links))
+	}
+}
+
+// A failed link listing (for example, a pdfinfo without -url) keeps the
+// declared title and author and reports only the links as unavailable.
+func TestReadPDFMetadataKeepsFieldsWhenLinksFail(t *testing.T) {
+	cmds := Commands{CommandContext: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		if len(args) > 0 && args[0] == "-url" {
+			return exec.CommandContext(ctx, "false")
+		}
+		return envCmd("Title: Declared\nAuthor: Someone\n", name, args...)
+	}}
+	meta, err := ReadPDFMetadata(context.Background(), "f.pdf", cmds)
+	if !errors.Is(err, ErrPDFLinksUnavailable) {
+		t.Fatalf("err = %v, want ErrPDFLinksUnavailable", err)
+	}
+	if meta.Title != "Declared" || meta.Author != "Someone" || meta.Links != nil {
+		t.Fatalf("metadata = %+v", meta)
 	}
 }

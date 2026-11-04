@@ -37,6 +37,8 @@ import (
 const (
 	maxAttempts  = 3
 	settleWindow = 2 * time.Minute
+	// pdfinfo reads metadata only; it needs far less than the digest budget.
+	pdfMetadataTimeout = 30 * time.Second
 	// Kept in code so an older, user-managed wiki schema cannot silently omit
 	// the source-fidelity guidance. It applies to both text and path adapters.
 	ingestGuidance = "\n\nSource-page guidance: Preserve at least one distinctive concrete example when present and material qualifications, including explicit scope or opinion/affiliation disclaimers. Distinguish the author's observations, proposals, and predictions from independently established facts. Do not invent citations, authors, canonical URLs, or wiki links. Summarize; do not copy the source wholesale."
@@ -77,8 +79,10 @@ type Runner struct {
 	extractor TextExtractor
 	// pdfCommands runs pdfinfo for PDF metadata; the zero value uses exec.
 	pdfCommands extract.Commands
-	ledger      *ledger
-	dbPath      string
+	// pdfMetadataTimeout bounds the metadata read apart from the digest budget.
+	pdfMetadataTimeout time.Duration
+	ledger             *ledger
+	dbPath             string
 
 	// injectable for tests; defaults set in New.
 	settleWindow time.Duration
@@ -109,6 +113,7 @@ func New(cfg *config.Config, store storage.Storage, idx index.Index, llmAdapter 
 		ledger:    l, dbPath: dbPath, settleWindow: settleWindow,
 		maxFileSize: int64(cfg.MaxFileSizeMB) << 20, now: time.Now,
 		readDir: os.ReadDir, notifyFunc: defaultNotify, withTimeout: context.WithTimeout,
+		pdfMetadataTimeout: pdfMetadataTimeout,
 	}
 	r.listPages = r.scanWikiPages
 	return r, nil
@@ -316,6 +321,26 @@ func (r *Runner) scan(report *Report) []scanEntry {
 	sort.Slice(entries, func(i, j int) bool { return entries[i].absPath < entries[j].absPath })
 	return entries
 }
+
+// readPDFMetadata reads PDF metadata under its own short deadline, so a hung
+// pdfinfo cannot spend the digest budget. It returns the fields and status:
+// "extracted", "partial" (declared fields only, links unavailable), or
+// "unavailable". Metadata is auxiliary: no outcome fails the digest.
+func (r *Runner) readPDFMetadata(ctx context.Context, path, hash string) (extract.PDFMetadata, string) {
+	ctx, cancel := context.WithTimeout(ctx, r.pdfMetadataTimeout)
+	defer cancel()
+	meta, err := extract.ReadPDFMetadata(ctx, path, r.pdfCommands)
+	switch {
+	case err == nil:
+		return meta, "extracted"
+	case errors.Is(err, extract.ErrPDFLinksUnavailable):
+		slog.Warn("ingest: PDF links unavailable", "source_hash_prefix", hash[:12])
+		return meta, "partial"
+	}
+	slog.Warn("ingest: PDF metadata unavailable", "source_hash_prefix", hash[:12])
+	return extract.PDFMetadata{}, "unavailable"
+}
+
 func (r *Runner) digestOne(parent context.Context, entry scanEntry, hash, schemaText, origin string, prev *ledgerRow, report *Report) {
 	inputMode := r.llm.InputMode()
 	started := time.Now()
@@ -392,16 +417,7 @@ func (r *Runner) digestOne(parent context.Context, entry scanEntry, hash, schema
 		}
 	}
 	if strings.EqualFold(filepath.Ext(entry.absPath), ".pdf") {
-		var err error
-		pdfMetadata, err = extract.ReadPDFMetadata(ctx, entry.absPath, r.pdfCommands)
-		if err != nil {
-			// Metadata is auxiliary. A missing annotation must not prevent a
-			// complete text digest or consume a retry attempt.
-			slog.Warn("ingest: PDF metadata unavailable", "source_hash_prefix", hash[:12])
-			pdfMetadataStatus = "unavailable"
-		} else {
-			pdfMetadataStatus = "extracted"
-		}
+		pdfMetadata, pdfMetadataStatus = r.readPDFMetadata(ctx, entry.absPath, hash)
 	}
 	extractElapsed = time.Since(started)
 	stage = "inference"
