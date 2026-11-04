@@ -27,9 +27,26 @@ var (
 	refusalPattern = regexp.MustCompile(`(?i)^api error:\s*(?:refused\b|safeguards flagged\b|fable 5(?:'s|’s) safeguards flagged\b)`)
 )
 
+var errOutputLimit = errors.New("output limit exceeded")
+
+type boundedBuffer struct {
+	buf bytes.Buffer
+	max int
+}
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	remaining := b.max - b.buf.Len()
+	if len(p) > remaining {
+		return 0, errOutputLimit
+	}
+	return b.buf.Write(p)
+}
+
 type cappedWriter struct {
-	buf  bytes.Buffer
-	max  int
+	buf  boundedBuffer
 	over bool
 }
 
@@ -37,15 +54,16 @@ func (w *cappedWriter) Write(p []byte) (int, error) {
 	if w.over {
 		return len(p), nil
 	}
-	if w.buf.Len()+len(p) > w.max {
+	n, err := w.buf.Write(p)
+	if errors.Is(err, errOutputLimit) {
 		w.over = true
 		return len(p), nil
 	}
-	return w.buf.Write(p)
+	return n, err
 }
 
-func (w *cappedWriter) Bytes() []byte    { return w.buf.Bytes() }
-func (w *cappedWriter) String() string   { return w.buf.String() }
+func (w *cappedWriter) Bytes() []byte    { return w.buf.buf.Bytes() }
+func (w *cappedWriter) String() string   { return w.buf.buf.String() }
 func (w *cappedWriter) Overflowed() bool { return w.over }
 
 type ClaudeCode struct {
@@ -101,8 +119,8 @@ func (c *ClaudeCode) digest(ctx context.Context, req DigestRequest) (*DigestResu
 	if stderrCap == 0 {
 		stderrCap = maxStderrBytes
 	}
-	stdout := &cappedWriter{max: stdoutCap}
-	stderr := &cappedWriter{max: stderrCap}
+	stdout := &cappedWriter{buf: boundedBuffer{max: stdoutCap}}
+	stderr := &cappedWriter{buf: boundedBuffer{max: stderrCap}}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 

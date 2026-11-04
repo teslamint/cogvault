@@ -1,7 +1,7 @@
 # Roadmap — cogvault
 
 Status: non-canonical forward-looking index
-Last updated: 2026-09-09
+Last updated: 2026-11-05
 
 `SPEC.md`, `DESIGN.md`, and accepted decisions own behavior, architecture, and
 boundaries. This file records only what remains selectable; it never creates
@@ -49,14 +49,19 @@ evidence and an approved scope before implementation.
 
 | Candidate | Next action | Selection or completion evidence |
 |---|---|---|
-| Retrieval quality evaluation | Define representative queries, expected sources, and a baseline for current retrieval. | Record a repeatable score before selecting ranking changes. Consider reciprocal-rank fusion only when another independent signal adds measured value. |
-| Inbox consume-and-archive | Record user friction with the current synced-folder workflow. | Select only if that workflow proves insufficient. Resolve source ownership and archive semantics against the read-only source boundary first. |
-| F16 ingest regression coverage | Recheck coverage for CLI output overflow becoming a permanent ingest failure. | If uncovered, add a regression that verifies bounded attempts through ingest. Close with evidence if equivalent coverage already exists. |
-| F16 capture boundary review | Review the loss of the whole chunk that crosses the capture cap. | Record acceptance of the current limit, or justify a change with an observable failure and a regression test. |
+| Retrieval quality evaluation | Select a ranking change only against the recorded baseline. | Baseline recorded on 2026-11-05 in [retrieval-quality-baseline](docs/research/2026-11-05-retrieval-quality-baseline.md): 44 labeled real queries, MRR 0.292, recall@10 0.304, identical across 3 runs. Labels are implicit (search followed by read), so treat the score as a regression baseline, not absolute quality. Consider reciprocal-rank fusion only when another independent signal adds measured value. |
+| Inbox consume-and-archive | Record user friction with the current synced-folder workflow. | Select only if that workflow proves insufficient. Resolve source ownership and archive semantics against the read-only source boundary first. Checked 2026-11-05: no friction is recorded in `docs/` or the ingest logs, and every logged inbox file was digested; remains unselected. |
+| Digest disclaimer retention | Decide whether to pursue the measured gap; a loop needs many more samples per document. | Measured 2026-11-04 on main `069b889` with the current source-page guidance: PDF digests kept the source's material disclaimer in 4 of 27 runs (9 local PDFs × 3; private corpus, not committed). Run-to-run spread was 75% of the mean. No no-guidance control was run, so the guidance's effect is unmeasured. |
 
-The two F16 candidates originate in the
-[F16 retrospective](docs/retros/2026-08-21-f16-bound-cli-capture-retro.md).
-F16 remains delivered; these are follow-up checks, not a reopened F1–F18 tracker.
+The two F16 follow-up checks from the
+[F16 retrospective](docs/retros/2026-08-21-f16-bound-cli-capture-retro.md)
+closed on 2026-11-05 under the approved
+[capture separation spec](docs/specs/2026-09-09-bounded-capture-error-separation-design.md):
+`TestRunClaudeCodeStdoutOverflowExhaustsPermanentAttempts` drives the real Claude
+Code adapter through ingest and proves three permanent attempts, then exhaustion
+with no fourth CLI call. The capture boundary review accepts whole crossing-chunk
+loss; `DESIGN.md` now records it, and capacity rejection is separate from pipe
+draining. Full-capacity prefix retention remains out of scope.
 
 Existing ingest preflight already checks extraction tools, language data, and
 model readiness. A separate `doctor` command needs evidence of an unmet need.

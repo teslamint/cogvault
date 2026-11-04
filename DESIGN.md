@@ -304,13 +304,17 @@ Control/Format (`Cf`) runes become `U+FFFD` before both classification and
 display. Diagnostics over 2,000 runes retain 1,999 plus `…`.
 
 **Capture bounds** (F16): stdout and stderr from the CLI subprocess are captured
-through a `cappedWriter` that silently discards bytes past the cap and sets an
-overflow flag. Defaults: stdout 4 MiB, stderr 1 MiB. If stdout overflows, Digest
-returns a permanent error (not transient — a deterministic oversized output would
-retry forever under the transient unlimited-retry rule, repeating the F6 failure
-mode). The overflow check runs after refusal classification so a refusal envelope
-on stderr still outranks the overflow. Stderr overflow requires no special
-handling because the diagnostic pipeline already bounds to 2,000 runes.
+through a bounded buffer that rejects an entire write chunk crossing its cap
+without storing any of that chunk. The subprocess-facing `cappedWriter` handles
+that capacity error, latches overflow, and reports the rejected bytes as consumed
+so pipe draining continues through EOF. Later writes are discarded. Defaults:
+stdout 4 MiB, stderr 1 MiB. Whole crossing-chunk loss is accepted; no partial
+prefix of that chunk is retained. If stdout overflows, Digest returns a permanent
+error (not transient — a deterministic oversized output would retry forever under
+the transient unlimited-retry rule, repeating the F6 failure mode). The overflow
+check runs after refusal classification so a refusal envelope on stderr still
+outranks the overflow. Stderr overflow requires no special handling because the
+diagnostic pipeline already bounds to 2,000 runes.
 
 A future local backend implements the same interface without touching `ingest`.
 
