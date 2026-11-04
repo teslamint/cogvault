@@ -1683,6 +1683,34 @@ digestion prompt embeds these rules so generated pages conform. MCP initialize
 instructions append server-owned evidence guidance after the schema text; the
 2,000-rune cap applies only to the schema portion, not the appended guidance.
 
+On PDF ingest, optional `pdf_title`, `pdf_author`, and `pdf_links` are extracted
+from PDF metadata and hyperlink annotations by `pdfinfo`, independently of the
+model response. `pdf_links` is an ordered, de-duplicated list of at most 64
+HTTP(S) annotation destinations, read from at most the first 128 KiB of the
+link listing; it does not identify a canonical URL or verify
+the linked content. `pdf_author` is only a declared PDF metadata value, never a
+person inferred from article text. `pdf_metadata_status` is `extracted`,
+`partial` (title and author read, link listing unavailable), or `unavailable`.
+The metadata read has its own 30-second deadline and runs before the digest
+budget starts. It refuses a source that is a symlink or not a regular file.
+Like the page body, it reads the source after the scan, so it has the same
+limit as the post-model hash check: a change that is reverted before that
+check is not detected.
+Metadata read failure leaves the digest usable but does not
+silently promote model-provided values into these fields. Re-ingest replaces
+these fields from the current PDF. Existing pages are not migrated. A page
+recorded as `partial` or `unavailable` keeps that status while its source bytes
+are unchanged, because ingest does not digest an unchanged source again; there
+is no metadata-only refresh, since no wiki writer can rewrite page frontmatter
+without risking a concurrent user edit. For new PDF
+pages, model-generated `url`, `source_url`, `canonical_url`, and `author` fields
+are discarded; values already on an existing page are carried forward without
+claiming independent verification. Source-page
+digest instructions ask for representative examples and material qualifications
+and distinguish author observations/proposals from independently established
+facts. This guidance is added by ingest code and does not replace the user's
+`_schema.md`.
+
 ### 11.1 Optional research evidence
 
 Any page may include an optional `research_evidence` frontmatter mapping. Version

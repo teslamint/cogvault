@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -3069,6 +3070,163 @@ func TestRunTextInputExtractsPDFAndSharesContext(t *testing.T) {
 	}
 	if ex.called != 1 || len(m.requests) != 1 || m.requests[0].SourceText != ex.text {
 		t.Fatalf("extractor=%d requests=%+v", ex.called, m.requests)
+	}
+}
+
+func TestPDFProvenanceCannotComeFromModelOutput(t *testing.T) {
+	m := &mockLLM{inputMode: llm.TextInput, fn: func(req llm.DigestRequest) (*llm.DigestResult, error) {
+		if !strings.Contains(req.SchemaText, "Distinguish the author's observations") {
+			t.Fatal("source-fidelity guidance missing from digest request")
+		}
+		return &llm.DigestResult{PageContent: "---\ntitle: Test\ntype: source\nauthor: Invented author\nurl: https://invented.invalid/\nsource_url: https://invented.invalid/source\ncanonical_url: https://invented.invalid/canonical\npdf_author: Invented author\npdf_links:\n  - https://invented.invalid/\npdf_metadata_status: extracted\n---\n\n## 요약\nbody\n"}, nil
+	}}
+	h := newHarness(t, []string{"pdf"}, m)
+	h.write(t, "not-a-real.pdf", "invalid PDF bytes")
+	h.runner.extractor = &mockExtractor{text: "source text"}
+	rep, err := h.runner.Run(context.Background(), RunOptions{})
+	if err != nil || rep.Digested != 1 {
+		t.Fatalf("Run: report=%+v err=%v", rep, err)
+	}
+	page, err := h.store.Read("sources/not-a-real.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(page)
+	if strings.Contains(got, "Invented author") || strings.Contains(got, "invented.invalid") || !strings.Contains(got, "pdf_metadata_status: unavailable") {
+		t.Fatalf("untrusted model metadata survived: %s", got)
+	}
+}
+
+func TestPDFRedigestKeepsExistingPageAttribution(t *testing.T) {
+	m := &mockLLM{inputMode: llm.TextInput, fn: func(req llm.DigestRequest) (*llm.DigestResult, error) {
+		return &llm.DigestResult{PageContent: "---\ntitle: Test\ntype: source\nauthor: Model guess\nurl: https://model.invalid/\n---\n\n## 요약\nbody\n"}, nil
+	}}
+	h := newHarness(t, []string{"pdf"}, m)
+	h.runner.extractor = &mockExtractor{text: "source text"}
+	h.write(t, "source.pdf", "first invalid PDF")
+	if _, err := h.runner.Run(context.Background(), RunOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	page := "sources/source.md"
+	if err := h.store.Write(page, []byte("---\ntitle: Test\ntype: source\nauthor: Editor\nurl: https://editor.example/\n---\n\n## 요약\neditorial addition\n")); err != nil {
+		t.Fatal(err)
+	}
+	h.write(t, "source.pdf", "second invalid PDF")
+	if _, err := h.runner.Run(context.Background(), RunOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := h.store.Read(page)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "author: Editor") || !strings.Contains(string(got), "url: https://editor.example/") || strings.Contains(string(got), "model.invalid") {
+		t.Fatalf("existing attribution was overwritten: %s", got)
+	}
+}
+
+func TestPDFMetadataIsWrittenFromPDFBytes(t *testing.T) {
+	m := &mockLLM{inputMode: llm.TextInput, fn: func(req llm.DigestRequest) (*llm.DigestResult, error) {
+		return &llm.DigestResult{PageContent: "---\ntitle: Test\ntype: source\nurl: https://model.invalid/\n---\n\n## 요약\nbody\n"}, nil
+	}}
+	h := newHarness(t, []string{"pdf"}, m)
+	h.runner.extractor = &mockExtractor{text: "source text"}
+	h.runner.pdfCommands = extract.Commands{CommandContext: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		if name != "pdfinfo" || len(args) == 0 || args[len(args)-1] != "/dev/fd/3" {
+			t.Errorf("unexpected pdfinfo call: %s %v", name, args)
+		}
+		// The title is the source file's bytes read through fd 3, which
+		// proves pdfinfo gets the scanned file's descriptor.
+		script := `printf 'Title: %s\nAuthor: Declared author\n' "$(cat /dev/fd/3)"`
+		if len(args) > 0 && args[0] == "-url" {
+			script = `printf 'Page  Type          URL\n   1  Annotation    https://example.org/a\n   2  Annotation    https://example.org/b\n'`
+		}
+		return exec.CommandContext(ctx, "sh", "-c", script)
+	}}
+	h.write(t, "declared.pdf", "Declared title")
+	if rep, err := h.runner.Run(context.Background(), RunOptions{}); err != nil || rep.Digested != 1 {
+		t.Fatalf("Run: report=%+v err=%v", rep, err)
+	}
+	got, err := h.store.Read("sources/declared.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"pdf_metadata_status: extracted", "pdf_title: Declared title", "pdf_author: Declared author", "- https://example.org/a", "- https://example.org/b"} {
+		if !strings.Contains(string(got), want) {
+			t.Fatalf("page lacks %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(string(got), "model.invalid") {
+		t.Fatalf("model URL survived on a new PDF page:\n%s", got)
+	}
+}
+
+func TestPDFLinkFailureKeepsDeclaredFields(t *testing.T) {
+	m := &mockLLM{inputMode: llm.TextInput, fn: func(req llm.DigestRequest) (*llm.DigestResult, error) {
+		return &llm.DigestResult{PageContent: "---\ntitle: Test\ntype: source\n---\n\n## 요약\nbody\n"}, nil
+	}}
+	h := newHarness(t, []string{"pdf"}, m)
+	h.runner.extractor = &mockExtractor{text: "source text"}
+	h.runner.pdfCommands = extract.Commands{CommandContext: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		if len(args) > 0 && args[0] == "-url" {
+			return exec.CommandContext(ctx, "false")
+		}
+		return exec.CommandContext(ctx, "sh", "-c", `printf 'Title: Declared title\nAuthor: Declared author\n'`)
+	}}
+	h.write(t, "partial.pdf", "PDF bytes")
+	if rep, err := h.runner.Run(context.Background(), RunOptions{}); err != nil || rep.Digested != 1 {
+		t.Fatalf("Run: report=%+v err=%v", rep, err)
+	}
+	got, err := h.store.Read("sources/partial.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"pdf_metadata_status: partial", "pdf_title: Declared title", "pdf_author: Declared author"} {
+		if !strings.Contains(string(got), want) {
+			t.Fatalf("page lacks %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(string(got), "pdf_links") {
+		t.Fatalf("links written although the link listing failed:\n%s", got)
+	}
+}
+
+// A hung pdfinfo must not spend the digest budget, whether its own deadline
+// is shorter or longer than the budget: the metadata read ends before the
+// budget starts, and the model call still gets a live context.
+func TestHungPDFInfoLeavesTheDigestBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		metadataTimeout time.Duration
+	}{
+		{"deadline shorter than budget", 50 * time.Millisecond},
+		{"deadline longer than budget", 1500 * time.Millisecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var digestCtxErr error
+			m := &mockLLM{inputMode: llm.TextInput, ctxFn: func(ctx context.Context) { digestCtxErr = ctx.Err() }, fn: func(req llm.DigestRequest) (*llm.DigestResult, error) {
+				return &llm.DigestResult{PageContent: "---\ntitle: Test\ntype: source\n---\n\n## 요약\nbody\n"}, nil
+			}}
+			h := newHarnessWith(t, []string{"pdf"}, m, func(c *config.Config) { c.LLM.TimeoutSeconds = 1 })
+			h.runner.extractor = &mockExtractor{text: "source text"}
+			h.runner.pdfMetadataTimeout = tc.metadataTimeout
+			h.runner.pdfCommands = extract.Commands{CommandContext: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+				return exec.CommandContext(ctx, "sleep", "3")
+			}}
+			h.write(t, "hung.pdf", "PDF bytes")
+			if rep, err := h.runner.Run(context.Background(), RunOptions{}); err != nil || rep.Digested != 1 {
+				t.Fatalf("Run: report=%+v err=%v", rep, err)
+			}
+			if digestCtxErr != nil {
+				t.Fatalf("digest context already done after the metadata read: %v", digestCtxErr)
+			}
+			got, err := h.store.Read("sources/hung.md")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(got), "pdf_metadata_status: unavailable") {
+				t.Fatalf("hung pdfinfo not recorded as unavailable:\n%s", got)
+			}
+		})
 	}
 }
 
