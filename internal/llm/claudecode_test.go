@@ -1,7 +1,6 @@
 package llm
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -754,6 +753,11 @@ func TestDigestCancellationOutranksOverflowAfterMarker(t *testing.T) {
 	defer cancel()
 	go func() {
 		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
 			if _, err := os.Stat(marker); err == nil {
 				cancel()
 				return
@@ -799,44 +803,63 @@ func TestDigestOverflowOutranksDeadlineAfterMarker(t *testing.T) {
 }
 
 func TestBoundedBufferWriteContract(t *testing.T) {
-	t.Run("oversized input is rejected atomically", func(t *testing.T) {
-		b := boundedBuffer{max: 10}
-		if n, err := b.Write([]byte("123456")); n != 6 || err != nil {
-			t.Fatalf("initial Write = (%d, %v), want (6, nil)", n, err)
-		}
-		before := append([]byte(nil), b.buf.Bytes()...)
-		if n, err := b.Write([]byte("abcdefghijklmnopqrst")); n != 0 || !errors.Is(err, errOutputLimit) {
-			t.Fatalf("oversized Write = (%d, %v), want (0, errOutputLimit)", n, err)
-		}
-		if !bytes.Equal(b.buf.Bytes(), before) {
-			t.Fatalf("oversized write changed stored bytes: %q, want %q", b.buf.Bytes(), before)
-		}
-		if n, err := b.Write([]byte("")); n != 0 || err != nil {
-			t.Fatalf("empty Write = (%d, %v), want (0, nil)", n, err)
-		}
-		if n, err := b.Write([]byte("7890")); n != 4 || err != nil {
-			t.Fatalf("smaller later Write = (%d, %v), want (4, nil)", n, err)
-		}
-		if got := b.buf.String(); got != "1234567890" {
-			t.Fatalf("stored bytes = %q, want exact-capacity contents", got)
-		}
-		if n, err := b.Write(nil); n != 0 || err != nil {
-			t.Fatalf("empty write at capacity = (%d, %v), want (0, nil)", n, err)
-		}
-	})
+	tests := []struct {
+		name         string
+		max          int
+		prefill      []bufferWrite
+		input        []byte
+		wantN        int
+		wantErr      error
+		wantContents string
+	}{
+		{
+			name:         "oversized input is rejected atomically",
+			max:          10,
+			prefill:      []bufferWrite{{input: []byte("123456"), wantN: 6, wantContents: "123456"}},
+			input:        []byte("abcdefghijklmnopqrst"),
+			wantErr:      errOutputLimit,
+			wantContents: "123456",
+		},
+		{
+			name: "smaller later write fits after rejection",
+			max:  10,
+			prefill: []bufferWrite{
+				{input: []byte("123456"), wantN: 6, wantContents: "123456"},
+				{input: []byte("abcdefghijklmnopqrst"), wantErr: errOutputLimit, wantContents: "123456"},
+				{input: []byte(""), wantContents: "123456"},
+			},
+			input:        []byte("7890"),
+			wantN:        4,
+			wantContents: "1234567890",
+		},
+		{
+			name: "empty write at capacity",
+			max:  10,
+			prefill: []bufferWrite{
+				{input: []byte("123456"), wantN: 6, wantContents: "123456"},
+				{input: []byte("abcdefghijklmnopqrst"), wantErr: errOutputLimit, wantContents: "123456"},
+				{input: []byte("7890"), wantN: 4, wantContents: "1234567890"},
+			},
+			input:        nil,
+			wantContents: "1234567890",
+		},
+		{
+			name:         "zero limit allows empty input",
+			input:        nil,
+			wantContents: "",
+		},
+		{
+			name:    "zero limit rejects nonempty input",
+			input:   []byte("x"),
+			wantErr: errOutputLimit,
+		},
+	}
 
-	t.Run("zero limit allows only empty input", func(t *testing.T) {
-		b := boundedBuffer{}
-		if n, err := b.Write(nil); n != 0 || err != nil {
-			t.Fatalf("empty Write = (%d, %v), want (0, nil)", n, err)
-		}
-		if n, err := b.Write([]byte("x")); n != 0 || !errors.Is(err, errOutputLimit) {
-			t.Fatalf("nonempty Write = (%d, %v), want (0, errOutputLimit)", n, err)
-		}
-		if b.buf.Len() != 0 {
-			t.Fatalf("zero-limit buffer stored %d bytes", b.buf.Len())
-		}
-	})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			checkBoundedBufferWrite(t, tt.max, tt.prefill, tt.input, tt.wantN, tt.wantErr, tt.wantContents)
+		})
+	}
 
 	t.Run("capture wrapper makes overflow sticky", func(t *testing.T) {
 		w := cappedWriter{buf: boundedBuffer{max: 4}}
@@ -850,6 +873,34 @@ func TestBoundedBufferWriteContract(t *testing.T) {
 			t.Fatalf("capture state = (overflow=%v, stored=%q), want sticky overflow and no bytes", w.Overflowed(), w.String())
 		}
 	})
+}
+
+type bufferWrite struct {
+	input        []byte
+	wantN        int
+	wantErr      error
+	wantContents string
+}
+
+func checkBoundedBufferWrite(t *testing.T, max int, prefill []bufferWrite, input []byte, wantN int, wantErr error, wantContents string) {
+	t.Helper()
+	b := boundedBuffer{max: max}
+	for _, write := range prefill {
+		n, err := b.Write(write.input)
+		if n != write.wantN || !errors.Is(err, write.wantErr) {
+			t.Fatalf("prefill Write = (%d, %v), want (%d, %v)", n, err, write.wantN, write.wantErr)
+		}
+		if got := b.buf.String(); got != write.wantContents {
+			t.Fatalf("prefill stored bytes = %q, want %q", got, write.wantContents)
+		}
+	}
+	n, err := b.Write(input)
+	if n != wantN || !errors.Is(err, wantErr) {
+		t.Fatalf("Write = (%d, %v), want (%d, %v)", n, err, wantN, wantErr)
+	}
+	if got := b.buf.String(); got != wantContents {
+		t.Fatalf("stored bytes = %q, want %q", got, wantContents)
+	}
 }
 
 var _ Adapter = (*ClaudeCode)(nil)

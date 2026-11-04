@@ -900,52 +900,19 @@ func TestRunClaudeCodeStdoutOverflowExhaustsPermanentAttempts(t *testing.T) {
 	h := newHarness(t, []string{"md"}, okLLM())
 	src := h.write(t, "overflow.md", "unchanged source")
 	hash := contentHash([]byte("unchanged source"))
-	_, testFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	binPath, err := filepath.Abs(filepath.Join(filepath.Dir(testFile), "..", "llm", "testdata", "bin", "claude"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	countFile := filepath.Join(t.TempDir(), "invocations")
-	marker := filepath.Join(t.TempDir(), "complete")
-	t.Setenv("CLAUDE_FAKE_MODE", "overflow_stdout")
-	t.Setenv("CLAUDE_FAKE_COUNT_FILE", countFile)
-	t.Setenv("CLAUDE_FAKE_MARKER_FILE", marker)
+	binPath, countFile, marker := setupOverflowClaudeCode(t)
 	h.runner.llm = llm.NewClaudeCode(binPath, "")
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		if err := os.Remove(marker); err != nil && !os.IsNotExist(err) {
-			t.Fatalf("run %d remove completion marker: %v", attempt, err)
-		}
+		removeOverflowMarker(t, marker, attempt)
 		rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "scheduled"})
 		if err != nil {
 			t.Fatalf("run %d: %v", attempt, err)
 		}
-		if rep.Failed != 1 || len(rep.PerFile) != 1 || rep.PerFile[0].Action != actionFailed ||
-			!strings.Contains(rep.PerFile[0].Error, "stdout exceeded") {
-			t.Fatalf("run %d report = %+v, want permanent stdout-overflow failure", attempt, rep)
-		}
-		row, found, err := h.runner.ledger.lookup(src, hash)
-		if err != nil || !found || row.status != "failed" || row.attempts != attempt {
-			t.Fatalf("run %d ledger row = %+v, found=%v err=%v", attempt, row, found, err)
-		}
-		if _, err := os.Stat(marker); err != nil {
-			t.Fatalf("run %d fake CLI did not reach completion marker: %v", attempt, err)
-		}
-		count, err := os.ReadFile(countFile)
-		if err != nil || strings.Count(string(count), "x\n") != attempt {
-			t.Fatalf("run %d invocations = %q, err=%v; want %d", attempt, count, err, attempt)
-		}
-		if _, err := os.Stat(filepath.Join(h.wikiDir, "sources", "overflow.md")); !os.IsNotExist(err) {
-			t.Fatalf("run %d wrote wiki page or unexpected stat error: %v", attempt, err)
-		}
+		assertOverflowAttempt(t, h, rep, src, hash, marker, countFile, attempt)
 	}
 
-	if err := os.Remove(marker); err != nil && !os.IsNotExist(err) {
-		t.Fatalf("run 4 remove completion marker: %v", err)
-	}
+	removeOverflowMarker(t, marker, 4)
 	rep, err := h.runner.Run(context.Background(), RunOptions{Origin: "scheduled"})
 	if err != nil {
 		t.Fatalf("run 4: %v", err)
@@ -957,12 +924,61 @@ func TestRunClaudeCodeStdoutOverflowExhaustsPermanentAttempts(t *testing.T) {
 	if err != nil || !found || row.attempts != maxAttempts {
 		t.Fatalf("run 4 ledger row = %+v, found=%v err=%v; want attempts=%d", row, found, err, maxAttempts)
 	}
-	count, err := os.ReadFile(countFile)
-	if err != nil || strings.Count(string(count), "x\n") != maxAttempts {
-		t.Fatalf("run 4 invocations = %q, err=%v; want %d", count, err, maxAttempts)
-	}
+	assertOverflowInvocationCount(t, countFile, maxAttempts, 4)
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatalf("run 4 fake CLI completion marker exists or unexpected stat error: %v", err)
+	}
+}
+
+func setupOverflowClaudeCode(t *testing.T) (binPath, countFile, marker string) {
+	t.Helper()
+	_, testFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	binPath, err := filepath.Abs(filepath.Join(filepath.Dir(testFile), "..", "llm", "testdata", "bin", "claude"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	countFile = filepath.Join(t.TempDir(), "invocations")
+	marker = filepath.Join(t.TempDir(), "complete")
+	t.Setenv("CLAUDE_FAKE_MODE", "overflow_stdout")
+	t.Setenv("CLAUDE_FAKE_COUNT_FILE", countFile)
+	t.Setenv("CLAUDE_FAKE_MARKER_FILE", marker)
+	return binPath, countFile, marker
+}
+
+func removeOverflowMarker(t *testing.T, marker string, run int) {
+	t.Helper()
+	if err := os.Remove(marker); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("run %d remove completion marker: %v", run, err)
+	}
+}
+
+func assertOverflowAttempt(t *testing.T, h *harness, rep *Report, src, hash, marker, countFile string, attempt int) {
+	t.Helper()
+	if rep.Failed != 1 || len(rep.PerFile) != 1 || rep.PerFile[0].Action != actionFailed ||
+		!strings.Contains(rep.PerFile[0].Error, "stdout exceeded") {
+		t.Fatalf("run %d report = %+v, want permanent stdout-overflow failure", attempt, rep)
+	}
+	row, found, err := h.runner.ledger.lookup(src, hash)
+	if err != nil || !found || row.status != "failed" || row.attempts != attempt {
+		t.Fatalf("run %d ledger row = %+v, found=%v err=%v", attempt, row, found, err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("run %d fake CLI did not reach completion marker: %v", attempt, err)
+	}
+	assertOverflowInvocationCount(t, countFile, attempt, attempt)
+	if _, err := os.Stat(filepath.Join(h.wikiDir, "sources", "overflow.md")); !os.IsNotExist(err) {
+		t.Fatalf("run %d wrote wiki page or unexpected stat error: %v", attempt, err)
+	}
+}
+
+func assertOverflowInvocationCount(t *testing.T, countFile string, want, run int) {
+	t.Helper()
+	count, err := os.ReadFile(countFile)
+	if err != nil || strings.Count(string(count), "x\n") != want {
+		t.Fatalf("run %d invocations = %q, err=%v; want %d", run, count, err, want)
 	}
 }
 
