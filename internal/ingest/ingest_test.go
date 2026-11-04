@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -3069,6 +3070,90 @@ func TestRunTextInputExtractsPDFAndSharesContext(t *testing.T) {
 	}
 	if ex.called != 1 || len(m.requests) != 1 || m.requests[0].SourceText != ex.text {
 		t.Fatalf("extractor=%d requests=%+v", ex.called, m.requests)
+	}
+}
+
+func TestPDFProvenanceCannotComeFromModelOutput(t *testing.T) {
+	m := &mockLLM{inputMode: llm.TextInput, fn: func(req llm.DigestRequest) (*llm.DigestResult, error) {
+		if !strings.Contains(req.SchemaText, "Distinguish the author's observations") {
+			t.Fatal("source-fidelity guidance missing from digest request")
+		}
+		return &llm.DigestResult{PageContent: "---\ntitle: Test\ntype: source\nauthor: Invented author\nurl: https://invented.invalid/\npdf_author: Invented author\npdf_links:\n  - https://invented.invalid/\npdf_metadata_status: extracted\n---\n\n## 요약\nbody\n"}, nil
+	}}
+	h := newHarness(t, []string{"pdf"}, m)
+	h.write(t, "not-a-real.pdf", "invalid PDF bytes")
+	h.runner.extractor = &mockExtractor{text: "source text"}
+	rep, err := h.runner.Run(context.Background(), RunOptions{})
+	if err != nil || rep.Digested != 1 {
+		t.Fatalf("Run: report=%+v err=%v", rep, err)
+	}
+	page, err := h.store.Read("sources/not-a-real.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(page)
+	if strings.Contains(got, "Invented author") || strings.Contains(got, "invented.invalid") || !strings.Contains(got, "pdf_metadata_status: unavailable") {
+		t.Fatalf("untrusted model metadata survived: %s", got)
+	}
+}
+
+func TestPDFRedigestKeepsExistingPageAttribution(t *testing.T) {
+	m := &mockLLM{inputMode: llm.TextInput, fn: func(req llm.DigestRequest) (*llm.DigestResult, error) {
+		return &llm.DigestResult{PageContent: "---\ntitle: Test\ntype: source\nauthor: Model guess\nurl: https://model.invalid/\n---\n\n## 요약\nbody\n"}, nil
+	}}
+	h := newHarness(t, []string{"pdf"}, m)
+	h.runner.extractor = &mockExtractor{text: "source text"}
+	h.write(t, "source.pdf", "first invalid PDF")
+	if _, err := h.runner.Run(context.Background(), RunOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	page := "sources/source.md"
+	if err := h.store.Write(page, []byte("---\ntitle: Test\ntype: source\nauthor: Editor\nurl: https://editor.example/\n---\n\n## 요약\neditorial addition\n")); err != nil {
+		t.Fatal(err)
+	}
+	h.write(t, "source.pdf", "second invalid PDF")
+	if _, err := h.runner.Run(context.Background(), RunOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := h.store.Read(page)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "author: Editor") || !strings.Contains(string(got), "url: https://editor.example/") || strings.Contains(string(got), "model.invalid") {
+		t.Fatalf("existing attribution was overwritten: %s", got)
+	}
+}
+
+func TestPDFMetadataIsWrittenFromPDFBytes(t *testing.T) {
+	m := &mockLLM{inputMode: llm.TextInput, fn: func(req llm.DigestRequest) (*llm.DigestResult, error) {
+		return &llm.DigestResult{PageContent: "---\ntitle: Test\ntype: source\nurl: https://model.invalid/\n---\n\n## 요약\nbody\n"}, nil
+	}}
+	h := newHarness(t, []string{"pdf"}, m)
+	h.runner.extractor = &mockExtractor{text: "source text"}
+	h.runner.pdfCommands = extract.Commands{CommandContext: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		out := "Title: Declared title\nAuthor: Declared author\n"
+		if len(args) > 0 && args[0] == "-url" {
+			out = "Page  Type          URL\n   1  Annotation    https://example.org/a\n   2  Annotation    https://example.org/b\n"
+		}
+		cmd := exec.CommandContext(ctx, "sh", "-c", `printf '%s' "$OUT"`)
+		cmd.Env = append(os.Environ(), "OUT="+out)
+		return cmd
+	}}
+	h.write(t, "declared.pdf", "PDF bytes")
+	if rep, err := h.runner.Run(context.Background(), RunOptions{}); err != nil || rep.Digested != 1 {
+		t.Fatalf("Run: report=%+v err=%v", rep, err)
+	}
+	got, err := h.store.Read("sources/declared.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"pdf_metadata_status: extracted", "pdf_title: Declared title", "pdf_author: Declared author", "- https://example.org/a", "- https://example.org/b"} {
+		if !strings.Contains(string(got), want) {
+			t.Fatalf("page lacks %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(string(got), "model.invalid") {
+		t.Fatalf("model URL survived on a new PDF page:\n%s", got)
 	}
 }
 

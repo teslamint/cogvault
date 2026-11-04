@@ -37,6 +37,9 @@ import (
 const (
 	maxAttempts  = 3
 	settleWindow = 2 * time.Minute
+	// Kept in code so an older, user-managed wiki schema cannot silently omit
+	// the source-fidelity guidance. It applies to both text and path adapters.
+	ingestGuidance = "\n\nSource-page guidance: Preserve at least one distinctive concrete example when present and material qualifications, including explicit scope or opinion/affiliation disclaimers. Distinguish the author's observations, proposals, and predictions from independently established facts. Do not invent citations, authors, canonical URLs, or wiki links. Summarize; do not copy the source wholesale."
 )
 
 // ErrAlreadyRunning is returned by Run when another ingest holds the flock.
@@ -72,8 +75,10 @@ type Runner struct {
 	idx       index.Index
 	llm       llm.Adapter
 	extractor TextExtractor
-	ledger    *ledger
-	dbPath    string
+	// pdfCommands runs pdfinfo for PDF metadata; the zero value uses exec.
+	pdfCommands extract.Commands
+	ledger      *ledger
+	dbPath      string
 
 	// injectable for tests; defaults set in New.
 	settleWindow time.Duration
@@ -312,6 +317,25 @@ func (r *Runner) scan(report *Report) []scanEntry {
 	return entries
 }
 func (r *Runner) digestOne(parent context.Context, entry scanEntry, hash, schemaText, origin string, prev *ledgerRow, report *Report) {
+	inputMode := r.llm.InputMode()
+	started := time.Now()
+	stageStart := started
+	var extractElapsed, inferElapsed, postElapsed time.Duration
+	stage := "extraction"
+	defer func() {
+		switch stage {
+		case "extraction":
+			extractElapsed = time.Since(stageStart)
+		case "inference":
+			inferElapsed = time.Since(stageStart)
+		case "postprocess":
+			postElapsed = time.Since(stageStart)
+		}
+		// Log durations only; paths, source text, and annotation URLs are omitted.
+		slog.Info("ingest: stage durations", "source_hash_prefix", hash[:12], "input_mode", inputMode.String(), "stage_reached", stage,
+			"extraction_ms", extractElapsed.Milliseconds(), "inference_ms", inferElapsed.Milliseconds(),
+			"postprocess_ms", postElapsed.Milliseconds())
+	}()
 	budget := 5 * time.Minute
 	if r.cfg.LLM.TimeoutSeconds > 0 {
 		budget = time.Duration(r.cfg.LLM.TimeoutSeconds) * time.Second
@@ -320,7 +344,9 @@ func (r *Runner) digestOne(parent context.Context, entry scanEntry, hash, schema
 	defer cancel()
 	sourceText := ""
 	source := map[string]any{}
-	if r.llm.InputMode() == llm.TextInput {
+	var pdfMetadata extract.PDFMetadata
+	pdfMetadataStatus := ""
+	if inputMode == llm.TextInput {
 		var err error
 		sourceText, err = r.extractor.Extract(ctx, entry.absPath)
 		if err != nil {
@@ -365,8 +391,23 @@ func (r *Runner) digestOne(parent context.Context, entry scanEntry, hash, schema
 			return
 		}
 	}
+	if strings.EqualFold(filepath.Ext(entry.absPath), ".pdf") {
+		var err error
+		pdfMetadata, err = extract.ReadPDFMetadata(ctx, entry.absPath, r.pdfCommands)
+		if err != nil {
+			// Metadata is auxiliary. A missing annotation must not prevent a
+			// complete text digest or consume a retry attempt.
+			slog.Warn("ingest: PDF metadata unavailable", "source_hash_prefix", hash[:12])
+			pdfMetadataStatus = "unavailable"
+		} else {
+			pdfMetadataStatus = "extracted"
+		}
+	}
+	extractElapsed = time.Since(started)
+	stage = "inference"
+	stageStart = time.Now()
 	slug := slugFor(entry.absPath, hash)
-	res, err := r.llm.Digest(ctx, llm.DigestRequest{SourcePath: entry.absPath, SourceText: sourceText, SchemaText: schemaText, PageSlug: slug, SourceExt: filepath.Ext(entry.absPath)})
+	res, err := r.llm.Digest(ctx, llm.DigestRequest{SourcePath: entry.absPath, SourceText: sourceText, SchemaText: schemaText + ingestGuidance, PageSlug: slug, SourceExt: filepath.Ext(entry.absPath)})
 	if err != nil {
 		if r.stopIfChanged(entry, hash, report) {
 			return
@@ -380,6 +421,9 @@ func (r *Runner) digestOne(parent context.Context, entry scanEntry, hash, schema
 		r.recordFailure(entry, hash, origin, prev, report, "digest: "+err.Error(), class)
 		return
 	}
+	inferElapsed = time.Since(stageStart)
+	stage = "postprocess"
+	stageStart = time.Now()
 	// Path inputs (a PDF read by the extractor, any file the model reads
 	// itself) are re-hashed after the model call. This catches a file that
 	// changed after the scan and is still different now; a change that was
@@ -419,6 +463,34 @@ func (r *Runner) digestOne(parent context.Context, entry scanEntry, hash, schema
 		return
 	}
 	fm = terms.Automatic(source, previous, fm)
+	if strings.EqualFold(filepath.Ext(entry.absPath), ".pdf") {
+		// PDF text and annotation links do not establish a canonical URL or
+		// author. Keep prior page edits, but not model metadata from this run.
+		for _, key := range []string{"url", "source_url", "canonical_url", "author"} {
+			if value, ok := previous[key]; ok {
+				fm[key] = value
+			} else {
+				delete(fm, key)
+			}
+		}
+	}
+	// These fields come only from the PDF bytes, never from generated YAML.
+	delete(fm, "pdf_title")
+	delete(fm, "pdf_author")
+	delete(fm, "pdf_links")
+	delete(fm, "pdf_metadata_status")
+	if pdfMetadataStatus != "" {
+		fm["pdf_metadata_status"] = pdfMetadataStatus
+	}
+	if pdfMetadata.Title != "" {
+		fm["pdf_title"] = pdfMetadata.Title
+	}
+	if pdfMetadata.Author != "" {
+		fm["pdf_author"] = pdfMetadata.Author
+	}
+	if len(pdfMetadata.Links) != 0 {
+		fm["pdf_links"] = pdfMetadata.Links
+	}
 	// research_evidence is written by agents, never by the digest; keep it.
 	if evidence, ok := previous["research_evidence"]; ok {
 		fm["research_evidence"] = evidence

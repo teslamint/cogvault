@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"errors"
+	"fmt"
 )
 
 type InputMode uint8
@@ -11,6 +12,17 @@ const (
 	PathInput InputMode = iota
 	TextInput
 )
+
+// String names the mode for logs: "path" or "text".
+func (m InputMode) String() string {
+	switch m {
+	case PathInput:
+		return "path"
+	case TextInput:
+		return "text"
+	}
+	return fmt.Sprintf("InputMode(%d)", uint8(m))
+}
 
 type DigestRequest struct {
 	SourcePath string

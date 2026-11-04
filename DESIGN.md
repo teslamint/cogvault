@@ -259,6 +259,22 @@ budget. `finish_reason: "length"` is permanent, because the same input and cap
 truncate again. HTTP classification matches `ollama`, plus an unloaded-model
 4xx message is transient.
 
+The ingest runner appends common source-fidelity guidance to the schema text
+passed to every adapter, retaining each backend's existing text/path input
+contract. PDF metadata and HTTP(S) link annotation destinations are read by
+`internal/extract` with `pdfinfo` (128 KiB output cap, same digest context)
+and written as reserved frontmatter by ingest after model output validation.
+Metadata output over the cap fails the read; link output over the cap is cut
+at the last complete line, so a link-heavy PDF keeps its title and author. The
+first PDF link is not promoted to a canonical URL. Missing auxiliary metadata
+does not consume a digest retry; `pdf_metadata_status` records availability.
+Per-file stage durations are logged for extraction (including metadata), model
+inference, and post-processing using only duration values and a source hash
+prefix, without source text or URL values. A failed model call is logged as
+`stage_reached=inference`. Logs include the input mode (`path` or `text`): for
+path-input adapters, provider-side file reading occurs inside the reported
+inference duration, not the extraction duration.
+
 Ingest, not the adapter, writes `ingested_at` from the run clock after
 validation; models were observed inventing it from stale prompt dates or the
 document's own date.
