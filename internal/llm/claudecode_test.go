@@ -882,9 +882,9 @@ type bufferWrite struct {
 	wantContents string
 }
 
-func checkBoundedBufferWrite(t *testing.T, max int, prefill []bufferWrite, input []byte, wantN int, wantErr error, wantContents string) {
+func checkBoundedBufferWrite(t *testing.T, limit int, prefill []bufferWrite, input []byte, wantN int, wantErr error, wantContents string) {
 	t.Helper()
-	b := boundedBuffer{max: max}
+	b := boundedBuffer{max: limit}
 	for _, write := range prefill {
 		n, err := b.Write(write.input)
 		if n != write.wantN || !errors.Is(err, write.wantErr) {

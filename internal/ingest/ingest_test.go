@@ -909,7 +909,7 @@ func TestRunClaudeCodeStdoutOverflowExhaustsPermanentAttempts(t *testing.T) {
 		if err != nil {
 			t.Fatalf("run %d: %v", attempt, err)
 		}
-		assertOverflowAttempt(t, h, rep, src, hash, marker, countFile, attempt)
+		assertOverflowAttempt(t, h, rep, src, hash, overflowFiles{marker: marker, count: countFile}, attempt)
 	}
 
 	removeOverflowMarker(t, marker, 4)
@@ -955,8 +955,12 @@ func removeOverflowMarker(t *testing.T, marker string, run int) {
 	}
 }
 
-func assertOverflowAttempt(t *testing.T, h *harness, rep *Report, src, hash, marker, countFile string, attempt int) {
+// overflowFiles names the fake CLI's completion marker and invocation count file.
+type overflowFiles struct{ marker, count string }
+
+func assertOverflowAttempt(t *testing.T, h *harness, rep *Report, src, hash string, files overflowFiles, attempt int) {
 	t.Helper()
+	marker, countFile := files.marker, files.count
 	if rep.Failed != 1 || len(rep.PerFile) != 1 || rep.PerFile[0].Action != actionFailed ||
 		!strings.Contains(rep.PerFile[0].Error, "stdout exceeded") {
 		t.Fatalf("run %d report = %+v, want permanent stdout-overflow failure", attempt, rep)
