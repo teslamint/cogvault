@@ -28,6 +28,53 @@ if [ -n "$CLAUDE_FAKE_MODE_MATCH" ]; then
 	esac
 fi
 
+write_marker() {
+	if [ -n "$CLAUDE_FAKE_MARKER_FILE" ]; then
+		: >"$CLAUDE_FAKE_MARKER_FILE" || exit 3
+	fi
+}
+
+count_invocation() {
+	if [ -n "$CLAUDE_FAKE_COUNT_FILE" ]; then
+		printf 'x\n' >>"$CLAUDE_FAKE_COUNT_FILE" || exit 3
+	fi
+}
+
+stream_stdout() {
+	i=0
+	while [ "$i" -lt 100 ]; do
+		printf '%65536s' '' || exit 3
+		i=$((i + 1))
+	done
+}
+
+stream_stderr() {
+	i=0
+	while [ "$i" -lt 32 ]; do
+		printf '%65536s' '' >&2 || exit 3
+		i=$((i + 1))
+	done
+}
+
+count_invocation
+case "$mode" in
+overflow_stdout|overflow_cancel|overflow_deadline|overflow_refusal)
+	stream_stdout
+	write_marker
+	case "$mode" in
+	overflow_cancel|overflow_deadline) sleep 10 ;;
+	overflow_refusal) printf '%s' 'API Error: refused' >&2 ;;
+	esac
+	exit 0
+	;;
+overflow_stderr)
+	printf '%s' '[{"type":"result","subtype":"success","is_error":false,"result":"---\ntitle: T\n---\n\n# T\n\nBody."}]' || exit 3
+	stream_stderr
+	write_marker
+	exit 0
+	;;
+esac
+
 case "$mode" in
 ok)
 	printf '%s' '[{"type":"system","subtype":"init"},{"type":"result","subtype":"success","is_error":false,"result":"---\ntitle: Test Page\ntype: source\nsource_path: notes/x.pdf\ningested_at: 2024-01-15\n---\n\n# Test Page\n\nBody text."}]'

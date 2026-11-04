@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -712,6 +713,143 @@ func TestDigestStdoutOverflowRefusalPrecedence(t *testing.T) {
 	if !errors.Is(err, ErrRefused) {
 		t.Fatalf("refusal must outrank stdout overflow, got %v", err)
 	}
+}
+func TestDigestOverflowDrainsStdoutUntilCompletion(t *testing.T) {
+	c, _, _ := newFake(t, "overflow_stdout")
+	marker := filepath.Join(t.TempDir(), "complete")
+	t.Setenv("CLAUDE_FAKE_MARKER_FILE", marker)
+	c.timeout = 10 * time.Second
+
+	_, err := c.Digest(context.Background(), DigestRequest{SourcePath: "notes/x.pdf"})
+	if err == nil || !strings.Contains(err.Error(), "stdout exceeded") {
+		t.Fatalf("Digest error = %v, want stdout overflow", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("child did not reach completion marker: %v", err)
+	}
+}
+
+func TestDigestStderrOverflowDrainsAndSucceeds(t *testing.T) {
+	c, _, _ := newFake(t, "overflow_stderr")
+	marker := filepath.Join(t.TempDir(), "complete")
+	t.Setenv("CLAUDE_FAKE_MARKER_FILE", marker)
+	c.maxStderr = 1 << 20
+	c.timeout = 10 * time.Second
+
+	result, err := c.Digest(context.Background(), DigestRequest{SourcePath: "notes/x.pdf"})
+	if err != nil || result == nil {
+		t.Fatalf("Digest = (%v, %v), want successful result", result, err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("child did not reach completion marker: %v", err)
+	}
+}
+
+func TestDigestCancellationOutranksOverflowAfterMarker(t *testing.T) {
+	c, _, _ := newFake(t, "overflow_cancel")
+	marker := filepath.Join(t.TempDir(), "overflowed")
+	t.Setenv("CLAUDE_FAKE_MARKER_FILE", marker)
+	c.timeout = 10 * time.Second
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		for {
+			if _, err := os.Stat(marker); err == nil {
+				cancel()
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	_, err := c.Digest(ctx, DigestRequest{SourcePath: "notes/x.pdf"})
+	if !errors.Is(err, ErrTransient) || !strings.Contains(err.Error(), "context cancelled") {
+		t.Fatalf("Digest error = %v, want cancellation to outrank overflow", err)
+	}
+}
+
+func TestDigestCapturedRefusalOutranksStreamedOverflow(t *testing.T) {
+	c, _, _ := newFake(t, "overflow_refusal")
+	marker := filepath.Join(t.TempDir(), "overflowed")
+	t.Setenv("CLAUDE_FAKE_MARKER_FILE", marker)
+	c.timeout = 10 * time.Second
+
+	_, err := c.Digest(context.Background(), DigestRequest{SourcePath: "notes/x.pdf"})
+	if !errors.Is(err, ErrRefused) {
+		t.Fatalf("Digest error = %v, want refusal to outrank overflow", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("child did not reach overflow marker: %v", err)
+	}
+}
+
+func TestDigestOverflowOutranksDeadlineAfterMarker(t *testing.T) {
+	c, _, _ := newFake(t, "overflow_deadline")
+	marker := filepath.Join(t.TempDir(), "overflowed")
+	t.Setenv("CLAUDE_FAKE_MARKER_FILE", marker)
+	c.timeout = 8 * time.Second
+
+	_, err := c.Digest(context.Background(), DigestRequest{SourcePath: "notes/x.pdf"})
+	if err == nil || !strings.Contains(err.Error(), "stdout exceeded") || errors.Is(err, ErrTransient) {
+		t.Fatalf("Digest error = %v, want permanent overflow before deadline", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("child did not reach overflow marker: %v", err)
+	}
+}
+
+func TestBoundedBufferWriteContract(t *testing.T) {
+	t.Run("oversized input is rejected atomically", func(t *testing.T) {
+		b := boundedBuffer{max: 10}
+		if n, err := b.Write([]byte("123456")); n != 6 || err != nil {
+			t.Fatalf("initial Write = (%d, %v), want (6, nil)", n, err)
+		}
+		before := append([]byte(nil), b.buf.Bytes()...)
+		if n, err := b.Write([]byte("abcdefghijklmnopqrst")); n != 0 || !errors.Is(err, errOutputLimit) {
+			t.Fatalf("oversized Write = (%d, %v), want (0, errOutputLimit)", n, err)
+		}
+		if !bytes.Equal(b.buf.Bytes(), before) {
+			t.Fatalf("oversized write changed stored bytes: %q, want %q", b.buf.Bytes(), before)
+		}
+		if n, err := b.Write([]byte("")); n != 0 || err != nil {
+			t.Fatalf("empty Write = (%d, %v), want (0, nil)", n, err)
+		}
+		if n, err := b.Write([]byte("7890")); n != 4 || err != nil {
+			t.Fatalf("smaller later Write = (%d, %v), want (4, nil)", n, err)
+		}
+		if got := b.buf.String(); got != "1234567890" {
+			t.Fatalf("stored bytes = %q, want exact-capacity contents", got)
+		}
+		if n, err := b.Write(nil); n != 0 || err != nil {
+			t.Fatalf("empty write at capacity = (%d, %v), want (0, nil)", n, err)
+		}
+	})
+
+	t.Run("zero limit allows only empty input", func(t *testing.T) {
+		b := boundedBuffer{}
+		if n, err := b.Write(nil); n != 0 || err != nil {
+			t.Fatalf("empty Write = (%d, %v), want (0, nil)", n, err)
+		}
+		if n, err := b.Write([]byte("x")); n != 0 || !errors.Is(err, errOutputLimit) {
+			t.Fatalf("nonempty Write = (%d, %v), want (0, errOutputLimit)", n, err)
+		}
+		if b.buf.Len() != 0 {
+			t.Fatalf("zero-limit buffer stored %d bytes", b.buf.Len())
+		}
+	})
+
+	t.Run("capture wrapper makes overflow sticky", func(t *testing.T) {
+		w := cappedWriter{buf: boundedBuffer{max: 4}}
+		if n, err := w.Write([]byte("12345")); n != 5 || err != nil {
+			t.Fatalf("oversized capture Write = (%d, %v), want (5, nil)", n, err)
+		}
+		if n, err := w.Write([]byte("1")); n != 1 || err != nil {
+			t.Fatalf("later capture Write = (%d, %v), want (1, nil)", n, err)
+		}
+		if !w.Overflowed() || w.String() != "" {
+			t.Fatalf("capture state = (overflow=%v, stored=%q), want sticky overflow and no bytes", w.Overflowed(), w.String())
+		}
+	})
 }
 
 var _ Adapter = (*ClaudeCode)(nil)
