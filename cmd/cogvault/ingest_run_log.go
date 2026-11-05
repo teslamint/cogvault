@@ -46,7 +46,7 @@ func (l *runLog) open() bool {
 	if l.broken {
 		return false
 	}
-	if err := os.MkdirAll(filepath.Dir(l.path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(l.path), 0o750); err != nil {
 		return l.fail("create run log dir", err)
 	}
 	f, err := os.OpenFile(l.path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)

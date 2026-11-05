@@ -37,7 +37,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 	// 1. Config file. Track whether it already existed so we can distinguish a
 	// fresh scaffold (guidance + success exit) from a real validation error.
 	configExisted := fileExists(configPath)
-	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o750); err != nil {
 		return fmt.Errorf("init config dir: %w", err)
 	}
 	if err := config.Save(configPath); err != nil {
@@ -55,7 +55,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 	}
 
 	// 3. Wiki directory (via storage for symlink/traversal security on schema).
-	if err := os.MkdirAll(cfg.WikiDir, 0o755); err != nil {
+	if err := os.MkdirAll(cfg.WikiDir, 0o755); err != nil { // #nosec G301 -- wiki directory is shared with the user's editor and other hosts (SMB); the umask still applies
 		return fmt.Errorf("init wiki dir: %w", err)
 	}
 
@@ -70,7 +70,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 	}
 
 	// 4. Database.
-	if err := os.MkdirAll(filepath.Dir(cfg.DBPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(cfg.DBPath), 0o750); err != nil {
 		return fmt.Errorf("init db dir: %w", err)
 	}
 	dbExisted := fileExists(cfg.DBPath)

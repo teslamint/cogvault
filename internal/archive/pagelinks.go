@@ -189,11 +189,20 @@ func (a *Archive) PageLinksFor(ctx context.Context, wikiPage string) ([]PageLink
 	if !ValidWikiPage(wikiPage) {
 		return nil, fmt.Errorf("%w: %q is not a wiki-relative .md path", ErrInvalid, wikiPage)
 	}
-	return a.pageLinks(ctx, `l.wiki_page = ?`, wikiPage)
+	return a.pageLinks(ctx, pageLinksByPage, wikiPage)
 }
 
-func (a *Archive) pageLinks(ctx context.Context, where string, arg string) ([]PageLink, error) {
-	rows, err := a.db.QueryContext(ctx, `SELECT l.capture_id, l.wiki_page, l.object_id, l.basis_receipt, l.digested_at, l.observed_at, l.recorded_at FROM page_links l JOIN objects o ON o.object_id = l.object_id AND o.state = 'active' WHERE `+where+` ORDER BY l.recorded_at, l.capture_id, l.wiki_page`, arg)
+// The page-link queries are whole constants: callers choose one, so no caller
+// string reaches the SQL text.
+const (
+	pageLinksSelect    = `SELECT l.capture_id, l.wiki_page, l.object_id, l.basis_receipt, l.digested_at, l.observed_at, l.recorded_at FROM page_links l JOIN objects o ON o.object_id = l.object_id AND o.state = 'active' WHERE `
+	pageLinksOrder     = ` ORDER BY l.recorded_at, l.capture_id, l.wiki_page`
+	pageLinksByCapture = pageLinksSelect + `l.capture_id = ?` + pageLinksOrder
+	pageLinksByPage    = pageLinksSelect + `l.wiki_page = ?` + pageLinksOrder
+)
+
+func (a *Archive) pageLinks(ctx context.Context, query string, arg string) ([]PageLink, error) {
+	rows, err := a.db.QueryContext(ctx, query, arg)
 	if err != nil {
 		return nil, err
 	}

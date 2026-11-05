@@ -208,10 +208,10 @@ func Save(configPath string) error {
 	if err != nil {
 		return fmt.Errorf("save config: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o750); err != nil {
 		return fmt.Errorf("save config: %w", err)
 	}
-	if err := os.WriteFile(configPath, data, 0o644); err != nil {
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
 		return fmt.Errorf("save config: %w", err)
 	}
 	return nil

@@ -464,7 +464,7 @@ func copyVerified(src, dst, hexSum string, size int64) error {
 	if n != size || hex.EncodeToString(h.Sum(nil)) != hexSum {
 		return fmt.Errorf("%w: %s", ErrIntegrity, src)
 	}
-	if err := os.Chmod(tmp.Name(), 0o444); err != nil {
+	if err := os.Chmod(tmp.Name(), 0o444); err != nil { // #nosec G302 -- read-only on purpose: archive objects are immutable (SPEC §9.16)
 		return err
 	}
 	if err := os.Link(tmp.Name(), dst); err != nil {

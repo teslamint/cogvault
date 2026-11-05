@@ -84,10 +84,10 @@ func (fs *FSStorage) Write(path string, data []byte) error {
 	// with a symlink in between. Accepted for single-user local MVP.
 	// See docs/decisions/0004-storage-toctou.md.
 	parentDir := filepath.Dir(absPath)
-	if err := os.MkdirAll(parentDir, 0o755); err != nil {
+	if err := os.MkdirAll(parentDir, 0o755); err != nil { // #nosec G301 -- wiki content is shared with the user's editor and other hosts (SMB); the umask still applies
 		return fmt.Errorf("storage.Write %s: %w", path, err)
 	}
-	if err := os.WriteFile(absPath, data, 0o644); err != nil {
+	if err := os.WriteFile(absPath, data, 0o644); err != nil { // #nosec G306 -- wiki pages are user-readable documents; the umask still applies
 		return fmt.Errorf("storage.Write %s: %w", path, err)
 	}
 	return nil
@@ -145,10 +145,10 @@ func (fs *FSStorage) WriteSchema(data []byte) error {
 	}
 
 	parentDir := filepath.Dir(absPath)
-	if err := os.MkdirAll(parentDir, 0o755); err != nil {
+	if err := os.MkdirAll(parentDir, 0o755); err != nil { // #nosec G301 -- wiki content is shared with the user's editor and other hosts (SMB); the umask still applies
 		return fmt.Errorf("storage.WriteSchema: %w", err)
 	}
-	if err := os.WriteFile(absPath, data, 0o644); err != nil {
+	if err := os.WriteFile(absPath, data, 0o644); err != nil { // #nosec G306 -- the schema is a user-readable wiki document; the umask still applies
 		return fmt.Errorf("storage.WriteSchema: %w", err)
 	}
 	return nil
@@ -186,7 +186,7 @@ func (fs *FSStorage) Move(src, dst string) error {
 		return fmt.Errorf("storage.Move %s: %w", dst, err)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(absDst), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(absDst), 0o755); err != nil { // #nosec G301 -- wiki content is shared with the user's editor and other hosts (SMB); the umask still applies
 		return fmt.Errorf("storage.Move %s: %w", dst, err)
 	}
 	if err := os.Rename(absSrc, absDst); err != nil {
