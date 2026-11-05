@@ -853,6 +853,14 @@ func TestBoundedBufferWriteContract(t *testing.T) {
 			input:   []byte("x"),
 			wantErr: errOutputLimit,
 		},
+		{
+			name:         "input within the limit but beyond remaining capacity is rejected",
+			max:          10,
+			prefill:      []bufferWrite{{input: []byte("123456"), wantN: 6, wantContents: "123456"}},
+			input:        []byte("abcde"),
+			wantErr:      errOutputLimit,
+			wantContents: "123456",
+		},
 	}
 
 	for _, tt := range tests {

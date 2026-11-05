@@ -932,11 +932,8 @@ func TestRunClaudeCodeStdoutOverflowExhaustsPermanentAttempts(t *testing.T) {
 
 func setupOverflowClaudeCode(t *testing.T) (binPath, countFile, marker string) {
 	t.Helper()
-	_, testFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	binPath, err := filepath.Abs(filepath.Join(filepath.Dir(testFile), "..", "llm", "testdata", "bin", "claude"))
+	// go test runs in the package directory, so this holds under -trimpath too.
+	binPath, err := filepath.Abs(filepath.Join("..", "llm", "testdata", "bin", "claude"))
 	if err != nil {
 		t.Fatal(err)
 	}
