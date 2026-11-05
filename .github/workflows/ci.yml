@@ -39,5 +39,9 @@ jobs:
       - name: vet
         run: go vet ./...
 
+      # Same script as `make lint`: one pinned gosec for local and CI.
+      - name: lint
+        run: sh scripts/lint.sh
+
       - name: test
         run: go test -race ./... -count=1

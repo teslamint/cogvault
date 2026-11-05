@@ -5,7 +5,7 @@ CODESIGN_IDENTIFIER ?= dev.tmint.cogvault
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null)
 LDFLAGS = -X github.com/teslamint/cogvault/internal/version.injected=$(VERSION)
 
-.PHONY: build install test clean
+.PHONY: build install test lint clean
 
 build:
 	@set -eu; \
@@ -35,6 +35,9 @@ test:
 	sh scripts/make_install_test.sh
 	sh scripts/install-signed_test.sh
 	go test -race ./...
+
+lint:
+	sh scripts/lint.sh
 
 clean:
 	rm -f $(BINARY)

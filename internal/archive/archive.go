@@ -788,7 +788,7 @@ func (a *Archive) stage(content io.Reader) (stagedObject, error) {
 	if err := tmp.Close(); err != nil {
 		return stagedObject{}, err
 	}
-	if err := os.Chmod(tmp.Name(), 0o444); err != nil {
+	if err := os.Chmod(tmp.Name(), 0o444); err != nil { // #nosec G302 -- read-only on purpose: archive objects are immutable (SPEC §9.16)
 		return stagedObject{}, err
 	}
 	ok = true
@@ -930,10 +930,10 @@ func (a *Archive) status(ctx context.Context, captureID string) (Capture, error)
 	if c.Summaries, err = a.ids(ctx, `SELECT s.capture_id FROM captures s JOIN objects o ON o.object_id = s.object_id WHERE s.summary_of = ? AND o.state = 'active' ORDER BY s.recorded_at, s.capture_id`, c.CaptureID); err != nil {
 		return Capture{}, err
 	}
-	if c.Attempts, err = a.attempts(ctx, "capture_id", c.CaptureID); err != nil {
+	if c.Attempts, err = a.attempts(ctx, attemptsByCapture, c.CaptureID); err != nil {
 		return Capture{}, err
 	}
-	if c.RecoveredBy, err = a.attempts(ctx, "result_capture_id", c.CaptureID); err != nil {
+	if c.RecoveredBy, err = a.attempts(ctx, attemptsByResult, c.CaptureID); err != nil {
 		return Capture{}, err
 	}
 	if c.Download, err = a.acquisition(ctx, c.CaptureID); err != nil {
@@ -948,7 +948,7 @@ func (a *Archive) status(ctx context.Context, captureID string) (Capture, error)
 	if c.Ingest, err = a.ingestView(ctx, c); err != nil {
 		return Capture{}, err
 	}
-	if c.PageLinks, err = a.pageLinks(ctx, `l.capture_id = ?`, c.CaptureID); err != nil {
+	if c.PageLinks, err = a.pageLinks(ctx, pageLinksByCapture, c.CaptureID); err != nil {
 		return Capture{}, err
 	}
 	rows, err := a.db.QueryContext(ctx, `SELECT t.position, COALESCE(t.cited_capture_id, ''), t.cited_url, COALESCE(CASE WHEN o.state = 'active' THEN s.completeness END, '') FROM citations t LEFT JOIN captures s ON s.capture_id = t.cited_capture_id LEFT JOIN objects o ON o.object_id = s.object_id WHERE t.report_id = ? ORDER BY t.position`, c.CaptureID)

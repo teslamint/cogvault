@@ -1078,7 +1078,7 @@ func joinTags(v any) string {
 
 func acquireLock(dbPath string) (func(), error) {
 	lockPath := filepath.Join(filepath.Dir(dbPath), "ingest.lock")
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("ingest.Run: open lock %s: %w", lockPath, err)
 	}

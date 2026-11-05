@@ -95,8 +95,16 @@ func (a *Archive) RecordAttempt(ctx context.Context, at Attempt) (Attempt, error
 	return at, tx.Commit()
 }
 
-func (a *Archive) attempts(ctx context.Context, column, captureID string) ([]Attempt, error) {
-	rows, err := a.db.QueryContext(ctx, `SELECT attempt_id, capture_id, cause, tried, result, COALESCE(result_capture_id, ''), remaining_gap, next_action, recorded_at FROM attempts WHERE `+column+` = ? ORDER BY attempt_id`, captureID)
+// The attempt queries are whole constants: callers choose one, so no caller
+// string reaches the SQL text.
+const (
+	attemptsSelect    = `SELECT attempt_id, capture_id, cause, tried, result, COALESCE(result_capture_id, ''), remaining_gap, next_action, recorded_at FROM attempts WHERE `
+	attemptsByCapture = attemptsSelect + `capture_id = ? ORDER BY attempt_id`
+	attemptsByResult  = attemptsSelect + `result_capture_id = ? ORDER BY attempt_id`
+)
+
+func (a *Archive) attempts(ctx context.Context, query, captureID string) ([]Attempt, error) {
+	rows, err := a.db.QueryContext(ctx, query, captureID)
 	if err != nil {
 		return nil, err
 	}

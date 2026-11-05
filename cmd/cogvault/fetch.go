@@ -107,7 +107,7 @@ func runFetch(cmd *cobra.Command, args []string) error {
 	if !strings.HasSuffix(name, ".md") {
 		name += ".md"
 	}
-	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+	if err := os.MkdirAll(srcDir, 0o755); err != nil { // #nosec G301 -- source directory is shared with the user's tools and other hosts; the umask still applies
 		return fmt.Errorf("create source dir: %w", err)
 	}
 	outPath := filepath.Join(srcDir, name)
@@ -126,7 +126,7 @@ func runFetch(cmd *cobra.Command, args []string) error {
 	// Temp-file + rename: a crash mid os.WriteFile leaves a partial capture
 	// in the source directory; atomic replacement prevents that.
 	tmp := outPath + ".tmp"
-	if err := os.WriteFile(tmp, []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(tmp, []byte(content), 0o644); err != nil { // #nosec G306 -- captured source stays user-readable like the rest of the source directory; the umask still applies
 		return fmt.Errorf("write %s: %w", tmp, err)
 	}
 	if err := os.Rename(tmp, outPath); err != nil {
