@@ -93,8 +93,16 @@ func TestFetchRefusesBeforeStartingABrowser(t *testing.T) {
 	}
 }
 
+// haveChrome gates every test that launches a real browser. They are opt-in
+// (COGVAULT_BROWSER_TESTS=1): the container workflow gates image publishing on
+// `go test ./...`, and a browser launch on an unknown runner must not be able to
+// block publishing the MCP server image. Run them locally and in the kci image
+// (docs/deployment/collector.md).
 func haveChrome(t *testing.T) {
 	t.Helper()
+	if os.Getenv("COGVAULT_BROWSER_TESTS") != "1" {
+		t.Skip("set COGVAULT_BROWSER_TESTS=1 to run the tests that launch a real Chrome or Chromium")
+	}
 	if _, err := os.Stat("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"); err == nil {
 		return
 	}
@@ -172,8 +180,11 @@ func portOf(s *httptest.Server) string { return s.URL[strings.LastIndex(s.URL, "
 
 // testDriver stands a local loopback server in for the portal: only the test
 // switches, which no setting reaches, admit a private address and plain http.
+// NoSandbox is set for the tests only: CI runners and containers often cannot
+// create the user namespaces Chrome's sandbox needs, and these tests load
+// nothing but a local page this package serves.
 func testDriver() *Driver {
-	d := New(Options{AllowedHosts: []string{"127.0.0.1"}, Timeout: 60 * time.Second, DownloadWait: 4 * time.Second, MaxBytes: 50_000})
+	d := New(Options{AllowedHosts: []string{"127.0.0.1"}, Timeout: 60 * time.Second, DownloadWait: 4 * time.Second, MaxBytes: 50_000, NoSandbox: true})
 	d.allowPrivate, d.allowHTTP = true, true
 	return d
 }

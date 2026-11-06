@@ -1470,8 +1470,10 @@ verified judgment, backup scheduling, or backup expiry.
       copy of the portal markup and live on the fixture article (the
       downloaded PDF was byte-identical to an earlier official browser copy).
       Not verified: a real non-public article, real login or challenge pages,
-      a container image with a browser, and a terms review. See ADR 0027, "KCI
-      official-browser executor".
+      Chromium running on native x86_64 (the `kci` image target builds for
+      amd64 and runs on arm64, but its browser did not launch under amd64
+      emulation), and a terms review. See ADR 0027, "KCI official-browser
+      executor" and `docs/deployment/collector.md`.
     - **Contract for another executor.** `ClaimJob(executor, owner, lease)`
       and `CompleteJob(id, owner, attempt, outcome)` under the attempt-number
       fence are all a worker needs; `RunNextBrowserJob` is the browser

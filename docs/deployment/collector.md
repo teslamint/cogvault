@@ -23,24 +23,88 @@ operator ──docker exec ... job submit─────────────
 | `deploy/nas/compose.collector.yaml` | Worker stack. Post-gate only. Read-only root filesystem, all capabilities dropped, no ports, memory and pid limits. |
 | `deploy/nas/env.collector.example` | Variables for that stack. `ARCHIVE_DIR` is deliberately empty. |
 | `deploy/nas/config.archive.example.yaml` | The `archive:` block to merge into the NAS `config.yaml`, in two stages. |
+| `Dockerfile` target `kci` | The browser worker image: headless Chromium (exact apk version, digest-pinned base) plus `cogvault-kci`. The default target is unchanged. |
+| `deploy/nas/compose.collector-kci.yaml` | The browser worker stack. Post-gate only; **not to be applied** before ADR 0027 item 14 and a terms review. |
+| `COGVAULT_KCI_IMAGE` in `env.collector.example` | The published `kci` image, pinned by digest. Empty: nothing publishes it yet. |
 
 `deploy/nas/compose.yaml` and `deploy/nas/config.yaml` are **not changed**. The live config has no `archive:` block, so capture is off today.
 
-## The KCI browser worker (`cogvault-kci`): implemented, no image yet
+## The KCI browser worker (`cogvault-kci`)
 
-Jobs with `--executor browser` are KCI article pages. They are run by a **separate binary**, `cogvault-kci`, so the browser library stays out of `cogvault`, the MCP server image. It has the same gate as `job run` (explicit `--config`, matching `archive.root`, `capture_enabled: true`, the item 14 check, a pause while closed, no bypass flag) and the same archive mounts and evidence mounts described below. It opens the article page in headless Chrome, clicks the portal's own "KCI 원문 내려받기" button, and stores the PDF as a held capture. It never logs in or accepts a dialog, and a missing button, login, consent step, challenge, or off-site link ends the job as `human_action_required` with a fixed code (SPEC §9.16 "Executors").
+Jobs with `--executor browser` are KCI article pages. They are run by a **separate binary**, `cogvault-kci`, so the browser library stays out of `cogvault`, the MCP server image. It has the same gate as `job run` (explicit `--config`, matching `archive.root`, `capture_enabled: true`, the item 14 check, a pause while closed, no bypass flag) and the same archive and evidence mounts. It opens the article page in headless Chromium, clicks the portal's own "KCI 원문 내려받기" button, and stores the PDF as a held capture. It never logs in or accepts a dialog, and a missing button, login, consent step, challenge, or off-site link ends the job as `human_action_required` with a fixed code (SPEC §9.16 "Executors").
 
-What is **not** here, and is required before it can run on the NAS:
+**Do not apply `compose.collector-kci.yaml`, and do not enable capture, until both hold:** ADR 0027 item 14 is proven and reviewed, **and** a terms review of automating the KCI portal is recorded. The gate alone keeps the worker paused, but the template is not to be deployed before then.
 
-- **An image with a browser.** `cogvault-kci` needs Chrome or Chromium and fonts. The repository's Dockerfile has neither and is unchanged, so there is no compose template for it. A non-root container that cannot use Chrome's sandbox needs `--no-sandbox`, which weakens the browser; prefer a runtime that supports the sandbox.
-- **Network scope.** The worker confines the browser to `www.kci.go.kr` itself. A host rule that lets this container reach only that host is an extra layer and is not part of these templates.
-- The open decisions in ADR 0027 ("Missing decisions for MCP fetch scope", "KCI official-browser executor"), including a terms review for automating the portal.
-
-To try it on a development host with a Chrome installed (this contacts the real portal once, and is not a NAS procedure):
+### The image (Dockerfile target `kci`)
 
 ```
-COGVAULT_LIVE_KCI=1 go test ./internal/kcibrowser -run TestLiveKCI -v
+docker build --target kci --build-arg VERSION=<id> -t cogvault-kci:<tag> .
 ```
+
+- **Default target unchanged.** The `kci` stages sit before the final stage, so `docker build .` (and the `container` workflow) still builds the `cogvault` image: checked, 37.7 MB, no Chromium, no `cogvault-kci`.
+- **Pins.** Base `alpine:3.22@sha256:bfe7ceb9…c66b034`; Chromium by exact apk version `chromium=142.0.7444.59-r0` (build arg `CHROMIUM_VERSION`). Alpine drops a superseded chromium from its index, so a stale pin makes the build **fail** instead of silently upgrading. Bump the version deliberately, re-run the checks below, and update the digest when the base moves. A pin also means Chromium security updates arrive only when someone bumps it.
+- **Runs as uid 1000 `cogvault`** by default; the compose file overrides it with `NAS_UID:NAS_GID`. `ENTRYPOINT` is `cogvault-kci`, so the image has no shell-based start path. It has no `cogvault` binary: submit jobs through the serve or HTTP-collector container.
+- **Not published.** No workflow builds or pushes this target. Publishing it (tags, a multi-platform build, recording the digest) is a release decision this PR does not make; `COGVAULT_KCI_IMAGE` must be a digest reference.
+
+### The stack (`compose.collector-kci.yaml`)
+
+| Setting | Value | Why |
+|---|---|---|
+| `image` | `${COGVAULT_KCI_IMAGE}` (digest) | no floating tag |
+| `user` | `${NAS_UID}:${NAS_GID}` | the account that owns the archive root |
+| `read_only`, `tmpfs` | read-only root; `/tmp:size=1g` | the profile and the download live in `/tmp` and are removed after each fetch |
+| `cap_drop`, `security_opt` | `ALL`; `no-new-privileges` | no extra privilege |
+| `mem_limit`, `cpus`, `pids_limit` | `1g`, `1.0`, `256` | bounded; passed the checks below, not tuned for the NAS |
+| ports, `network_mode`, `privileged` | none | no listener; the worker and browser only dial out |
+| mounts | config `:ro`; archive rw; `/evidence/reports`, `/evidence/replica` `:ro` | same paths as the serve stack and `config.yaml` |
+| command | `--root`, `--config`, `--chrome=/usr/bin/chromium`, `--no-sandbox`, no bypass flag | gate unconditional |
+
+**`--no-sandbox` is a real weakening.** In this container (non-root, all capabilities dropped, default seccomp) Chromium's own sandbox does not start: on the engine used here it exits during zygote startup (exit 139). A Synology kernel may also lack the user namespaces it needs. The compensating controls are the container limits, a browser confined to `www.kci.go.kr` by the worker itself (pinned resolver plus a request guard), a fresh profile per fetch, no credentials, and no ports. Accepting it is a decision for the permissions owner; the alternative is a runtime that supports the sandbox.
+
+### Validation record (what was run, exactly)
+
+Engine: a Podman 6.0.2 (buildah 1.44.1) engine behind the `docker` CLI on macOS arm64. `docker buildx` and the `docker compose` plugin were not available. Everything below was local, on temporary roots; nothing touched the NAS.
+
+**linux/arm64, native in the engine VM**
+- `docker build --target kci` succeeded; 744 MB; `chromium --version` is `Chromium 142.0.7444.59`.
+- Under the compose constraints (uid 1026:100, read-only root, `/tmp` tmpfs 1g, all capabilities dropped, `no-new-privileges`, 1g memory, 1 CPU, 256 pids): the worker refused to start with no arguments, with a missing config, and with a bypass flag; Chromium started and rendered with `--no-sandbox` and exited 139 without it.
+- The driver tests ran **inside the image** with its Chromium and the same constraints (`COGVAULT_BROWSER_TESTS=1`): all passed, including the byte-for-byte download, the eight non-download classifications, the off-site block, and the queue-to-capture chain.
+- A live run inside the image (`COGVAULT_LIVE_KCI=1 COGVAULT_KCI_NO_SANDBOX=1`) downloaded the fixture article: SHA-256 `75989f52…c405143c4`, equal to the operator's earlier browser copy; a nonexistent article ended `human_action_required`.
+- **Rehearsal of the deployed shape** with the template's flags, limits, user, and mounts at the same container paths, on a temporary root: queue a browser job; make a backup, an empty replica, and a real `restore-test` report in containers; then the worker with capture off was refused (`capture_disabled`); with capture on but the evidence mounts omitted it was refused (`restore_test_not_passed`); with the read-only evidence mounts it passed the gate, claimed the job, drove Chromium to the live portal, and ended `held` (606,425 bytes, SHA-256 as above, `seen_during_research`, worker name `nas-kci`).
+
+**linux/amd64 (the NAS architecture: Synology x86_64, Docker 24.0.2, as reported by Portainer)**
+- `chromium-142.0.7444.59-r0` exists in Alpine v3.22 `community` for x86_64 (`apk policy` and `apk search -e`, run in an amd64 container).
+- `docker build --platform linux/amd64 --target kci` **succeeded**: image architecture `amd64`, 837 MB; `cogvault-kci` is an x86-64 ELF; `chromium --version` prints `142.0.7444.59`; the worker's gate refusals behave as on arm64.
+- **Chromium did not launch to completion under QEMU emulation.** A headless run stayed up for about seven minutes with a Chrome `FATAL` (GPU process not usable) and a `ptrace` "Function not implemented", and a second attempt capped at 60 s did not finish. User-mode emulation lacks syscalls Chromium uses, so this is an emulation limit and **not** evidence about a native x86 host, and it is **not a pass**. Both containers were removed. **Chromium on a real x86 host is unverified.**
+
+### Unverified (exact)
+
+1. **Chromium running on x86_64 at all** (see above), and therefore the amd64 driver tests and the live download on x86.
+2. **Docker 24.0.2 and Synology:** the compose keys used (`mem_limit`, `cpus`, `pids_limit`, `read_only`, `tmpfs` with size, `cap_drop`, `security_opt`) were not run on that Docker or through Portainer; neither were Synology's cgroup limits, seccomp default, kernel user namespaces, or `/dev/shm`. The template avoids `/dev/shm` through `--disable-dev-shm-usage`, which the worker adds with `--no-sandbox`.
+3. **File ownership on the NAS volume** (`NAS_UID:NAS_GID` writing the archive root); the engine VM maps ids differently and says nothing about Synology.
+4. **Compose rendering** was done with a small script that substitutes variables; `docker compose config` was not available. The YAML parsed, one service rendered with no ports, no `privileged`, no `network_mode`, and each required variable failed when missing.
+5. **No published image:** the digest to deploy does not exist yet, and a multi-platform build was not run end to end (arm64 native and amd64 emulated were built separately).
+6. **Resource sizes** (1 GiB memory, 256 pids, 1 GiB `/tmp`) passed these checks on a small page and one 606 KB download; they are not tuned for the NAS.
+7. **CI:** the real-browser tests are opt-in (`COGVAULT_BROWSER_TESTS=1`) so a browser launch on an unknown runner cannot block publishing the `cogvault` image; CI therefore does not run them.
+8. The terms review, a real non-public article, and real login or challenge pages (ADR 0027).
+
+### Rollout (after the preconditions) and rollback
+
+1. **Publish and record.** Build the `kci` target for `linux/amd64`, push it, and record the digest. Pull that digest on a non-NAS x86_64 host and run the checks in the validation record, in particular **Chromium actually starting on native x86**. Set `COGVAULT_KCI_IMAGE` to the digest.
+2. **Pre-flight on the NAS, archive untouched.** Run the image once with `--entrypoint chromium` and the compose limits (`--headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --dump-dom data:text/html,<p>ok</p>`), to prove the kernel and limits allow it. No archive mount.
+3. **Deploy the stack with capture off** (stage 1 or 2a of the rollout above). Expect `paused: …capture_disabled` and a healthy container.
+4. **After stage 2b** (capture on, gate passing) the worker logs `resumed`. Smoke with the fixture URL as a browser job, submitted from the serve or HTTP-collector container: `docker exec <container> cogvault archive --root /data/archive job submit '<KCI article URL>' --submitter operator --executor browser`. Expect `held`, a PDF capture of unknown completeness, and the operator's reference hash if the article is unchanged.
+5. **Kill switch:** `capture_enabled: false` plus `docker kill --signal=HUP` on serve pauses this worker within one poll; a fetch in progress finishes.
+6. **Rollback:** stop or remove the `cogvault-kci` stack. A fetch in progress loses its lease and the next worker resumes it; browser jobs stay queued. To roll the image back, set `COGVAULT_KCI_IMAGE` to the previous digest and redeploy. The archive root and the registry schema are not changed by this worker, so nothing is restored.
+
+To run the real-browser tests on a development host (the live test contacts the portal once and is not a NAS procedure):
+
+```
+COGVAULT_BROWSER_TESTS=1 go test ./internal/kcibrowser -v
+COGVAULT_BROWSER_TESTS=1 COGVAULT_LIVE_KCI=1 go test ./internal/kcibrowser -run TestLiveKCI -v
+```
+
+Inside the image, build the test binary for the image's architecture (`go test -c`), mount it from a directory the engine shares, and run it with `--entrypoint` and the compose constraints; pass `COGVAULT_KCI_NO_SANDBOX=1` for the live test.
 
 ## The gate
 
@@ -62,7 +126,7 @@ ADR 0027 item 14 allows pre-gate work only with temporary roots and no live wiki
 go test ./internal/archive ./cmd/cogvault -run 'Job|Worker' -count=1
 ```
 
-The package tests run the real queue, lease, retry, SSRF refusal, and worker loop on temporary roots (the loop takes an injected gate in tests only). The browser executor is tested the same way: its contract with a fake driver, and its driver against a real headless Chrome and a local copy of the portal markup (`go test ./internal/kcibrowser`, skipped when no Chrome is installed). What needs the real NAS cannot be rehearsed before the gate: volume ownership can be checked in stage 1 (capture still off), and the NAS outbound path is first exercised by the single operator-submitted job in stage 2, after sign-off.
+The package tests run the real queue, lease, retry, SSRF refusal, and worker loop on temporary roots (the loop takes an injected gate in tests only). The browser executor is tested the same way: its contract with a fake driver, and its driver against a real headless Chrome and a local copy of the portal markup (`COGVAULT_BROWSER_TESTS=1 go test ./internal/kcibrowser`; opt-in, so a browser launch cannot block image publishing in CI). The compose shape itself was rehearsed on temporary roots in containers (see "Validation record" under the KCI browser worker). What needs the real NAS cannot be rehearsed before the gate: volume ownership can be checked in stage 1 (capture still off), and the NAS outbound path is first exercised by the single operator-submitted job in stage 2, after sign-off.
 
 ## Choosing the archive root
 

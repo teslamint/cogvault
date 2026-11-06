@@ -569,8 +569,8 @@ download endpoint, so a real click is used and no download URL is built.
   eight non-download cases classify as the contract says; a click that leads
   off the allowed hosts is blocked without the other host being reached; and a
   mutation that lets every request through is caught by the tests.
-- **Live portal** (`COGVAULT_LIVE_KCI=1 go test ./internal/kcibrowser -run
-  TestLiveKCI`): the fixture article `ART002605798` was opened, the official
+- **Live portal** (`COGVAULT_BROWSER_TESTS=1 COGVAULT_LIVE_KCI=1 go test
+  ./internal/kcibrowser -run TestLiveKCI`): the fixture article `ART002605798` was opened, the official
   control was clicked, and the portal served `KCI_FI002605798.pdf`, 606,425
   bytes, SHA-256 `75989f52…c405143c4`, **identical** to the operator's earlier
   browser original. The job ended `held`, the capture has completeness
@@ -589,9 +589,14 @@ download endpoint, so a real click is used and no download URL is built.
    or password field, dialog wording, challenge keywords) are checked on local
    pages only; the portal's real wording may differ, and an unrecognized page
    ends as `download_not_started`, which also needs a person.
-3. **An image with a browser.** `cogvault-kci` needs Chrome or Chromium and
-   fonts on its host. The repository's Dockerfile has neither and was not
-   changed. A non-root container without user namespaces needs
+3. **The browser on the NAS architecture.** The Dockerfile target `kci`
+   (digest-pinned base, Chromium by exact version) builds for linux/arm64 and
+   linux/amd64, and on arm64 its container passed the driver tests, a live
+   download, and a rehearsal of the compose shape on temporary roots. On
+   amd64 the image builds and the worker's gate works, but Chromium did not
+   launch under QEMU emulation, which says nothing about a native host, so
+   **Chromium on x86_64 is unverified**, as are Docker 24.0.2 and Synology
+   behavior. A non-root container without user namespaces needs
    `--no-sandbox`, which weakens the browser. Nothing ran on the NAS.
 4. **A terms review** for automating the portal. The executor does one
    official download per job and never crawls, but whether the portal's terms

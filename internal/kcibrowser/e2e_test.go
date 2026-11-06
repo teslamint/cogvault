@@ -95,7 +95,9 @@ func TestLiveKCI(t *testing.T) {
 	defer a.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
-	d := New(Options{})
+	// COGVAULT_KCI_NO_SANDBOX=1 is for running this test inside a container
+	// that cannot create the namespaces Chrome's sandbox needs.
+	d := New(Options{NoSandbox: os.Getenv("COGVAULT_KCI_NO_SANDBOX") == "1"})
 
 	t.Run("public article", func(t *testing.T) {
 		j, _, err := a.SubmitJob(ctx, archive.JobRequest{URL: kciFixture, Executor: archive.ExecutorBrowser, Submitter: "live", SeenSHA256: "sha256:" + referencePDFSHA})
@@ -130,8 +132,10 @@ func TestLiveKCI(t *testing.T) {
 			t.Fatalf("job = %+v, %v", got, err)
 		}
 		t.Logf("state=%s detail=%q", got.State, got.Attempts[len(got.Attempts)-1].Detail)
-		if got.State == archive.JobHeld || got.ResultCaptureID != "" {
-			t.Fatalf("a missing article stored bytes: %+v", got)
+		// A browser fault would leave the job queued for a retry and prove nothing,
+		// so require the portal's answer: a person-needed outcome with no bytes.
+		if got.State != archive.JobHuman || got.ResultCaptureID != "" {
+			t.Fatalf("a missing article did not end human_action_required without bytes: %+v", got)
 		}
 	})
 }

@@ -1,0 +1,85 @@
+# cogvault-kci: the KCI browser worker (ADR 0027, "KCI official-browser
+# executor"). REVIEW TEMPLATE: not deployed anywhere. Read
+# docs/deployment/collector.md first.
+#
+# POST-GATE ONLY. Do not deploy it, and do not enable capture, until BOTH are
+# done: (1) ADR 0027 item 14 is proven and a human has reviewed it, and (2) a
+# terms review of automating the KCI portal has been done and recorded. Until
+# then the activation gate keeps the worker paused even if it is started, but
+# the template must not be applied.
+#
+# A SEPARATE stack from compose.yaml (the MCP server) and from
+# compose.collector.yaml (the HTTP worker), so each can be added, stopped, and
+# rolled back alone. It opens the same archive root and the same read-only
+# evidence mounts as the other worker; see that file for why.
+#
+# The worker is gated and has no bypass flag: it claims nothing, and opens
+# nothing, unless config.yaml names this archive root, sets
+# archive.capture_enabled: true, and passes the ADR 0027 item 14 check. While
+# the gate is closed it stays up and logs "paused: <code>".
+#
+# IMAGE. Build target "kci" of the repository Dockerfile (headless Chromium,
+# pinned by exact apk version on a digest-pinned base, plus cogvault-kci). It is
+# NOT published by any workflow. Publish it, record its digest, and put that
+# digest in COGVAULT_KCI_IMAGE; never use a floating tag. Required .env: see
+# env.collector.example.
+#
+# CHROMIUM SANDBOX. The command passes --no-sandbox. In this stack's container
+# (non-root, all capabilities dropped, default seccomp) Chromium's own sandbox
+# cannot start (checked on one engine: it exits at zygote startup), and a
+# Synology kernel may not offer the user namespaces it needs either. That
+# weakens renderer isolation. The compensating controls are the container
+# limits below, a browser confined to www.kci.go.kr by the worker itself (a
+# pinned resolver plus a request guard), a fresh profile per fetch, no
+# credentials, and no ports. Accepting --no-sandbox is a decision for the
+# permissions owner; the alternative is a runtime that supports the sandbox.
+services:
+  cogvault-kci:
+    image: ${COGVAULT_KCI_IMAGE:?set COGVAULT_KCI_IMAGE in .env to the published image pinned by digest (name@sha256:...)}
+    # The NAS account that owns ARCHIVE_DIR (the same account the other stacks use).
+    user: "${NAS_UID:?set NAS_UID in .env}:${NAS_GID:?set NAS_GID in .env}"
+    command:
+      - --root=/data/archive
+      - --config=/config/config.yaml
+      - --owner=nas-kci
+      - --poll=30s
+      - --lease=10m
+      - --chrome=/usr/bin/chromium
+      - --no-sandbox
+    environment:
+      HOME: /tmp
+    volumes:
+      # The wiki is deliberately not mounted.
+      - ${COGVAULT_DIR:?set COGVAULT_DIR in .env}/config.yaml:/config/config.yaml:ro
+      - ${ARCHIVE_DIR:?set ARCHIVE_DIR in .env to a dedicated, inventoried archive root on the NAS local disk}:/data/archive
+      # ADR 0027 item 14 evidence, READ-ONLY, at the SAME container paths as in
+      # the serve stack and in config.yaml (archive.deployment). backups/ is not
+      # mounted: backup_target is compared as a path only.
+      - ${EVIDENCE_DIR:?set EVIDENCE_DIR in .env to the directory holding reports/ and replica/}/reports:/evidence/reports:ro
+      - ${EVIDENCE_DIR}/replica:/evidence/replica:ro
+    # No published ports and no inbound listener: the worker and its browser only dial out.
+    read_only: true
+    tmpfs:
+      # The browser profile and the download land here and are removed after
+      # each fetch. The download is bounded at 32 MiB by the worker.
+      - /tmp:size=1g
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    # Bounded resources. These values passed the container checks in
+    # docs/deployment/collector.md; they are not tuned for the NAS.
+    mem_limit: 1g
+    cpus: "1.0"
+    pids_limit: 256
+    # A stop abandons a fetch in progress without a record; the lease expires and
+    # the next claim resumes the job.
+    stop_grace_period: 30s
+    restart: unless-stopped
+    healthcheck:
+      # Process liveness only. A paused worker (gate closed) is healthy by
+      # design: read `docker logs` for "paused: <code>".
+      test: ["CMD-SHELL", "pidof cogvault-kci > /dev/null"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
