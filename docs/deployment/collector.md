@@ -26,6 +26,22 @@ operator ──docker exec ... job submit─────────────
 
 `deploy/nas/compose.yaml` and `deploy/nas/config.yaml` are **not changed**. The live config has no `archive:` block, so capture is off today.
 
+## The KCI browser worker (`cogvault-kci`): implemented, no image yet
+
+Jobs with `--executor browser` are KCI article pages. They are run by a **separate binary**, `cogvault-kci`, so the browser library stays out of `cogvault`, the MCP server image. It has the same gate as `job run` (explicit `--config`, matching `archive.root`, `capture_enabled: true`, the item 14 check, a pause while closed, no bypass flag) and the same archive mounts and evidence mounts described below. It opens the article page in headless Chrome, clicks the portal's own "KCI 원문 내려받기" button, and stores the PDF as a held capture. It never logs in or accepts a dialog, and a missing button, login, consent step, challenge, or off-site link ends the job as `human_action_required` with a fixed code (SPEC §9.16 "Executors").
+
+What is **not** here, and is required before it can run on the NAS:
+
+- **An image with a browser.** `cogvault-kci` needs Chrome or Chromium and fonts. The repository's Dockerfile has neither and is unchanged, so there is no compose template for it. A non-root container that cannot use Chrome's sandbox needs `--no-sandbox`, which weakens the browser; prefer a runtime that supports the sandbox.
+- **Network scope.** The worker confines the browser to `www.kci.go.kr` itself. A host rule that lets this container reach only that host is an extra layer and is not part of these templates.
+- The open decisions in ADR 0027 ("Missing decisions for MCP fetch scope", "KCI official-browser executor"), including a terms review for automating the portal.
+
+To try it on a development host with a Chrome installed (this contacts the real portal once, and is not a NAS procedure):
+
+```
+COGVAULT_LIVE_KCI=1 go test ./internal/kcibrowser -run TestLiveKCI -v
+```
+
 ## The gate
 
 `job run` has one start condition. It needs an explicit `--config`, and it has **no option that skips the gate**. Before it opens the archive and before every claim it re-reads that config and requires all of:
@@ -46,7 +62,7 @@ ADR 0027 item 14 allows pre-gate work only with temporary roots and no live wiki
 go test ./internal/archive ./cmd/cogvault -run 'Job|Worker' -count=1
 ```
 
-The package tests run the real queue, lease, retry, SSRF refusal, and worker loop on temporary roots (the loop takes an injected gate in tests only). What needs the real NAS cannot be rehearsed before the gate: volume ownership can be checked in stage 1 (capture still off), and the NAS outbound path is first exercised by the single operator-submitted job in stage 2, after sign-off.
+The package tests run the real queue, lease, retry, SSRF refusal, and worker loop on temporary roots (the loop takes an injected gate in tests only). The browser executor is tested the same way: its contract with a fake driver, and its driver against a real headless Chrome and a local copy of the portal markup (`go test ./internal/kcibrowser`, skipped when no Chrome is installed). What needs the real NAS cannot be rehearsed before the gate: volume ownership can be checked in stage 1 (capture still off), and the NAS outbound path is first exercised by the single operator-submitted job in stage 2, after sign-off.
 
 ## Choosing the archive root
 
@@ -150,5 +166,6 @@ The worker refuses non-public destinations in-process: every DNS answer must be 
 
 - No compose file here was deployed or run. The stack YAML was parsed and rendered with sample variables only; `docker compose config` was not available on the review host.
 - No run against a NAS: volume ownership, container uid, outbound path, and Portainer behavior are untested.
-- A live public download was not exercised from the build host (no outbound access for Go binaries there); the happy path is covered by local `httptest` servers.
+- **HTTP worker, live:** not exercised. The build host gives freshly built Go binaries no outbound network (the unmodified `main` binary behaves the same), so the HTTP happy path is covered by local `httptest` servers only. A public query URL such as the BOK PDF is refused by design (ADR 0027, "Worked example: the BOK PDF").
+- **Browser worker, live:** one official download of the KCI fixture article ran on a development host through headless Chrome (the browser makes the requests, this process only resolves DNS and talks to the browser over loopback), and it matched the operator's earlier copy byte for byte. Not run in a container or on the NAS.
 - The restore-test `docker run` command and the read-only evidence mounts were not run. What is tested is the activation gate itself: with real evidence (a backup, an off-root replica, and a real `restore-test` report) under mount-style paths, the gate passes, and it refuses a missing report, a missing replica, a `backup_target` at another path, and a replica at another path (`TestWorkerGateReadsEvidenceFromConfiguredMountPaths`). That `archive.deployment` is restart-only on reload is pinned by a reload test.

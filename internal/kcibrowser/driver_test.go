@@ -1,0 +1,237 @@
+package kcibrowser
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/netip"
+	"os"
+	"os/exec"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/teslamint/cogvault/internal/archive"
+)
+
+func TestAllowedHostFollowsTheAllowlistAndScheme(t *testing.T) {
+	d := New(Options{})
+	for raw, want := range map[string]bool{
+		"https://www.kci.go.kr/kciportal/x":   true,
+		"https://WWW.KCI.GO.KR/x":             true,
+		"https://www.kci.go.kr:443/x":         true,
+		"http://www.kci.go.kr/x":              false, // plain http only in tests
+		"https://www.kci.go.kr.evil.test/x":   false,
+		"https://evil.test/x":                 false,
+		"https://www.kci.go.kr@evil.test/x":   false, // userinfo: the host is evil.test
+		"https://localhost/x":                 false,
+		"data:text/html,hi":                   false,
+		"ftp://www.kci.go.kr/x":               false,
+		"https://10.0.0.5/x":                  false,
+		"https://www.kci.go.kr%2eevil.test/x": false,
+	} {
+		if _, got := d.allowedHost(raw); got != want {
+			t.Errorf("allowedHost(%q) = %v, want %v", raw, got, want)
+		}
+	}
+	d.allowHTTP = true
+	if _, ok := d.allowedHost("http://www.kci.go.kr/x"); !ok {
+		t.Error("the test switch did not admit plain http")
+	}
+}
+
+// The browser is pinned to the address this process checked, every other name
+// is unresolvable, and a host with any non-public answer is refused before a
+// browser starts.
+func TestResolverRulesPinCheckedAddressesAndRefuseNonPublic(t *testing.T) {
+	answer := func(addrs ...string) func(context.Context, string) ([]netip.Addr, error) {
+		return func(context.Context, string) ([]netip.Addr, error) {
+			var out []netip.Addr
+			for _, a := range addrs {
+				out = append(out, netip.MustParseAddr(a))
+			}
+			return out, nil
+		}
+	}
+	rules := func(addrs ...string) (string, bool, error) {
+		return New(Options{Resolve: answer(addrs...)}).resolverRules(context.Background())
+	}
+	got, ok, err := rules("93.184.216.34")
+	if err != nil || !ok || got != "MAP www.kci.go.kr 93.184.216.34, MAP * ~NOTFOUND" {
+		t.Fatalf("public = %q, %v, %v", got, ok, err)
+	}
+	if got, ok, err := rules("2606:2800:220:1:248:1893:25c8:1946"); err != nil || !ok || !strings.Contains(got, "MAP www.kci.go.kr [2606:2800:220:1:248:1893:25c8:1946]") {
+		t.Fatalf("ipv6 = %q, %v, %v", got, ok, err)
+	}
+	if got, _, _ := rules("2606:2800:220:1:248:1893:25c8:1946", "93.184.216.34"); !strings.Contains(got, "93.184.216.34") {
+		t.Fatalf("an IPv4 answer is preferred: %q", got)
+	}
+	for _, bad := range [][]string{{"10.0.0.5"}, {"127.0.0.1"}, {"169.254.169.254"}, {"93.184.216.34", "192.168.1.1"}, {"100.64.0.1"}} {
+		if got, ok, err := rules(bad...); ok || err != nil || got != "" {
+			t.Errorf("non-public %v = %q, %v, %v; want refused", bad, got, ok, err)
+		}
+	}
+	if _, _, err := New(Options{Resolve: answer()}).resolverRules(context.Background()); err == nil {
+		t.Error("an empty answer was accepted")
+	}
+}
+
+// Without the test switch, a host that is not public never reaches Chrome:
+// Fetch reports blocked_address and an off-list URL reports unexpected_page.
+func TestFetchRefusesBeforeStartingABrowser(t *testing.T) {
+	d := New(Options{AllowedHosts: []string{"127.0.0.1"}, ChromePath: "/nonexistent/never-started"})
+	f, err := d.Fetch(context.Background(), "https://127.0.0.1/kciportal/x")
+	if err != nil || f.Code != archive.ReasonBlockedAddress {
+		t.Fatalf("loopback host = %+v, %v", f, err)
+	}
+	f, err = New(Options{ChromePath: "/nonexistent/never-started"}).Fetch(context.Background(), "https://example.org/x")
+	if err != nil || f.Code != archive.ReasonUnexpectedPage {
+		t.Fatalf("other host = %+v, %v", f, err)
+	}
+}
+
+func haveChrome(t *testing.T) {
+	t.Helper()
+	if _, err := os.Stat("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"); err == nil {
+		return
+	}
+	for _, n := range []string{"google-chrome", "chromium", "chromium-browser", "chrome"} {
+		if _, err := exec.LookPath(n); err == nil {
+			return
+		}
+	}
+	t.Skip("no Chrome or Chromium found")
+}
+
+const pdfBody = "%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n"
+
+// portal serves pages that copy the markup of the official KCI detail page
+// (a javascript: link with onclick="fncDown('KCI_FI...')" and the visible
+// label, whose handler points a hidden iframe at the download endpoint), plus
+// the variants the contract must tell apart.
+func portal(t *testing.T) (*httptest.Server, func(path string) string) {
+	t.Helper()
+	const handler = `<script>function fncDown(id){ orteDownFrame.location.href='/download?id='+id }</script><iframe name="orteDownFrame" style="display:none"></iframe>`
+	page := func(extra, control string) string {
+		return `<!doctype html><html><head><meta charset="utf-8"><title>article</title></head><body>` + handler + extra +
+			`<ul><li class="green">` + control + `</li><li><a href="/policy" target="_blank"><span>학술지 저작권 정책 내려받기</span></a></li></ul></body></html>`
+	}
+	official := `<a href="javascript:;" onclick="fncDown('KCI_FI001')"><em><i class="far fa-file-pdf"></i></em><span>KCI 원문 내려받기</span></a>`
+	mux := http.NewServeMux()
+	var srv *httptest.Server
+	mux.HandleFunc("/ok", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, page("", official)) })
+	mux.HandleFunc("/big", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, page("", official)) })
+	mux.HandleFunc("/nobutton", func(w http.ResponseWriter, r *http.Request) {
+		// The handler exists on every detail page; this article has no control (not public).
+		io.WriteString(w, page("", `<a href="/policy"><span>학술지 저작권 정책 내려받기</span></a>`))
+	})
+	mux.HandleFunc("/notdetail", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `<html><body><h1>no such article</h1></body></html>`)
+	})
+	click := func(js string) func(http.ResponseWriter, *http.Request) {
+		return func(w http.ResponseWriter, r *http.Request) {
+			io.WriteString(w, page("", `<a href="javascript:;" onclick="`+js+`"><span>KCI 원문 내려받기</span></a>`))
+		}
+	}
+	mux.HandleFunc("/external", func(w http.ResponseWriter, r *http.Request) {
+		click("location.href='http://localhost:"+portOf(srv)+"/elsewhere'")(w, r)
+	})
+	mux.HandleFunc("/tologin", click("location.href='/member/login'"))
+	mux.HandleFunc("/tochallenge", click("location.href='/verify'"))
+	mux.HandleFunc("/toconsent", click("alert('이용약관에 동의하시겠습니까?')"))
+	mux.HandleFunc("/tonothing", click("orteDownFrame.location.href='/not-a-file'"))
+	mux.HandleFunc("/member/login", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `<html><body><form><input type="text" name="id"><input type="password" name="pw"></form></body></html>`)
+	})
+	mux.HandleFunc("/verify", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `<html><body><p>자동입력 방지 문자를 입력하세요</p></body></html>`)
+	})
+	mux.HandleFunc("/not-a-file", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "<html>plain page</html>") })
+	mux.HandleFunc("/elsewhere", func(w http.ResponseWriter, r *http.Request) {
+		t.Error("the browser reached a host outside the allowlist")
+	})
+	mux.HandleFunc("/download", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/pdf")
+		w.Header().Set("Content-Disposition", `attachment; filename="KCI_FI001.pdf"`)
+		if r.Referer() != "" && strings.HasSuffix(r.Referer(), "/big") {
+			w.Write([]byte("%PDF-"))
+			w.Write(bytes.Repeat([]byte("x"), 200_000))
+			return
+		}
+		io.WriteString(w, pdfBody)
+	})
+	srv = httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv, func(p string) string { return srv.URL + p }
+}
+
+func portOf(s *httptest.Server) string { return s.URL[strings.LastIndex(s.URL, ":")+1:] }
+
+// testDriver stands a local loopback server in for the portal: only the test
+// switches, which no setting reaches, admit a private address and plain http.
+func testDriver() *Driver {
+	d := New(Options{AllowedHosts: []string{"127.0.0.1"}, Timeout: 60 * time.Second, DownloadWait: 4 * time.Second, MaxBytes: 50_000})
+	d.allowPrivate, d.allowHTTP = true, true
+	return d
+}
+
+// The official control is found by its label, clicked like a person would, and
+// the file the portal serves comes back byte for byte. The recorded evidence
+// names the host and file, no address.
+func TestFetchClicksTheOfficialControlAndReturnsTheFile(t *testing.T) {
+	haveChrome(t)
+	_, u := portal(t)
+	f, err := testDriver().Fetch(context.Background(), u("/ok"))
+	if err != nil || f.Code != "" || string(f.Body) != pdfBody {
+		t.Fatalf("fetch = code %q, %d bytes, %v", f.Code, len(f.Body), err)
+	}
+	var ev evidence
+	if err := json.Unmarshal([]byte(f.Evidence), &ev); err != nil {
+		t.Fatal(err)
+	}
+	if ev.Executor != "browser" || ev.Control != archive.KCIControlLabel || ev.DownloadHost != "127.0.0.1" || ev.SuggestedName != "KCI_FI001.pdf" || ev.Size != int64(len(pdfBody)) || len(ev.BlockedHosts) != 0 {
+		t.Fatalf("evidence = %+v", ev)
+	}
+}
+
+// Every case where the portal does not hand over a file ends in a fixed code.
+// None of them is worked around: nothing is typed, accepted, or retried.
+func TestFetchClassifiesWhatThePortalDoesNotOffer(t *testing.T) {
+	haveChrome(t)
+	_, u := portal(t)
+	for _, tc := range []struct{ path, want string }{
+		{"/nobutton", archive.ReasonFulltextNotPublic},
+		{"/notdetail", archive.ReasonUnexpectedPage},
+		{"/external", archive.ReasonExternalSite},
+		{"/tologin", archive.ReasonLoginRequired},
+		{"/tochallenge", archive.ReasonChallenge},
+		{"/toconsent", archive.ReasonConsentRequired},
+		{"/tonothing", archive.ReasonDownloadNotStarted},
+		{"/big", archive.ReasonTooLarge},
+	} {
+		t.Run(strings.TrimPrefix(tc.path, "/"), func(t *testing.T) {
+			f, err := testDriver().Fetch(context.Background(), u(tc.path))
+			if err != nil || f.Code != tc.want || len(f.Body) != 0 {
+				t.Fatalf("code = %q (%d bytes), err = %v, want %s", f.Code, len(f.Body), err, tc.want)
+			}
+		})
+	}
+}
+
+// A click that leads off the allowed hosts is blocked before any request goes
+// out, and the host is recorded for the operator.
+func TestFetchRecordsTheBlockedHostWithoutReachingIt(t *testing.T) {
+	haveChrome(t)
+	_, u := portal(t)
+	f, err := testDriver().Fetch(context.Background(), u("/external"))
+	if err != nil || f.Code != archive.ReasonExternalSite {
+		t.Fatalf("fetch = %+v, %v", f, err)
+	}
+	var ev evidence
+	if err := json.Unmarshal([]byte(f.Evidence), &ev); err != nil || len(ev.BlockedHosts) != 1 || ev.BlockedHosts[0] != "localhost" {
+		t.Fatalf("evidence = %+v, %v", ev, err)
+	}
+}

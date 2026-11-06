@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -14,7 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/teslamint/cogvault/internal/archive"
-	"github.com/teslamint/cogvault/internal/config"
+	"github.com/teslamint/cogvault/internal/archivegate"
 )
 
 // newArchiveJobCmd is the durable collection queue (SPEC §9.16 "Collection
@@ -40,7 +39,7 @@ func newArchiveJobCmd() *cobra.Command {
 	submit.Flags().String("report", "", "report capture ID that cited this URL")
 	submit.Flags().String("claim", "", "claim or locator the source is meant to support")
 	submit.Flags().String("seen-sha256", "", "sha256:<hex> of the bytes the research read; a match is recorded as seen_during_research")
-	submit.Flags().String("executor", archive.ExecutorHTTP, "http (this worker) or browser (a separate interactive executor)")
+	submit.Flags().String("executor", archive.ExecutorHTTP, "http (public URLs, run by `job run`) or browser (a KCI article detail page only, run by the separate cogvault-kci worker)")
 	submit.Flags().String("key", "", "idempotency key (default: derived from URL, edition, report, claim)")
 	submit.Flags().Int("max-attempts", 0, "tries before the job fails (default 5)")
 	submit.Flags().Bool("json", false, "output as JSON")
@@ -168,112 +167,9 @@ func runArchiveJobRetry(cmd *cobra.Command, args []string) error {
 	return outputJob(cmd, j)
 }
 
-// workerAllowed is the worker's activation gate, the same one `serve` uses
-// for the capture tools (ADR 0027 item 14): the config must name this root,
-// capture must be enabled, and the production activation check must pass.
-// Flipping archive.capture_enabled off in the config therefore pauses the
-// worker as well as the MCP tools. The error carries a code and key names
-// only. activation is injected so a test can use its own check; the command
-// passes productionActivation.
-func workerAllowed(configPath, root string, activation func(*config.Config) error) error {
-	cfg, err := config.Load(configPath)
-	if err != nil {
-		return fmt.Errorf("collector blocked: config could not be loaded: %w", err)
-	}
-	if cfg.Archive.Root == "" || filepath.Clean(cfg.Archive.Root) != filepath.Clean(root) {
-		return &activationError{code: "worker_root_not_the_configured_archive_root", keys: []string{"archive.root"}}
-	}
-	if !cfg.Archive.CaptureEnabled {
-		return &activationError{code: "capture_disabled", keys: []string{"archive.capture_enabled"}}
-	}
-	return activation(cfg)
-}
-
-// workerOptions are the worker loop's settings.
-type workerOptions struct {
-	owner    string
-	lease    time.Duration
-	poll     time.Duration
-	once     bool
-	acquirer archive.Acquirer
-}
-
-// runWorker is the worker loop, separated from the command so a package test
-// can drive it on a temporary root with an injected gate. The command always
-// passes the real activation gate; there is no flag or setting that skips it.
-//
-// allowed is checked before the archive is opened and before every claim, and
-// the loop claims nothing while it returns an error. With once, a closed gate
-// is an error returned before anything is opened. A long-running worker
-// instead pauses and logs once per change: with a restart policy an exit
-// would be a crash loop, and flipping archive.capture_enabled on is how an
-// operator resumes it. The archive is opened only after the gate first
-// passes, so a gated worker creates nothing under its root. ctx ends the
-// loop: a download in progress is abandoned without a record and its lease
-// expiry lets the next worker resume the job.
-func runWorker(ctx context.Context, open func() (*archive.Archive, error), allowed func() error, o workerOptions, out, errOut io.Writer) error {
-	var a *archive.Archive
-	defer func() {
-		if a != nil {
-			a.Close()
-		}
-	}()
-	lastBlocked := ""
-	for {
-		if err := allowed(); err != nil {
-			if o.once {
-				return err
-			}
-			if msg := err.Error(); msg != lastBlocked {
-				fmt.Fprintf(errOut, "paused: %s\n", msg)
-				lastBlocked = msg
-			}
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-time.After(o.poll):
-			}
-			continue
-		}
-		if lastBlocked != "" {
-			fmt.Fprintln(errOut, "resumed")
-			lastBlocked = ""
-		}
-		if a == nil {
-			var err error
-			if a, err = open(); err != nil {
-				return err
-			}
-		}
-		j, err := a.RunNextJob(ctx, o.acquirer, o.owner, o.lease)
-		switch {
-		case ctx.Err() != nil:
-			return nil
-		case errors.Is(err, archive.ErrLeaseLost):
-			// Another worker reclaimed the job; its try is the one that counts.
-			fmt.Fprintf(errOut, "job %s: %v\n", j.JobID, err)
-		case err != nil:
-			fmt.Fprintf(errOut, "worker error: %v\n", err)
-			if o.once {
-				return err
-			}
-		case j != nil:
-			fmt.Fprintf(out, "job %s: %s (attempt %d of %d)\n", j.JobID, j.State, j.AttemptsMade, j.MaxAttempts)
-			continue
-		case o.once:
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-time.After(o.poll):
-		}
-	}
-}
-
-// runArchiveJobRun starts the worker behind the unconditional activation
-// gate (workerAllowed with productionActivation). It needs an explicit
-// --config; it has no option to run without one.
+// runArchiveJobRun starts the HTTP worker behind the unconditional activation
+// gate (archivegate.WorkerAllowed with archivegate.ProductionActivation). It
+// needs an explicit --config; it has no option to run without one.
 func runArchiveJobRun(cmd *cobra.Command, _ []string) error {
 	f := cmd.Flags()
 	if c := cmd.Flag("config"); c == nil || !c.Changed {
@@ -288,22 +184,25 @@ func runArchiveJobRun(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	var o workerOptions
-	o.once, _ = f.GetBool("once")
-	o.owner, _ = f.GetString("owner")
-	o.lease, _ = f.GetDuration("lease")
-	o.poll, _ = f.GetDuration("poll")
-	if o.owner == "" {
+	var o archivegate.Options
+	o.Once, _ = f.GetBool("once")
+	owner, _ := f.GetString("owner")
+	lease, _ := f.GetDuration("lease")
+	o.Poll, _ = f.GetDuration("poll")
+	if owner == "" {
 		host, _ := os.Hostname()
-		o.owner = fmt.Sprintf("%s-%d", host, os.Getpid())
+		owner = fmt.Sprintf("%s-%d", host, os.Getpid())
 	}
-	if o.poll <= 0 {
+	if o.Poll <= 0 {
 		return fmt.Errorf("--poll must be positive")
 	}
 	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return runWorker(ctx,
+	return archivegate.RunLoop(ctx,
 		func() (*archive.Archive, error) { return openArchive(cmd) },
-		func() error { return workerAllowed(configPath, root, productionActivation) },
+		func() error { return archivegate.WorkerAllowed(configPath, root, archivegate.ProductionActivation) },
+		func(ctx context.Context, a *archive.Archive) (*archive.Job, error) {
+			return a.RunNextJob(ctx, archive.Acquirer{}, owner, lease)
+		},
 		o, cmd.OutOrStdout(), cmd.ErrOrStderr())
 }

@@ -1195,6 +1195,8 @@ cogvault archive --root <dir> job submit <public http(s) URL> --submitter <label
 cogvault archive --root <dir> job status <job-id> [--json]
 cogvault archive --root <dir> job retry <job-id> [--json]
 cogvault archive --root <dir> --config <path> job run [--once] [--owner <name>] [--lease <d>] [--poll <d>]
+cogvault-kci --root <dir> --config <path> [--once] [--owner <n>] [--lease <d>] [--poll <d>] [--chrome <path>] [--no-sandbox]
+    # browser worker for executor=browser jobs (KCI article pages); same gate as `job run`
 # ingest host (reads --config; never opens the registry)
 cogvault archive --root <share> --config <path> pickup --dest <source dir> [--json]
 cogvault archive --root <share> --config <path> receipts --dest <source dir>
@@ -1429,23 +1431,51 @@ verified judgment, backup scheduling, or backup expiry.
     research read.
   - **Executors.** `--executor http` jobs are run by `job run`, which uses
     the same `Acquirer` as `acquire`, so it has the same address, redirect,
-    size, and time defenses. `--executor browser` jobs (for example an
-    official download page that needs interaction) are never claimed by
-    `job run`. A separate executor claims them with `ClaimJob("browser",
-    owner, lease)` and ends each claim with `CompleteJob(id, owner, attempt,
-    outcome)`, passing the attempt number the claim returned, which stores
-    bytes through `CaptureSource` before reporting `held` or `acquired`.
-    That executor is **not implemented**: no browser flow exists or is
-    tested here, so such a job stays `queued` until one runs. It must use
-    only the site's official UI and report `human_action_required` for a
-    login, payment, or challenge instead of working around it.
-    For KCI, free full text exists only where the society consented, through
-    the article detail page's "KCI 원문 내려받기" button; nonpublic items
-    offer only a preview or a lookup at other sites (KCI FAQ, as cited in ADR
-    0027). A KCI job must never be assumed open: an absent button or a button
-    that leads away ends as `human_action_required`. The full executor
-    contract and the blocked end-to-end case are in ADR 0027, "KCI
-    official-browser executor".
+    size, and time defenses. `--executor browser` jobs are run only by the
+    separate `cogvault-kci` worker (`cogvault-kci --root <dir> --config <path>
+    [--once] [--owner <n>] [--lease <d>] [--poll <d>] [--chrome <path>]
+    [--no-sandbox]`); `job run` never claims them and `cogvault-kci` never
+    claims HTTP jobs. It is a separate binary so the browser dependency stays
+    out of `cogvault`, the MCP server image, and it has the same gate as `job
+    run`: an explicit `--config`, a matching `archive.root`,
+    `archive.capture_enabled: true`, the item 14 check, a pause (not an exit)
+    while closed, and no flag that skips it. It needs Chrome or Chromium.
+    - **What a browser job is.** One KCI article detail page: `https`, host
+      `www.kci.go.kr`, the fixed detail path, and exactly one query parameter,
+      `sereArticleSearchBean.artiId=ART<digits>`. That is the one place a
+      query is admitted, because the parameter is a public article ID on a
+      fixed host and path; the HTTP executor still refuses every query. The
+      URL is checked at submit and again when the job runs.
+    - **What the worker does.** In a fresh headless profile it opens the page,
+      finds the portal's own control by its visible label `KCI 원문 내려받기`,
+      clicks it, and takes the file the portal serves. It never logs in,
+      never accepts a dialog, never solves a challenge, never crawls, and
+      builds no download URL of its own. The browser can reach only
+      `www.kci.go.kr`, at the address this process checked is public
+      (`--host-resolver-rules`, every other name unresolvable), and every
+      request to another host is blocked.
+    - **Outcomes.** A PDF (header `%PDF-`, at most 32 MiB) is stored as a held
+      capture of unknown completeness (`held`, same provenance rule). Otherwise
+      the job ends with a fixed code and no bytes: `human_action_required` for
+      `fulltext_not_public` (no official control), `login_required`,
+      `consent_required`, `challenge`, `external_site`, `download_not_started`,
+      and `unexpected_page`; `failed` for `too_large`, `blocked_address`, and
+      `not_a_pdf`; a browser or network fault is retried within the attempt
+      budget. Codes and reasons carry no host or address.
+    - **Policy.** Free full text exists only where the society consented,
+      through that button; nonpublic items offer only a preview or a lookup at
+      other sites (KCI FAQ, as cited in ADR 0027). A KCI job must never be
+      assumed open.
+    - **Evidence and gaps.** Verified against real headless Chrome on a local
+      copy of the portal markup and live on the fixture article (the
+      downloaded PDF was byte-identical to an earlier official browser copy).
+      Not verified: a real non-public article, real login or challenge pages,
+      a container image with a browser, and a terms review. See ADR 0027, "KCI
+      official-browser executor".
+    - **Contract for another executor.** `ClaimJob(executor, owner, lease)`
+      and `CompleteJob(id, owner, attempt, outcome)` under the attempt-number
+      fence are all a worker needs; `RunNextBrowserJob` is the browser
+      worker's runner and takes a `BrowserDriver`.
   - **Transports.** Two, over one queue. The `job` CLI runs on the archive
     host. The MCP tools `archive_job_submit`, `archive_job_status`, and
     `archive_job_retry` let a chat client on another machine queue a URL and

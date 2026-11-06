@@ -24,7 +24,7 @@ func archiveJobSubmitTool() mcp.Tool {
 		mcp.WithString("report_capture_id", mcp.Description("Capture ID of the imported research report that cited this URL")),
 		mcp.WithString("claim", mcp.Description("Claim or locator the source is meant to support")),
 		mcp.WithString("seen_sha256", mcp.Description("sha256:<64 hex> of the bytes the research read, if you have them; a match is recorded as seen_during_research, otherwise the bytes are recovered_after_research")),
-		mcp.WithString("executor", mcp.Description("http (default) or browser (an interactive executor that is not part of this server)")),
+		mcp.WithString("executor", mcp.Description("http (default; public URLs without a query) or browser (only a KCI article detail page, https://www.kci.go.kr/kciportal/ci/sereArticleSearch/ciSereArtiView.kci?sereArticleSearchBean.artiId=ART...; a separate browser worker clicks the portal's official full-text download button and never logs in)")),
 		mcp.WithString("key", mcp.Description("Optional idempotency key")),
 		mcp.WithReadOnlyHintAnnotation(false),
 		mcp.WithDestructiveHintAnnotation(false),

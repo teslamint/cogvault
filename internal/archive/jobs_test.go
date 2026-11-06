@@ -449,7 +449,7 @@ func TestBrowserJobsAreNotClaimedByHTTPWorker(t *testing.T) {
 	_, q := newFakeNet(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("the HTTP worker fetched a browser job")
 	}))
-	j := submit(t, a, JobRequest{URL: "http://public.test/kci", Executor: ExecutorBrowser})
+	j := submit(t, a, JobRequest{URL: "https://www.kci.go.kr/kciportal/ci/sereArticleSearch/ciSereArtiView.kci?sereArticleSearchBean.artiId=ART002605798", Executor: ExecutorBrowser})
 	if got, err := a.RunNextJob(ctx, q, "w", DefaultJobLease); err != nil || got != nil {
 		t.Fatalf("HTTP worker = %+v, %v", got, err)
 	}

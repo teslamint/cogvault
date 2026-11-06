@@ -23,6 +23,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/teslamint/cogvault/internal/archive"
+	"github.com/teslamint/cogvault/internal/archivegate"
 	"github.com/teslamint/cogvault/internal/config"
 	cogmcp "github.com/teslamint/cogvault/internal/mcp"
 )
@@ -136,7 +137,7 @@ func TestArchiveReloadRejectionsKeepStateAndLogNoValues(t *testing.T) {
 			f.archiveRoot = filepath.Join(f.base, secret)
 			f.writeConfig(t, true, "")
 		}},
-		{name: "production activation", wantCode: "deployment_settings_missing", wantKey: "archive.deployment.backup_target", enabled: true, activation: productionActivation},
+		{name: "production activation", wantCode: "deployment_settings_missing", wantKey: "archive.deployment.backup_target", enabled: true, activation: archivegate.ProductionActivation},
 		// archive.deployment is restart-only: adding the attestations and enabling
 		// capture in one reload is rejected, so an operator restarts serve with
 		// capture off first and reloads only capture_enabled afterwards.
@@ -208,7 +209,7 @@ func TestProductionActivationChecksAttestationsOnly(t *testing.T) {
 	cfg := &config.Config{Archive: config.ArchiveConfig{Root: root, Deployment: dep}}
 	check := func(want string) {
 		t.Helper()
-		err := productionActivation(cfg)
+		err := archivegate.ProductionActivation(cfg)
 		if want == "" {
 			if err != nil {
 				t.Fatalf("activation refused: %v", err)

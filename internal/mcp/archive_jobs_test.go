@@ -164,3 +164,26 @@ func TestArchiveJobToolInternalErrorsAreGeneric(t *testing.T) {
 		}
 	}
 }
+
+// A remote client can queue a KCI article detail page for the browser worker,
+// and nothing else: the browser executor never takes another site, and the HTTP
+// executor still refuses the KCI query URL.
+func TestArchiveJobSubmitBrowserExecutorTakesOnlyKCIDetailPages(t *testing.T) {
+	f := setupArchiveTools(t, true)
+	const kci = "https://www.kci.go.kr/kciportal/ci/sereArticleSearch/ciSereArtiView.kci?sereArticleSearchBean.artiId=ART002605798"
+	var out jobOut
+	toolJSON(t, callTool(t, f.srv, "archive_job_submit", map[string]any{"url": kci, "submitter": "c", "executor": "browser"}), &out)
+	if out.Job.State != "queued" || !strings.HasPrefix(out.Job.JobID, "job_") {
+		t.Fatalf("browser job = %+v", out)
+	}
+	for name, args := range map[string]map[string]any{
+		"browser, another site":  {"url": "https://www.bok.or.kr/portal/cmmn/file/fileDown.do?atchFileId=4826d55c88464526b2c36e125afd84fd&fileSn=2", "submitter": "c", "executor": "browser"},
+		"browser, extra param":   {"url": kci + "&token=x", "submitter": "c", "executor": "browser"},
+		"http, KCI query":        {"url": kci, "submitter": "c"},
+		"http, BOK signed query": {"url": "https://www.bok.or.kr/portal/cmmn/file/fileDown.do?atchFileId=4826d55c88464526b2c36e125afd84fd&fileSn=2", "submitter": "c"},
+	} {
+		if r := callTool(t, f.srv, "archive_job_submit", args); !r.IsError {
+			t.Errorf("%s: archive_job_submit accepted %v", name, args)
+		}
+	}
+}

@@ -203,26 +203,38 @@ func jobBackoff(attempts int) time.Duration {
 }
 
 // SubmitJob queues one URL. A repeated request returns the existing job
-// (existing is true) and changes nothing. The URL gets the same checks as an
-// acquisition (http(s), no credentials, query, or fragment), so a refused
-// URL never enters the queue.
+// (existing is true) and changes nothing. The URL gets the checks of the
+// chosen executor, so a refused URL never enters the queue: the HTTP
+// executor takes the same checks as an acquisition (http(s), no credentials,
+// query, or fragment); the browser executor takes only a KCI article detail
+// page (CheckBrowserURL), the one place a query is admitted, because that
+// query is the article ID and the host is fixed.
 func (a *Archive) SubmitJob(ctx context.Context, req JobRequest) (job Job, existing bool, err error) {
-	u, perr := url.Parse(req.URL)
-	if perr != nil {
-		return Job{}, false, fmt.Errorf("%w: unparsable URL", ErrInvalid)
-	}
-	if err := checkAcquireURL(u); err != nil {
-		return Job{}, false, err
-	}
-	if req.Submitter == "" {
-		return Job{}, false, fmt.Errorf("%w: submitter is required", ErrInvalid)
-	}
 	exec := req.Executor
 	if exec == "" {
 		exec = ExecutorHTTP
 	}
 	if exec != ExecutorHTTP && exec != ExecutorBrowser {
 		return Job{}, false, fmt.Errorf("%w: executor %q (want http or browser)", ErrInvalid, exec)
+	}
+	var u *url.URL
+	if exec == ExecutorBrowser {
+		normalized, _, perr := CheckBrowserURL(req.URL)
+		if perr != nil {
+			return Job{}, false, perr
+		}
+		u, _ = url.Parse(normalized)
+	} else {
+		var perr error
+		if u, perr = url.Parse(req.URL); perr != nil {
+			return Job{}, false, fmt.Errorf("%w: unparsable URL", ErrInvalid)
+		}
+		if err := checkAcquireURL(u); err != nil {
+			return Job{}, false, err
+		}
+	}
+	if req.Submitter == "" {
+		return Job{}, false, fmt.Errorf("%w: submitter is required", ErrInvalid)
 	}
 	if req.SeenSHA256 != "" && !seenDigest.MatchString(req.SeenSHA256) {
 		return Job{}, false, fmt.Errorf("%w: seen_sha256 must be sha256:<64 hex>", ErrInvalid)

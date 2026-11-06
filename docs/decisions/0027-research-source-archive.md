@@ -381,9 +381,9 @@ items 2–4, 6–12, and the mechanisms of 13 and 14 (`SPEC.md` §9.16,
   `Acquire`, so it is public-address-only and never uses credentials; it
   stores bytes held (completeness `unknown`). The MCP tools are archive
   tools: off while capture is disabled, behind the server-wide auth, with no
-  per-tool scope. An interactive official-UI executor (for example for KCI)
-  is not implemented; its claim/complete contract exists and no test
-  exercises a real browser flow. The worker (`archive job run`) is gated: it
+  per-tool scope. A KCI official-browser executor is implemented as a separate
+  binary (`cogvault-kci`, see "KCI official-browser executor"). The HTTP
+  worker (`archive job run`) is gated: it
   needs an explicit `--config`, claims nothing unless `archive.root` matches,
   `archive.capture_enabled` is true, and the item 14 check passes, and has no
   option that skips this. Nothing deploys it; a post-gate review template is
@@ -492,10 +492,26 @@ production. None is decided here; the worker deployment template
    re-fetch), and how long job rows and attempt records are kept (they never
    expire today).
 
+**Worked example: the BOK PDF.** The reference manifest's BOK source
+(`https://www.bok.or.kr/portal/cmmn/file/fileDown.do?atchFileId=…&fileSn=2`)
+is a public PDF. Checked live with a plain HTTP client on 2026-11-06: a 302 to a
+CDN URL whose query carries a signed `token=…~hmac=…`, then 200
+`application/pdf`, 2,744,626 bytes, SHA-256 `a7e925e7…aaca1f`, equal to the
+manifest copy. The HTTP executor refuses it twice: the first URL has a query,
+and the redirect target carries a signed token. Admitting it needs decisions 3
+and 4 together: an allowlist entry for the portal and its file CDN host, the
+parameters allowed on the first hop (`atchFileId`, `fileSn`), and a rule that
+a site-issued signed query on a redirect to an allowlisted host is acceptable.
+None of that is decided, and the SSRF rules were not relaxed to make this
+case pass.
+
 ## KCI official-browser executor
 
-**Not implemented.** This records the contract and the blocked end-to-end case
-so the work can be picked up without redesign.
+**Implemented as a separate binary; not deployed.** The contract, the URL
+policy, and the runner are in `internal/archive/browser.go`; the browser driver
+is `internal/kcibrowser` (chromedp); the worker is `cmd/cogvault-kci`. The
+browser dependency is linked only into that binary, never into `cogvault`
+(the MCP server image). Evidence and the remaining gaps are below.
 
 **Policy evidence.** The KCI FAQ (operator-supplied URL:
 `https://www.kci.go.kr/kciportal/ss-mng/bbs/bbsFAQView.kci?boardBean.boarSequ=000000000602&boardBean.bullScriSequ=000000029372`;
@@ -511,10 +527,17 @@ The HTTP worker cannot serve this case in any event: KCI detail URLs carry
 query parameters, which `archive acquire` and the HTTP worker refuse
 (decision 4 above).
 
-**What exists.** Jobs with `--executor browser` queue and are never claimed by
-`job run` (`TestBrowserJobsAreNotClaimedByHTTPWorker`). `ClaimJob("browser",
-owner, lease)` and `CompleteJob(id, owner, attempt, outcome)`, with the
-attempt-number fence, are the whole contract an executor needs.
+**What exists.** A browser job names one KCI article detail page, and only
+that: `https://www.kci.go.kr/kciportal/ci/sereArticleSearch/ciSereArtiView.kci`
+with exactly one query parameter, `sereArticleSearchBean.artiId=ART<digits>`.
+That is the one place a query is admitted (`archive.CheckBrowserURL`); the
+generic acquirer still refuses every query. `RunNextBrowserJob` claims with
+`ClaimJob("browser", …)`, runs the driver, stores a downloaded PDF through
+`CaptureSource` (held, completeness `unknown`), and ends the job with
+`CompleteJob(id, owner, attempt, outcome)` under the attempt-number fence.
+The driver found the control by its label, `KCI 원문 내려받기`, which is a
+`javascript:` link whose handler points a hidden iframe at the portal's own
+download endpoint, so a real click is used and no download URL is built.
 
 **Executor contract.** A browser executor MUST:
 
@@ -523,13 +546,14 @@ attempt-number fence, are the whole contract an executor needs.
 - open only the article detail page, and act only on the one official
   download control (the "KCI 원문 내려받기" button). It must not crawl other
   pages or submit other forms;
-- guard every navigation and the download with the same public-address check
-  as `Acquire`, and bound size (32 MiB), time, and redirects;
+- pin the browser to the checked public address of an allowlisted host
+  (`--host-resolver-rules`; every other name is unresolvable), pause and block
+  every request to any other host, and bound size (32 MiB) and time;
 - report `human_action_required`, with a reason code and no bytes, when the
   control is absent (nonpublic: preview or other-site lookup only), or the
   click leads to a login, payment, consent, challenge, or another site. Codes:
   `fulltext_not_public`, `login_required`, `consent_required`, `challenge`,
-  `external_site`;
+  `external_site`, `download_not_started`, `unexpected_page`;
 - on a download, check it is a PDF (`%PDF-` header), store it with
   `CaptureSource` (supplier `cogvault collector browser job <id>`, completeness
   `unknown`), then `CompleteJob` as `held` with that capture; provenance
@@ -538,33 +562,50 @@ attempt-number fence, are the whole contract an executor needs.
   socket, and host details, as the HTTP worker does; use `retry` only for
   browser or network faults, within the attempt budget.
 
-**Why it is not implemented now.**
+**Evidence (review host, 2026-11-06; headless Chrome 157, macOS).**
 
-1. It needs a browser runtime and an automation library in the image. That is
-   a new dependency and a much larger attack surface on the NAS, and this
-   repository adds dependencies only on request.
-2. There is no reproducible public example. Whether an article is
-   downloadable depends on the society's consent and was not verified. A test
-   against a live KCI article would be flaky, and could download content
-   without a rights check.
-3. The review host has no outbound access for Go binaries, so a live run could
-   not be checked at all.
-4. No terms review for automating the portal has been done.
+- **Local portal copy** (markup copied from the saved official page, served
+  from a loopback test server): a real browser fetches the file byte for byte;
+  eight non-download cases classify as the contract says; a click that leads
+  off the allowed hosts is blocked without the other host being reached; and a
+  mutation that lets every request through is caught by the tests.
+- **Live portal** (`COGVAULT_LIVE_KCI=1 go test ./internal/kcibrowser -run
+  TestLiveKCI`): the fixture article `ART002605798` was opened, the official
+  control was clicked, and the portal served `KCI_FI002605798.pdf`, 606,425
+  bytes, SHA-256 `75989f52…c405143c4`, **identical** to the operator's earlier
+  browser original. The job ended `held`, the capture has completeness
+  `unknown`, and provenance is `seen_during_research` because the operator
+  supplied that digest. A nonexistent article (`ART000000001`) ended
+  `human_action_required` (`unexpected_page`) and stored nothing.
+- The reference bundle on the NAS was read only for its manifest, the saved
+  detail page (the control markup), and the PDF's hash. Nothing was written
+  there.
 
-**Blocked end-to-end case.** To unblock: an approved browser dependency and
-image, a terms review, network access, and three human-verified KCI detail
-pages with the verification date recorded. Expected results:
+**Not verified, and why.**
 
-- consented article with the visible button: job `held`; the capture is
-  `application/pdf`, starts with `%PDF-`, is at most 32 MiB, has completeness
-  `unknown`, and is `recovered_after_research` unless `seen_sha256` matches;
-- article whose society has not consented (preview only): job
-  `human_action_required`, reason `fulltext_not_public`, no capture and no
-  object stored;
-- article whose button leads to another site: `human_action_required`, reason
-  `external_site`, no capture;
-- a navigation to a private address: refused by the navigation guard, job
-  `failed`.
+1. **A real non-public article** (control absent). No such article was
+   identified, so `fulltext_not_public` is observed only on the local copy.
+2. **Real login, consent, or challenge pages.** The heuristics (a login path
+   or password field, dialog wording, challenge keywords) are checked on local
+   pages only; the portal's real wording may differ, and an unrecognized page
+   ends as `download_not_started`, which also needs a person.
+3. **An image with a browser.** `cogvault-kci` needs Chrome or Chromium and
+   fonts on its host. The repository's Dockerfile has neither and was not
+   changed. A non-root container without user namespaces needs
+   `--no-sandbox`, which weakens the browser. Nothing ran on the NAS.
+4. **A terms review** for automating the portal. The executor does one
+   official download per job and never crawls, but whether the portal's terms
+   allow automation is a human decision (decision 6 above).
+5. **Rate limits.** There are none beyond the per-job attempt budget
+   (decision 5 above).
+
+**End-to-end case that remains to be run.** Three human-verified KCI detail
+pages, with the verification date recorded: one with the control (expect
+`held`, a PDF, completeness `unknown`), one the society has not made public
+(expect `human_action_required`, `fulltext_not_public`, no object stored), and
+one whose button leads elsewhere (expect `external_site`, no capture). The
+first is done live above; the other two need articles that a person has
+confirmed.
 
 
 ## Why

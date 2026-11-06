@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/teslamint/cogvault/internal/archive"
+	"github.com/teslamint/cogvault/internal/archivegate"
 	"github.com/teslamint/cogvault/internal/config"
 )
 
@@ -47,9 +48,12 @@ func TestArchiveJobSubmitRunStatusRetry(t *testing.T) {
 	// The worker loop runs on this temporary root with an injected gate; the
 	// command has no such option, so no CLI path reaches a root unchecked.
 	var wout, werr bytes.Buffer
-	err := runWorker(context.Background(), func() (*archive.Archive, error) { return archive.Open(root) },
+	err := archivegate.RunLoop(context.Background(), func() (*archive.Archive, error) { return archive.Open(root) },
 		func() error { return nil },
-		workerOptions{owner: "w-test", lease: archive.DefaultJobLease, poll: time.Millisecond, once: true}, &wout, &werr)
+		func(ctx context.Context, a *archive.Archive) (*archive.Job, error) {
+			return a.RunNextJob(ctx, archive.Acquirer{}, "w-test", archive.DefaultJobLease)
+		},
+		archivegate.Options{Poll: time.Millisecond, Once: true}, &wout, &werr)
 	if err != nil || !strings.Contains(wout.String(), job.JobID+": failed") {
 		t.Fatalf("worker: %v\nstdout: %s\nstderr: %s", err, wout.String(), werr.String())
 	}
@@ -132,14 +136,17 @@ func TestWorkerLoopPausesWithoutOpeningArchiveThenResumes(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- runWorker(ctx, func() (*archive.Archive, error) { opened.Add(1); return archive.Open(root) },
+		done <- archivegate.RunLoop(ctx, func() (*archive.Archive, error) { opened.Add(1); return archive.Open(root) },
 			func() error {
 				if open.Load() {
 					return nil
 				}
-				return &activationError{code: "capture_disabled", keys: []string{"archive.capture_enabled"}}
+				return &archivegate.Error{Code: "capture_disabled", Keys: []string{"archive.capture_enabled"}}
 			},
-			workerOptions{owner: "w", lease: archive.DefaultJobLease, poll: 5 * time.Millisecond}, &out, &errOut)
+			func(ctx context.Context, a *archive.Archive) (*archive.Job, error) {
+				return a.RunNextJob(ctx, archive.Acquirer{}, "w", archive.DefaultJobLease)
+			},
+			archivegate.Options{Poll: 5 * time.Millisecond}, &out, &errOut)
 	}()
 	waitFor := func(what string, cond func() bool) {
 		t.Helper()
@@ -188,23 +195,23 @@ func TestWorkerAllowedFollowsCaptureSwitchAndActivation(t *testing.T) {
 	allow := func(*config.Config) error { return nil }
 
 	cfg := writeWorkerConfig(t, base, root, false)
-	if err := workerAllowed(cfg, root, allow); err == nil || !strings.Contains(err.Error(), "capture_disabled") {
+	if err := archivegate.WorkerAllowed(cfg, root, allow); err == nil || !strings.Contains(err.Error(), "capture_disabled") {
 		t.Fatalf("capture off: %v", err)
 	}
 	cfg = writeWorkerConfig(t, base, root, true)
-	if err := workerAllowed(cfg, root, allow); err != nil {
+	if err := archivegate.WorkerAllowed(cfg, root, allow); err != nil {
 		t.Fatalf("capture on with an allowing check: %v", err)
 	}
-	if err := workerAllowed(cfg, filepath.Join(base, "SECRET-other"), allow); err == nil || !strings.Contains(err.Error(), "archive.root") || strings.Contains(err.Error(), "SECRET") {
+	if err := archivegate.WorkerAllowed(cfg, filepath.Join(base, "SECRET-other"), allow); err == nil || !strings.Contains(err.Error(), "archive.root") || strings.Contains(err.Error(), "SECRET") {
 		t.Fatalf("another root: %v", err)
 	}
 	// The real production check: no deployment settings, so it stays blocked.
-	if err := workerAllowed(cfg, root, productionActivation); err == nil || !strings.Contains(err.Error(), "deployment_settings_missing") {
+	if err := archivegate.WorkerAllowed(cfg, root, archivegate.ProductionActivation); err == nil || !strings.Contains(err.Error(), "deployment_settings_missing") {
 		t.Fatalf("unproven deployment: %v", err)
 	}
 	// Turning the switch off again blocks the worker again.
 	cfg = writeWorkerConfig(t, base, root, false)
-	if err := workerAllowed(cfg, root, allow); err == nil {
+	if err := archivegate.WorkerAllowed(cfg, root, allow); err == nil {
 		t.Fatal("worker still allowed after capture_enabled was turned off")
 	}
 }
@@ -309,7 +316,7 @@ func TestWorkerGateReadsEvidenceFromConfiguredMountPaths(t *testing.T) {
 	}
 
 	target := filepath.Join(ev, "backups")
-	allowed := func(cfg string) error { return workerAllowed(cfg, root, productionActivation) }
+	allowed := func(cfg string) error { return archivegate.WorkerAllowed(cfg, root, archivegate.ProductionActivation) }
 	if err := allowed(writeDeploymentConfig(t, base, root, target, report, replica)); err != nil {
 		t.Fatalf("evidence at the configured paths was refused: %v", err)
 	}

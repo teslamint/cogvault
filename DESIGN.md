@@ -818,20 +818,45 @@ the worker's host name nor resolver or socket addresses reach a client.
 Submit does not fetch; the fetch happens in the worker, which is a separate
 process the MCP server does not start.
 
-The worker is `runWorker` (cmd/cogvault/archive_job.go), a loop over
-`RunNextJob` that takes its gate and its archive opener as arguments. The
-command passes `workerAllowed(configPath, root, productionActivation)`, which
-re-loads the config on every cycle and requires the matching `archive.root`,
-`archive.capture_enabled`, and the same `productionActivation` that `serve`
-uses, so one config switch pauses the MCP tools (on reload) and the worker (on
-its next poll). `runWorker` calls the gate before it opens the archive and
-before each claim, and opens the archive only after the gate first passes, so
-a gated worker creates nothing under its root. There is no flag, setting, or
-environment variable that replaces the gate; tests drive the loop on temporary
-roots by passing their own gate to `runWorker`, which the command cannot do.
-A closed gate pauses a long-running worker instead of exiting, because a
-restart policy would turn an exit into a crash loop; `--once` returns the
-refusal.
+The gate and the worker loop are `internal/archivegate`, shared by every
+process that captures: `ProductionActivation` (the item 14 check, moved out of
+`cmd/cogvault`), `WorkerAllowed`, and `RunLoop`. `RunLoop` takes its gate, its
+archive opener, and a `RunOne` step as arguments. `cmd/cogvault` passes
+`WorkerAllowed(configPath, root, ProductionActivation)` and a closure over
+`RunNextJob`; `cmd/cogvault-kci` passes the same gate and a closure over
+`RunNextBrowserJob`. `WorkerAllowed` re-loads the config on every cycle and
+requires the matching `archive.root`, `archive.capture_enabled`, and the same
+`ProductionActivation` that `serve` uses, so one config switch pauses the MCP
+tools (on reload) and both workers (on their next poll). `RunLoop` calls the
+gate before it opens the archive and before each claim, and opens the archive
+only after the gate first passes, so a gated worker creates nothing under its
+root. There is no flag, setting, or environment variable that replaces the
+gate; tests drive the loop on temporary roots by passing their own gate to
+`RunLoop`, which a command cannot do. A closed gate pauses a long-running
+worker instead of exiting, because a restart policy would turn an exit into a
+crash loop; `--once` returns the refusal.
+
+The browser executor splits along the dependency line. `internal/archive`
+(browser.go) has no browser code: it owns the URL policy `CheckBrowserURL`
+(the one place a query is admitted), the outcome codes, the `BrowserDriver`
+interface, and `RunNextBrowserJob`, which claims, calls the driver, maps its
+result to a stored held capture or a fixed reason, and completes under the
+attempt fence. `SubmitJob` applies `CheckBrowserURL` instead of the generic
+URL check when the executor is `browser`. `internal/kcibrowser` is the only
+package that imports chromedp, and only `cmd/cogvault-kci` imports it, so the
+`cogvault` binary (the MCP server image) does not link the browser library.
+The driver resolves each allowed host itself, refuses any non-public answer,
+and starts Chrome with `--host-resolver-rules` that pin each host to the
+checked address and map every other name to `NOTFOUND` (an IP literal gets an
+`EXCLUDE` rule, since the wildcard would refuse it). It enables the Fetch
+domain so every request pauses until a goroutine allows it (allowed host) or
+fails it and records the host; handlers never issue commands inline because
+the target's event loop would deadlock. Dialogs are always dismissed, never
+accepted. It clicks the control found by its label with a real mouse event,
+waits for the browser's download events (`allowAndName`, so the file is named
+by its GUID), cancels a download that passes the size bound, and classifies
+the no-file cases from what the page shows. A fresh profile and download
+directory are created per fetch and removed after.
 
 The capture map (capturemap.go) is written by `Pickup` and read by
 `internal/ingest` through `CapturesForSource`; `PageRecordsCapture` is the
@@ -873,7 +898,7 @@ exposes `OpenLedgerReader` (immutable read-only open under an existing
 `internal/mcp` adds `ArchiveTools` and `ArchiveGate`; every archive handler
 enters the gate first. `cmd/cogvault` owns `archiveRuntime`: it opens the
 archive when `archive.root` is set, injects the activation check
-(`productionActivation` in serve, a stub only in tests), and implements the
+(`archivegate.ProductionActivation` in serve, a stub only in tests), and implements the
 SIGHUP reload. `serveListener` runs reloads on one worker, cancels its
 context on shutdown, and waits for it before returning, so `runServe` closes
 the archive only after the last reload ends.
