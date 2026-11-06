@@ -818,6 +818,21 @@ the worker's host name nor resolver or socket addresses reach a client.
 Submit does not fetch; the fetch happens in the worker, which is a separate
 process the MCP server does not start.
 
+The worker is `runWorker` (cmd/cogvault/archive_job.go), a loop over
+`RunNextJob` that takes its gate and its archive opener as arguments. The
+command passes `workerAllowed(configPath, root, productionActivation)`, which
+re-loads the config on every cycle and requires the matching `archive.root`,
+`archive.capture_enabled`, and the same `productionActivation` that `serve`
+uses, so one config switch pauses the MCP tools (on reload) and the worker (on
+its next poll). `runWorker` calls the gate before it opens the archive and
+before each claim, and opens the archive only after the gate first passes, so
+a gated worker creates nothing under its root. There is no flag, setting, or
+environment variable that replaces the gate; tests drive the loop on temporary
+roots by passing their own gate to `runWorker`, which the command cannot do.
+A closed gate pauses a long-running worker instead of exiting, because a
+restart policy would turn an exit into a crash loop; `--once` returns the
+refusal.
+
 The capture map (capturemap.go) is written by `Pickup` and read by
 `internal/ingest` through `CapturesForSource`; `PageRecordsCapture` is the
 frontmatter check `archive_status` uses. `internal/ingest` imports

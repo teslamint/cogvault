@@ -27,6 +27,7 @@ Mac                                   NAS (Container Manager / Portainer)
 | `config.yaml` | container-side config (paths are container paths) |
 | `env.example` | copy to `.env`: image version, public URL, uid/gid |
 | `cloudflared.config.example.yaml` | copy to `cloudflared/config.yaml`; put the tunnel credentials JSON beside it (mode 600) |
+| `compose.collector.yaml`, `env.collector.example`, `config.archive.example.yaml` | review templates for the source-collection worker; **not deployed**, post-gate only. See `docs/deployment/collector.md` |
 
 `NAS_UID`/`NAS_GID` must be the NAS account that owns `wiki/`, so SMB writes
 from the Mac and `wiki_write` from the container share one owner.

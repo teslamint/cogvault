@@ -383,7 +383,11 @@ items 2–4, 6–12, and the mechanisms of 13 and 14 (`SPEC.md` §9.16,
   tools: off while capture is disabled, behind the server-wide auth, with no
   per-tool scope. An interactive official-UI executor (for example for KCI)
   is not implemented; its claim/complete contract exists and no test
-  exercises a real browser flow. Nothing deploys a worker.
+  exercises a real browser flow. The worker (`archive job run`) is gated: it
+  needs an explicit `--config`, claims nothing unless `archive.root` matches,
+  `archive.capture_enabled` is true, and the item 14 check passes, and has no
+  option that skips this. Nothing deploys it; a post-gate review template is
+  `deploy/nas/compose.collector.yaml` (`docs/deployment/collector.md`).
 
 Not implemented: item 1's NAS volume, changes to `cogvault fetch` itself
 (item 5 candidate), release of `unknown`/`partial` bytes without a verified
@@ -440,7 +444,128 @@ refused, 32 MiB / 60 s acquisition bounds) remain open below.
    decides whether those tools may be enabled; they stay behind the capture
    gate and the *Activation* check until it is answered. A worker process on
    the NAS (its image, service definition, and credentials-free network
-   path) is a further deployment setting; `deploy/nas/compose.yaml` has none.
+   path) is a further deployment setting; only a review template exists
+   (`deploy/nas/compose.collector.yaml`), and nothing is deployed.
+
+## Missing decisions for MCP fetch scope
+
+Open question 9 is too broad to answer in one line. The prototype's
+`archive_job_submit` and `archive_job_retry` make the archive host's worker
+connect to a URL a client chose. These are the exact decisions that are
+missing, what the code does today, and why each blocks enabling the tools in
+production. None is decided here; the worker deployment template
+(`docs/deployment/collector.md`) lists them as preconditions.
+
+1. **Outbound requests at all.** May the NAS archive host make outbound
+   HTTP requests? Today the worker does so for every queued job. If no, the
+   job tools and the worker are removed and `archive acquire` stays the only
+   path.
+2. **Who may trigger a fetch.** Today any client that passes the server-wide
+   `auth.mode` and `required_scopes` may submit and retry, the same scope as
+   capture. Options: keep that; add a dedicated scope for the job tools (needs
+   per-tool scope in `internal/httpauth`, which does not exist: question 3);
+   or make submission operator-only (CLI) and keep MCP read-only.
+3. **Destination policy.** Today any public address is allowed (the address
+   check is the only filter). Options: any public host; an allowlist of
+   hosts or suffixes with an owner who maintains it; a denylist. Also: may a
+   redirect leave the allowlist.
+4. **URL shape.** Today every query and fragment is refused, because a query
+   can carry a signed URL or token. Many scholarly landing pages identify the
+   item by a query parameter, so this refuses them. Decide whether queries
+   are allowed, only on allowlisted hosts, and which parameters.
+5. **Volume and rate.** Today there is no cap on queued jobs, jobs per
+   submitter or per day, per-host spacing, or archive disk use; the worker is
+   one process and runs jobs one at a time, and `max_attempts` is the only
+   bound. A client can queue without limit. Decide the numbers, or an
+   operator-side quota.
+6. **robots.txt, terms, and identification.** Neither robots.txt nor terms
+   are read. The `User-Agent` text says the download is operator-requested,
+   which is no longer accurate for an MCP-submitted job. Decide the string,
+   a contact, and whether a per-host terms review is required before a host is
+   allowed.
+7. **Attribution.** `submitter` is a label the client writes. Decide whether
+   to bind it to the authenticated token subject for audit (needs the auth
+   layer to pass the verified claim to tool handlers; it does not today).
+8. **Limits, content, retry, retention.** Decide the size and time limits
+   (32 MiB, 60 s today), a media-type allowlist (PDF and HTML only?), whether
+   MCP may retry (a retry resets the attempt budget, so repeated retries
+   re-fetch), and how long job rows and attempt records are kept (they never
+   expire today).
+
+## KCI official-browser executor
+
+**Not implemented.** This records the contract and the blocked end-to-end case
+so the work can be picked up without redesign.
+
+**Policy evidence.** The KCI FAQ (operator-supplied URL:
+`https://www.kci.go.kr/kciportal/ss-mng/bbs/bbsFAQView.kci?boardBean.boarSequ=000000000602&boardBean.bullScriSequ=000000029372`;
+the page could not be fetched from the review host, so this is the
+operator's reading of it, not an independent check) says that free full text
+is available only where the society consented, through the article detail
+page's "KCI 원문 내려받기" button, and that nonpublic items offer only a
+preview or a lookup at other sites. Therefore: **do not infer that a KCI PDF
+is open.** Availability is per article and can change. A KCI job whose
+article has no such button, or whose button leads away from KCI, ends as
+`human_action_required`, never as a failure to retry and never worked around.
+The HTTP worker cannot serve this case in any event: KCI detail URLs carry
+query parameters, which `archive acquire` and the HTTP worker refuse
+(decision 4 above).
+
+**What exists.** Jobs with `--executor browser` queue and are never claimed by
+`job run` (`TestBrowserJobsAreNotClaimedByHTTPWorker`). `ClaimJob("browser",
+owner, lease)` and `CompleteJob(id, owner, attempt, outcome)`, with the
+attempt-number fence, are the whole contract an executor needs.
+
+**Executor contract.** A browser executor MUST:
+
+- run with a fresh profile per job, no stored cookies or credentials, no
+  login, no CAPTCHA solving, and no reuse of a person's session;
+- open only the article detail page, and act only on the one official
+  download control (the "KCI 원문 내려받기" button). It must not crawl other
+  pages or submit other forms;
+- guard every navigation and the download with the same public-address check
+  as `Acquire`, and bound size (32 MiB), time, and redirects;
+- report `human_action_required`, with a reason code and no bytes, when the
+  control is absent (nonpublic: preview or other-site lookup only), or the
+  click leads to a login, payment, consent, challenge, or another site. Codes:
+  `fulltext_not_public`, `login_required`, `consent_required`, `challenge`,
+  `external_site`;
+- on a download, check it is a PDF (`%PDF-` header), store it with
+  `CaptureSource` (supplier `cogvault collector browser job <id>`, completeness
+  `unknown`), then `CompleteJob` as `held` with that capture; provenance
+  follows the same `seen_sha256` rule as the HTTP worker;
+- keep attempt reasons and the stored response record free of resolver,
+  socket, and host details, as the HTTP worker does; use `retry` only for
+  browser or network faults, within the attempt budget.
+
+**Why it is not implemented now.**
+
+1. It needs a browser runtime and an automation library in the image. That is
+   a new dependency and a much larger attack surface on the NAS, and this
+   repository adds dependencies only on request.
+2. There is no reproducible public example. Whether an article is
+   downloadable depends on the society's consent and was not verified. A test
+   against a live KCI article would be flaky, and could download content
+   without a rights check.
+3. The review host has no outbound access for Go binaries, so a live run could
+   not be checked at all.
+4. No terms review for automating the portal has been done.
+
+**Blocked end-to-end case.** To unblock: an approved browser dependency and
+image, a terms review, network access, and three human-verified KCI detail
+pages with the verification date recorded. Expected results:
+
+- consented article with the visible button: job `held`; the capture is
+  `application/pdf`, starts with `%PDF-`, is at most 32 MiB, has completeness
+  `unknown`, and is `recovered_after_research` unless `seen_sha256` matches;
+- article whose society has not consented (preview only): job
+  `human_action_required`, reason `fulltext_not_public`, no capture and no
+  object stored;
+- article whose button leads to another site: `human_action_required`, reason
+  `external_site`, no capture;
+- a navigation to a private address: refused by the navigation guard, job
+  `failed`.
+
 
 ## Why
 

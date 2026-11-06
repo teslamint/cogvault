@@ -1194,7 +1194,7 @@ cogvault archive --root <dir> job submit <public http(s) URL> --submitter <label
     [--max-attempts <n>] [--json]
 cogvault archive --root <dir> job status <job-id> [--json]
 cogvault archive --root <dir> job retry <job-id> [--json]
-cogvault archive --root <dir> job run [--once] [--owner <name>] [--lease <d>] [--poll <d>]
+cogvault archive --root <dir> --config <path> job run [--once] [--owner <name>] [--lease <d>] [--poll <d>]
 # ingest host (reads --config; never opens the registry)
 cogvault archive --root <share> --config <path> pickup --dest <source dir> [--json]
 cogvault archive --root <share> --config <path> receipts --dest <source dir>
@@ -1439,6 +1439,13 @@ verified judgment, backup scheduling, or backup expiry.
     tested here, so such a job stays `queued` until one runs. It must use
     only the site's official UI and report `human_action_required` for a
     login, payment, or challenge instead of working around it.
+    For KCI, free full text exists only where the society consented, through
+    the article detail page's "KCI 원문 내려받기" button; nonpublic items
+    offer only a preview or a lookup at other sites (KCI FAQ, as cited in ADR
+    0027). A KCI job must never be assumed open: an absent button or a button
+    that leads away ends as `human_action_required`. The full executor
+    contract and the blocked end-to-end case are in ADR 0027, "KCI
+    official-browser executor".
   - **Transports.** Two, over one queue. The `job` CLI runs on the archive
     host. The MCP tools `archive_job_submit`, `archive_job_status`, and
     `archive_job_retry` let a chat client on another machine queue a URL and
@@ -1464,10 +1471,23 @@ verified judgment, backup scheduling, or backup expiry.
     public address`), never a resolver or socket address, because a remote
     client must not learn the archive host's network. The CLI shows the
     worker name and `--json` the acquisition record.
+  - **The worker is gated, with no bypass.** `job run` needs an explicit
+    `--config` and has no flag that skips the check. Before it opens the
+    archive and before every claim it requires `archive.root` to equal
+    `--root`, `archive.capture_enabled: true`, and the same item 14 activation
+    check `serve` uses. While any fails it stays up, logs `paused: <code>:
+    <keys>` once per change (never a value), claims nothing, and creates
+    nothing under the root; it logs `resumed` within `--poll` when the config
+    passes, with no restart. `--once` instead returns the refusal as an
+    error. A download in progress when capture is turned off finishes. The
+    `job submit`, `status`, and `retry` commands are not gated: they only
+    write the queue.
   - Jobs are in the registry, so `backup` and `restore-test` carry them.
-    The queue is not live: nothing here deploys a worker, and the
-    *Activation* gate is unchanged. Without a running `job run` worker a
-    submitted job stays `queued`.
+    The queue is not live: nothing here deploys a worker (a post-gate review
+    template is in `deploy/nas/compose.collector.yaml`, with
+    `docs/deployment/collector.md`), and the *Activation* gate is
+    unchanged. Without a running `job run` worker a submitted job stays
+    `queued`.
 - **Extract** (`extract`): `html-text/1`, standard library only, runs no
   scripts and loads nothing. Input must be valid UTF-8, sniff as text,
   carry no content coding, and be HTML by media type, sniff, or extension.

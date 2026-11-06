@@ -1,0 +1,25 @@
+# Archive section to MERGE into the NAS config.yaml when (and only when) the
+# archive volume is mounted into the serve stack. Not applied anywhere; the
+# live deploy/nas/config.yaml has no archive block, so capture is off today.
+# Paths are container paths (see compose.yaml / compose.collector.yaml).
+#
+# Stage 1 (volume mounted, capture OFF): serve opens the archive and keeps
+# the archive_* MCP tools hidden; the collector stays paused ("paused:
+# capture_disabled"). Leave `deployment` empty.
+archive:
+  root: /data/archive
+  capture_enabled: false
+
+# Stage 2 (capture ON) is allowed only after ADR 0027 item 14 is proven and a
+# human has reviewed it. Add the attestations, then set capture_enabled: true.
+# `serve` and the collector both run the same check; they refuse while any
+# value is missing or the restore-test report does not pass. Every value is
+# an operator statement the check cannot verify beyond file presence.
+#
+#   deployment:
+#     backup_target: /backup/cogvault-archive          # OFF-NAS target as seen by this container
+#     backup_schedule: "daily 03:00 (scheduler name)"
+#     restore_test_report: /backup/reports/restore-test.json
+#     permissions_owner: "<named person>"
+#     handoff_mount: "<SMB mount and paths for outbox/ and receipts/>"
+#     deletion_log_replica: /backup/replica/deletions-log.jsonl   # OFF-NAS copy
