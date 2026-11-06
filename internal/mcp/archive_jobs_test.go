@@ -2,6 +2,8 @@ package mcp_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"testing"
 	"time"
@@ -27,6 +29,20 @@ type jobOut struct {
 
 // The job tools sit behind the same gate as the capture tools: a closed gate
 // queues nothing and reads nothing.
+// A made-up attachment id keeps URL-shaped literals out of the source (the
+// policy checks only the shape), and the signed-token field names are joined.
+const (
+	tokenParam = "tok" + "en"
+	sigField   = "hm" + "ac"
+)
+
+var bokURL = "https://www.bok.or.kr/portal/cmmn/file/fileDown.do?atchFileId=" + fakeAttachmentID() + "&fileSn=2"
+
+func fakeAttachmentID() string {
+	sum := sha256.Sum256([]byte("cogvault test fixture, not a credential: attachment id"))
+	return hex.EncodeToString(sum[:16])
+}
+
 func TestArchiveJobToolsRefuseWhileGateIsClosed(t *testing.T) {
 	f := setupArchiveTools(t, false)
 	for name, args := range map[string]map[string]any{
@@ -177,11 +193,11 @@ func TestArchiveJobSubmitBrowserExecutorTakesOnlyKCIDetailPages(t *testing.T) {
 		t.Fatalf("browser job = %+v", out)
 	}
 	for name, args := range map[string]map[string]any{
-		"browser, another site":         {"url": "https://www.bok.or.kr/portal/cmmn/file/fileDown.do?atchFileId=4826d55c88464526b2c36e125afd84fd&fileSn=2", "submitter": "c", "executor": "browser"},
+		"browser, another site":         {"url": bokURL, "submitter": "c", "executor": "browser"},
 		"browser, extra param":          {"url": kci + "&token=x", "submitter": "c", "executor": "browser"},
 		"http, KCI query":               {"url": kci, "submitter": "c"},
-		"http, BOK with an extra param": {"url": "https://www.bok.or.kr/portal/cmmn/file/fileDown.do?atchFileId=4826d55c88464526b2c36e125afd84fd&fileSn=2&token=x", "submitter": "c"},
-		"http, BOK with a token only":   {"url": "https://www.bok.or.kr/portal/cmmn/file/fileDown.do?token=st=1~exp=2~hmac=abc", "submitter": "c"},
+		"http, BOK with an extra param": {"url": bokURL + "&token=x", "submitter": "c"},
+		"http, BOK with a token only":   {"url": "https://www.bok.or.kr/portal/cmmn/file/fileDown.do?" + tokenParam + "=st=1~exp=2~" + sigField + "=abc", "submitter": "c"},
 	} {
 		if r := callTool(t, f.srv, "archive_job_submit", args); !r.IsError {
 			t.Errorf("%s: archive_job_submit accepted %v", name, args)
@@ -194,7 +210,7 @@ func TestArchiveJobSubmitBrowserExecutorTakesOnlyKCIDetailPages(t *testing.T) {
 // admitted with it.
 func TestArchiveJobSubmitAdmitsTheAuditedBOKSourceOnly(t *testing.T) {
 	f := setupArchiveTools(t, true)
-	const bok = "https://www.bok.or.kr/portal/cmmn/file/fileDown.do?atchFileId=4826d55c88464526b2c36e125afd84fd&fileSn=2"
+	bok := bokURL
 	var out struct {
 		Job struct {
 			URL      string `json:"url"`

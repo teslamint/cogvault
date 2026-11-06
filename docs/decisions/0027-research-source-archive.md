@@ -542,6 +542,21 @@ otherwise travel to a further hop); error text never repeats a request URL.
   registry contains neither `hmac` nor `token=st=`. The manual archive was not
   read or written.
 
+**Test fixture provenance (secret-scanner findings).** The tests use made-up
+values, not credentials. The signature part of the signed token and the
+attachment id in `sourcepolicy_test.go` and `internal/mcp/archive_jobs_test.go`
+are hashes of fixed labels, computed at run time; they were written by the
+author, not copied from any BOK response, and were checked afterwards against
+the real signature seen during the live probes (they differ). The real token
+was short-lived, never entered the repository, and the stored registry holds no
+token. The URL and token grammar is kept, with the pieces joined in the test
+source (`tokenParam`, `sigField`, `fakeHex`), so no complete token-shaped or
+URL-shaped literal remains for a scanner to flag. The first version of the test
+(commit `a3a51f0`) did hold a literal made-up signature and the public
+fixture id; the earlier scanner findings on that commit are false positives
+for those reasons. The attachment id of the reference fixture is public (it is in
+the manifest and this document).
+
 **Unresolved policy (not decided here).**
 
 1. **Terms.** That the file is a public download does not mean BOK's terms or

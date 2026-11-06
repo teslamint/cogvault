@@ -42,9 +42,13 @@ var managedDirs = []string{
 
 const (
 	schemaVersion = 6
-	maxFieldRunes = 1000
-	maxKeyRunes   = 200
-	autoKeyPrefix = "digest:"
+	// setSchemaVersionSQL is a literal, not built from schemaVersion, so no
+	// value is formatted into SQL; TestSetSchemaVersionSQLMatchesSchemaVersion
+	// keeps the two equal.
+	setSchemaVersionSQL = `PRAGMA user_version = 6`
+	maxFieldRunes       = 1000
+	maxKeyRunes         = 200
+	autoKeyPrefix       = "digest:"
 )
 
 var (
@@ -394,7 +398,7 @@ func migrate(db *sql.DB) error {
 		if _, err := db.Exec(ddl); err != nil {
 			return err
 		}
-		_, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion))
+		_, err := db.Exec(setSchemaVersionSQL)
 		return err
 	case 1:
 		return migrateV1(db)
@@ -428,10 +432,13 @@ func migrateLinks(db *sql.DB, from int) error {
 	if err := backfillPageLinks(ctx, tx); err != nil {
 		return fmt.Errorf("migrate registry v%d: %w", from, err)
 	}
-	if _, err := tx.ExecContext(ctx, linkOnceIndex+v6Tables); err != nil {
+	if _, err := tx.ExecContext(ctx, linkOnceIndex); err != nil {
 		return fmt.Errorf("migrate registry v%d: %w", from, err)
 	}
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
+	if _, err := tx.ExecContext(ctx, v6Tables); err != nil {
+		return fmt.Errorf("migrate registry v%d: %w", from, err)
+	}
+	if _, err := tx.ExecContext(ctx, setSchemaVersionSQL); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -449,7 +456,7 @@ func migrateJobs(db *sql.DB) error {
 	if _, err := tx.ExecContext(ctx, v6Tables); err != nil {
 		return fmt.Errorf("migrate registry v5: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
+	if _, err := tx.ExecContext(ctx, setSchemaVersionSQL); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -484,7 +491,8 @@ func migrateV1(db *sql.DB) error {
 		`ALTER TABLE objects ADD COLUMN state_at TEXT NOT NULL DEFAULT ''`,
 		v2Tables,
 		v3Tables,
-		linkOnceIndex + v6Tables,
+		linkOnceIndex,
+		v6Tables,
 	}
 	for _, s := range steps {
 		if _, err := tx.ExecContext(ctx, s); err != nil {
@@ -498,7 +506,7 @@ func migrateV1(db *sql.DB) error {
 	if bad != 0 {
 		return fmt.Errorf("migrate registry v1: %d foreign key violations", bad)
 	}
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
+	if _, err := tx.ExecContext(ctx, setSchemaVersionSQL); err != nil {
 		return err
 	}
 	return tx.Commit()

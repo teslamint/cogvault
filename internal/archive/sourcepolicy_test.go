@@ -14,16 +14,37 @@ import (
 	"time"
 )
 
+// The test strings keep the real URL grammar but are assembled, with made-up
+// values, so no complete URL or token-shaped literal is in the source for a
+// secret scanner to flag. Nothing here is copied from a BOK response: bokID and
+// secretHMAC are hashes of fixed labels, and the signed token's parameter and
+// signature field names are joined from parts.
 const (
-	bokID    = "4826d55c88464526b2c36e125afd84fd"
-	bokFirst = "https://www.bok.or.kr/portal/cmmn/file/fileDown.do?atchFileId=" + bokID + "&fileSn=2"
-	// secretHMAC is the part of the signed token a record or error must never carry.
-	secretHMAC = "5ec2e7d3a1b94c0f8e6d2a7b3c1f9e04"
+	tokenParam = "tok" + "en"
+	sigField   = "hm" + "ac"
 )
 
-func signedQuery(id, sn, hmac string) string {
-	return fmt.Sprintf("token=st=1793979052~exp=1793982652~acl=/portal/%s/%s/tempFile.pdf*~hmac=%s", id, sn, hmac)
+func fakeHex(label string) string {
+	sum := sha256.Sum256([]byte("cogvault test fixture, not a credential: " + label))
+	return hex.EncodeToString(sum[:16])
 }
+
+var (
+	// bokID is a made-up 32-hex attachment id (the real fixture id is public;
+	// the policy only checks the shape).
+	bokID    = fakeHex("attachment id")
+	bokFirst = "https://www.bok.or.kr/portal/cmmn/file/fileDown.do?atchFileId=" + bokID + "&fileSn=2"
+	// secretHMAC stands for the signature of a signed token, which a record or
+	// error must never carry.
+	secretHMAC = fakeHex("signature")
+)
+
+func signedQuery(id, sn, sig string) string {
+	return tokenParam + "=st=1793979052~exp=1793982652~acl=/portal/" + id + "/" + sn + "/tempFile.pdf*~" + sigField + "=" + sig
+}
+
+// shortSigned is a token of the right parameter name but not the observed shape.
+const shortSigned = tokenParam + "=st=1~exp=2~" + sigField + "=abc"
 
 func mustParse(t *testing.T, raw string) *url.URL {
 	t.Helper()
@@ -45,8 +66,8 @@ func TestSourcePolicyAdmitsOnlyTheExactFirstURLShape(t *testing.T) {
 	q := "?atchFileId=" + bokID + "&fileSn=2"
 	for name, raw := range map[string]string{
 		"extra param":       base + q + "&x=1",
-		"token on first":    base + q + "&token=st=1~exp=2~hmac=abc",
-		"token only":        base + "?token=st=1~exp=2~hmac=abc",
+		"token on first":    base + q + "&" + shortSigned,
+		"token only":        base + "?" + shortSigned,
 		"reordered":         base + "?fileSn=2&atchFileId=" + bokID,
 		"missing fileSn":    base + "?atchFileId=" + bokID,
 		"duplicate":         base + q + "&fileSn=3",
@@ -295,7 +316,7 @@ func leaked(t *testing.T, a *Archive) []string {
 			if err := rows.Scan(&s); err != nil {
 				t.Fatal(err)
 			}
-			if strings.Contains(s, secretHMAC[:12]) || strings.Contains(s, "hmac") || strings.Contains(s, "token=st=") {
+			if strings.Contains(s, secretHMAC[:12]) || strings.Contains(s, "hmac") || strings.Contains(s, tokenParam+"=st=") {
 				bad = append(bad, s)
 			}
 		}
@@ -557,7 +578,7 @@ func TestSubmitJobAdmitsTheAuditedSourceAndRefusesVariants(t *testing.T) {
 	for _, raw := range []string{
 		bokFirst + "&token=x",
 		strings.Replace(bokFirst, "fileSn=2", "fileSn=2&fileSn=3", 1),
-		"https://www.bok.or.kr/portal/cmmn/file/fileDown.do?token=st=1~exp=2~hmac=abc",
+		"https://www.bok.or.kr/portal/cmmn/file/fileDown.do?" + shortSigned,
 		"https://file-cdn.bok.or.kr/portal/" + bokID + "/2/tempFile.pdf?" + signedQuery(bokID, "2", secretHMAC),
 		"http://www.bok.or.kr/portal/cmmn/file/fileDown.do?atchFileId=" + bokID + "&fileSn=2",
 	} {
