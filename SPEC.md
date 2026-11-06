@@ -1187,6 +1187,14 @@ cogvault archive --root <dir> purge <object-id> --confirm <object-id>
 cogvault archive --root <dir> backup --to <new dir>
 cogvault archive --root <dir> restore-test --backup <dir> --report <new file>
     [--deletion-log <path>]... [--scratch <dir>]
+# durable collection queue (archive host; public HTTP only, no credentials)
+cogvault archive --root <dir> job submit <public http(s) URL> --submitter <label>
+    [--edition <text>] [--report <capture-id>] [--claim <text>]
+    [--seen-sha256 sha256:<hex>] [--executor http|browser] [--key <k>]
+    [--max-attempts <n>] [--json]
+cogvault archive --root <dir> job status <job-id> [--json]
+cogvault archive --root <dir> job retry <job-id> [--json]
+cogvault archive --root <dir> job run [--once] [--owner <name>] [--lease <d>] [--poll <d>]
 # ingest host (reads --config; never opens the registry)
 cogvault archive --root <share> --config <path> pickup --dest <source dir> [--json]
 cogvault archive --root <share> --config <path> receipts --dest <source dir>
@@ -1196,10 +1204,11 @@ An implemented prototype of the archive proposed in ADR 0027. That ADR is
 **proposed, not accepted**, and nothing here is deployed: these commands and
 the archive MCP tools may change or be removed. The user approved policy
 defaults (ADR 0027) shape the behavior below; deployment settings are empty
-and production capture stays blocked (see *Activation*). There is no
-automatic or scheduled re-acquisition, robots or terms handling, charset
-decoding, release of held material without a verified judgment, backup
-scheduling, or backup expiry.
+and production capture stays blocked (see *Activation*). The only
+re-acquisition besides `acquire` is the queued collection job (see
+*Collection jobs*); nothing re-acquires on a schedule. There is no robots or
+terms handling, charset decoding, release of held material without a
+verified judgment, backup scheduling, or backup expiry.
 
 - `--root` is required. Layout: `objects/sha256/<hex>` (original bytes),
   `objects/tmp/` (staging), `registry.db` (SQLite), `outbox/` (hand-off
@@ -1210,8 +1219,8 @@ scheduling, or backup expiry.
   non-regular entries. Symlinks in the root's ancestors are trusted. The
   check runs at open only: another same-user process that swaps entries
   inside the root while a command runs is out of scope. Use a local disk;
-  the registry must not live on SMB. Registry schema 5; schema-1 through
-  -4 registries are migrated in place, and capture IDs are unchanged. One
+  the registry must not live on SMB. Registry schema 6; schema-1 through
+  -5 registries are migrated in place, and capture IDs are unchanged. One
   exception: a schema-2 to -4 registry that already holds two attempts
   linking the same (held, result) captures cannot take the schema-5 unique
   index; the upgrade rolls back, the registry is left as it was, and open
@@ -1363,6 +1372,102 @@ scheduling, or backup expiry.
   capture's URL again and records an attempt (`acquired` with the new
   capture, `human_action_required` for access-restricted, `failed`
   otherwise); the earlier capture is not changed.
+- **Collection jobs** (`job` CLI and the `archive_job_*` MCP tools; the
+  worker `job run` is archive host only): a durable queue
+  in the registry (schema 6: `jobs`, and `job_attempts`, which is
+  append-only) so a URL submitted by one client or chat is collected by a
+  separate worker and read back by job ID from any other process on the
+  archive host. A job holds a stable ID (`job_` plus 32 hex), the URL, the
+  submitter label (a label, not authenticated identity: host access is the
+  authority), an edition hint (recorded, never used to pick an edition), an
+  optional report capture ID (must be a `report` capture of an active
+  object), a free-text claim reference, and an optional `--seen-sha256`.
+  - **Submit** is idempotent. Without `--key`, the identity is the URL,
+    executor, edition hint, report, and claim, so the same request from any
+    client returns the same job and changes nothing (the first submitter
+    stays). A repeated `--key` for another URL is a conflict. The URL gets
+    the `acquire` checks (http(s); no userinfo, query, or fragment), so a
+    refused URL is never queued. `--max-attempts` is 1 to 20, default 5.
+  - **States:** `queued`, `running`, `held` (bytes stored but not hand-off
+    eligible), `acquired` (bytes stored with `verified` completeness),
+    `failed`, `human_action_required`. The public HTTP worker ends a stored
+    job as `held`: it never judges completeness, so the capture is
+    `unknown` and is released only through `reassess` (ADR 0027 open
+    question 5). `acquired` is reserved for an executor that records
+    checkable completeness evidence.
+  - **Lease and resume.** A claim leases one due job to a worker name for
+    `--lease` (default 5 min) and counts an attempt. When a lease ends
+    without a report (worker killed, host restarted), the next claim of
+    that executor records the attempt as `lease_expired` and requeues the
+    job after a backoff, or fails it when its attempts are used up. A worker
+    whose lease was reclaimed cannot record a result (`job is not leased to
+    this owner`), even if a new claim reuses its worker name: a claim is
+    identified by the owner and the attempt number it was given. A stopped worker (SIGINT/SIGTERM) records nothing for a
+    download in progress; the lease expiry resumes it. `status` shows a
+    `running` job with a past lease as `running` until a claim reclaims it.
+  - **Retry.** Network errors, timeouts, a short or broken body, and HTTP
+    408, 425, 429, and 5xx are retried with a doubling backoff (1 min up to
+    1 h) until the attempts are used up, then the job is `failed`. A blocked
+    address, a refused URL (or a redirect to one), an oversize body (32 MiB, never
+    truncated), and other 4xx fail at once; a redirect loop past 5 hops is retried. 401, 403, 407, and 451 end the
+    job as `human_action_required` after one request; the worker has no
+    login, cookie, proxy, or credential option. `job retry` requeues a
+    `failed`, `human_action_required`, or `held` job with a fresh budget;
+    attempt numbers keep counting and history stays.
+  - **Attempts** record the worker name, start and end time, outcome, a
+    reason (never a refused URL), the acquisition record (requested and
+    final URL, each hop's status and checked address, selected headers),
+    and the capture, if one was stored.
+  - **Bytes seen versus recovered later.** Each stored attempt records a
+    provenance on its capture link: `seen_during_research` only when the
+    submitter gave `--seen-sha256` and the stored object ID equals it, else
+    `recovered_after_research`. A digest that does not match leaves the
+    provenance `recovered_after_research` and says so in the attempt
+    reason. `status` and `archive_status` list a capture's `collections`
+    (job, provenance, submitter, report, claim). This is the submitter's
+    statement checked against the bytes' hash, not proof of what the
+    research read.
+  - **Executors.** `--executor http` jobs are run by `job run`, which uses
+    the same `Acquirer` as `acquire`, so it has the same address, redirect,
+    size, and time defenses. `--executor browser` jobs (for example an
+    official download page that needs interaction) are never claimed by
+    `job run`. A separate executor claims them with `ClaimJob("browser",
+    owner, lease)` and ends each claim with `CompleteJob(id, owner, attempt,
+    outcome)`, passing the attempt number the claim returned, which stores
+    bytes through `CaptureSource` before reporting `held` or `acquired`.
+    That executor is **not implemented**: no browser flow exists or is
+    tested here, so such a job stays `queued` until one runs. It must use
+    only the site's official UI and report `human_action_required` for a
+    login, payment, or challenge instead of working around it.
+  - **Transports.** Two, over one queue. The `job` CLI runs on the archive
+    host. The MCP tools `archive_job_submit`, `archive_job_status`, and
+    `archive_job_retry` let a chat client on another machine queue a URL and
+    read it back by job ID, so a job submitted from one client is visible
+    to every other client with access to the server. They are archive tools
+    (see *MCP tools*): registered only while capture is enabled, behind the
+    same gate and the server-wide `auth.mode` and scopes, with no per-tool
+    scope (ADR 0027 open question 3), so any client that may capture may
+    also submit and retry. Production enable stays blocked by *Activation*.
+    **Submitting makes the archive host's worker fetch a URL the client
+    chose**; ADR 0027 open question 9 (whether the host may make outbound
+    requests at all, and who may trigger them) is therefore a precondition
+    for enabling capture in production, not a settled point. The worker is
+    the same public-address-only acquirer as `acquire`, so a client cannot
+    point it at a private address, but it can make the host connect to any
+    public one. There is no MCP tool to run the worker, claim, complete, or
+    delete a job. `submit` takes only the URL, label, edition hint, report
+    capture ID, claim, `seen_sha256`, executor, and key (no host path, no
+    attempt budget; it is 5).
+  - **Remote view.** The MCP job view omits the worker name and each
+    attempt's acquisition record. Stored reasons name the failure class
+    only (for example `network error: timed out`, `destination is not a
+    public address`), never a resolver or socket address, because a remote
+    client must not learn the archive host's network. The CLI shows the
+    worker name and `--json` the acquisition record.
+  - Jobs are in the registry, so `backup` and `restore-test` carry them.
+    The queue is not live: nothing here deploys a worker, and the
+    *Activation* gate is unchanged. Without a running `job run` worker a
+    submitted job stays `queued`.
 - **Extract** (`extract`): `html-text/1`, standard library only, runs no
   scripts and loads nothing. Input must be valid UTF-8, sniff as text,
   carry no content coding, and be HTML by media type, sniff, or extension.
@@ -1450,7 +1555,8 @@ scheduling, or backup expiry.
   rejected.
 - **MCP tools** (registered only while capture is enabled): `archive_capture_text`,
   `archive_capture_report`, `archive_capture_summary`, `archive_status`,
-  `archive_page_links`. Text
+  `archive_page_links`, `archive_job_submit`, `archive_job_status`,
+  `archive_job_retry` (see *Collection jobs*). Text
   up to 1 MiB (rejected, never truncated); `name` must be a base file name
   ending in `.md`, `.markdown`, or `.txt`; completeness `unknown` or
   `incomplete` only (only an operator records `verified`). Undeclared

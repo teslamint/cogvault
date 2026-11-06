@@ -730,11 +730,12 @@ performs no writes, network access, or LLM calls.
 `internal/archive` owns one root with content-addressed immutable objects and
 its own SQLite registry (`objects` with an active/quarantined/purged state,
 `captures`, `citations`, `attempts`, `handoffs`, `receipts`, `derivations`,
-`acquisitions`, `extractions`, `page_links`; `user_version=5` with an
-in-place v1 rebuild and `migrateLinks` for v2 to v4, which (re)links every
-collected receipt in one transaction, so v3 links recorded before the
-receipt-order rule get their lowest-numbered basis, and adds the partial
-unique index `attempts_link_once`; foreign keys on, one connection,
+`acquisitions`, `extractions`, `page_links`, `jobs`, `job_attempts`;
+`user_version=6` with an in-place v1 rebuild, `migrateLinks` for v2 to v4,
+which (re)links every collected receipt in one transaction, so v3 links
+recorded before the receipt-order rule get their lowest-numbered basis, adds
+the partial unique index `attempts_link_once`, and creates the job tables,
+and `migrateJobs` for v5, which only creates them; foreign keys on, one connection,
 `_txlock=immediate` so concurrent writers wait on `busy_timeout` instead of
 failing with `SQLITE_BUSY_SNAPSHOT`). The one connection means a query on
 `a.db` while a transaction is open deadlocks, so every non-transaction query
@@ -771,6 +772,51 @@ status check to the commit, so a deletion action or another extraction of
 the same bytes runs wholly before or after it. `ExtractHTMLText` uses
 `encoding/xml` in non-strict HTML mode after removing raw-text element
 bodies.
+
+The collection queue (jobs.go, collector.go) is a second consumer of
+`Acquire`, not a second acquirer. `acquire` takes the capture key, supplier,
+and title as a `SourceRequest`, so a job reuses the fetch, address checks,
+object store, and registry unchanged. `ClaimJob`, `CompleteJob`, and
+`SubmitJob` each run in one immediate transaction under the shared archive
+lock and never hold it across a download: the network call happens between
+claim and complete. A claim reclaims expired leases of its executor first
+(records `lease_expired`, requeues behind `jobBackoff`, or fails at the
+attempt ceiling), then leases the oldest due queued job. `CompleteJob`
+checks that the job is `running` under the caller's owner name and attempt
+number (every claim increments `attempts_made`, so the number is the lease
+token and a reused owner name cannot let a stale run finish a newer try), so a worker
+whose lease was reclaimed cannot write; it inserts the `job_attempts` row
+and updates the job in the same transaction, and a retry outcome becomes
+`failed` when `attempts_made` reaches `max_attempts`. `RetryJob` raises
+`max_attempts` by the per-run budget instead of resetting the counter, so
+attempt numbers stay unique per job. Timestamps use a fixed-width layout so
+`lease_until` and `not_before` compare correctly as text. Provenance is
+decided in `CompleteJob` by comparing the stored object ID with the
+submitter's `seen_sha256`, and is kept on the attempt row, so a later retry
+that stores different bytes does not relabel an earlier capture;
+`Capture.Collections` reads it from `job_attempts`. `classifyAcquire` maps
+sentinel errors (`ErrBlockedAddress`, `ErrInvalid`, `ErrTooLarge`,
+`ErrAccessRestricted`, `RemoteStatusError`) to retry or terminal outcomes;
+anything it does not recognize is retried, never stored. The completeness of
+an HTTP download stays `unknown`, so jobs end `held`; no extra completeness
+check was added because `reassess` is the existing release path. The
+`browser` executor value only reserves the claim/complete contract; no
+browser executor exists.
+
+Remote clients reach the queue through `internal/mcp/archive_job_tools.go`:
+`archive_job_submit`, `archive_job_status`, and `archive_job_retry` are
+built by `ArchiveTools` next to the capture tools, so they share the
+`ArchiveGate` (closed gate: refused before anything is queued), the
+declared-parameter and string-type check, `archiveError` (request errors
+keep their text, everything else becomes a fixed message), and removal by
+`ArchiveToolNames` on a disable reload. They call `SubmitJob`, `GetJob`, and
+`RetryJob` only: the claim, complete, and worker paths are not exposed.
+`jobView` is a projection, not the `archive.Job`: it drops `lease_owner` and
+each attempt's `owner` and `response`, and `classifyAcquire` writes reasons
+that name the failure class without the Go network error text, so neither
+the worker's host name nor resolver or socket addresses reach a client.
+Submit does not fetch; the fetch happens in the worker, which is a separate
+process the MCP server does not start.
 
 The capture map (capturemap.go) is written by `Pickup` and read by
 `internal/ingest` through `CapturesForSource`; `PageRecordsCapture` is the

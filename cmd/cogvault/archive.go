@@ -142,6 +142,7 @@ func newArchiveCmd() *cobra.Command {
 
 	cmd.AddCommand(capture, report, status, summary, attempt, handoff, collect, pickup, receipts, pageLinks)
 	cmd.AddCommand(newArchiveOperatorCmds()...)
+	cmd.AddCommand(newArchiveJobCmd())
 	return cmd
 }
 

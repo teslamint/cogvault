@@ -371,9 +371,23 @@ items 2–4, 6–12, and the mechanisms of 13 and 14 (`SPEC.md` §9.16,
   checked address, and URLs with credentials, a query, or a fragment are
   refused on every redirect. Completeness is always unknown.
 
+- A durable collection queue (`archive job`, MCP `archive_job_submit`,
+  `archive_job_status`, `archive_job_retry`; `SPEC.md` §9.16 "Collection
+  jobs"): jobs and append-only per-try attempts in the registry (schema 6),
+  a lease so a stopped worker's job resumes, bounded retry with backoff,
+  idempotent submit, and a provenance label on each stored capture link
+  (`seen_during_research` only when the submitter's digest matches the
+  stored bytes, else `recovered_after_research`). The worker reuses
+  `Acquire`, so it is public-address-only and never uses credentials; it
+  stores bytes held (completeness `unknown`). The MCP tools are archive
+  tools: off while capture is disabled, behind the server-wide auth, with no
+  per-tool scope. An interactive official-UI executor (for example for KCI)
+  is not implemented; its claim/complete contract exists and no test
+  exercises a real browser flow. Nothing deploys a worker.
+
 Not implemented: item 1's NAS volume, changes to `cogvault fetch` itself
 (item 5 candidate), release of `unknown`/`partial` bytes without a verified
-judgment (open question 5), automatic or scheduled re-acquisition, robots or
+judgment (open question 5), scheduled re-acquisition, robots or
 terms handling, charset decoding of non-UTF-8 HTML, backup scheduling and
 expiry, and keeping the deletion log replica current. The prototype limits
 that answer open questions only provisionally (1 MiB MCP text, 30 s drain,
@@ -421,6 +435,12 @@ refused, 32 MiB / 60 s acquisition bounds) remain open below.
 9. **Acquisition policy.** Which URL queries (if any) may be fetched,
    robots and terms handling, the size and time limits, whether the
    archive host may make outbound requests at all, and who may run it.
+   Queueing a URL through the MCP job tools makes the archive host's worker
+   connect to a public address the client chose, so this question also
+   decides whether those tools may be enabled; they stay behind the capture
+   gate and the *Activation* check until it is answered. A worker process on
+   the NAS (its image, service definition, and credentials-free network
+   path) is a further deployment setting; `deploy/nas/compose.yaml` has none.
 
 ## Why
 

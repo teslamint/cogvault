@@ -98,7 +98,7 @@ func (g *ArchiveGate) InFlight() int {
 const archiveDisabled = "archive capture is disabled on this server"
 
 // ArchiveToolNames lists every archive tool, for DeleteTools.
-var ArchiveToolNames = []string{"archive_capture_text", "archive_capture_report", "archive_capture_summary", "archive_status", "archive_page_links"}
+var ArchiveToolNames = []string{"archive_capture_text", "archive_capture_report", "archive_capture_summary", "archive_status", "archive_page_links", "archive_job_submit", "archive_job_status", "archive_job_retry"}
 
 // PageChecker answers whether a wiki-relative path is an existing file and
 // reads it. storage.FSStorage satisfies it; evidence validation uses the
@@ -147,6 +147,9 @@ func ArchiveTools(a *archive.Archive, gate *ArchiveGate, idx index.Index, pages 
 		gated(archiveCaptureSummaryTool(), handleArchiveCaptureSummary(a)),
 		gated(archiveStatusTool(), handleArchiveStatus(a, idx, pages)),
 		gated(archivePageLinksTool(), handleArchivePageLinks(a, pages)),
+		gated(archiveJobSubmitTool(), handleArchiveJobSubmit(a)),
+		gated(archiveJobStatusTool(), handleArchiveJobStatus(a)),
+		gated(archiveJobRetryTool(), handleArchiveJobRetry(a)),
 	}
 }
 
@@ -268,7 +271,8 @@ func textInput(req mcp.CallToolRequest) (string, string, *mcp.CallToolResult) {
 func archiveError(err error) *mcp.CallToolResult {
 	switch {
 	case errors.Is(err, archive.ErrInvalid), errors.Is(err, archive.ErrNotFound), errors.Is(err, archive.ErrConflict),
-		errors.Is(err, archive.ErrTooLarge), errors.Is(err, archive.ErrDeleted):
+		errors.Is(err, archive.ErrTooLarge), errors.Is(err, archive.ErrDeleted),
+		errors.Is(err, archive.ErrJobNotFound), errors.Is(err, archive.ErrJobState):
 		return mcp.NewToolResultError(err.Error())
 	case errors.Is(err, archive.ErrIntegrity):
 		slog.Error("archive integrity error", "err", err)
@@ -367,10 +371,13 @@ type archiveStatusView struct {
 	Derived           []archive.Derivation `json:"derived"`
 	// Download is an Acquire response record. Acquire refuses URLs with
 	// credentials, queries, or fragments on every hop, so its URLs carry none.
-	Download      *archive.AcquisitionRecord `json:"download,omitempty"`
-	Extractions   []archive.Extraction       `json:"extractions"`
-	SearchVisible *bool                      `json:"search_visible,omitempty"`
-	SearchChecked string                     `json:"search_checked_at,omitempty"`
+	Download    *archive.AcquisitionRecord `json:"download,omitempty"`
+	Extractions []archive.Extraction       `json:"extractions"`
+	// Collections are the collection jobs that stored this capture and
+	// whether its bytes were recovered after the research or match what it read.
+	Collections   []archive.Collection `json:"collections,omitempty"`
+	SearchVisible *bool                `json:"search_visible,omitempty"`
+	SearchChecked string               `json:"search_checked_at,omitempty"`
 	// EvidenceRefPathExists says only that a file exists at the evidence ref
 	// path now, so a research_evidence ref to it passes the EVID004 path
 	// check. It does not show that the page describes this capture or
@@ -481,7 +488,7 @@ func statusView(c archive.Capture) archiveStatusView {
 		Acquisition: c.Acquisition, Completeness: c.Completeness, CompletenessBasis: c.CompletenessBasis,
 		RecordedAt: c.RecordedAt, SummaryOf: c.SummaryOf, SameObject: c.SameObject, CitedBy: c.CitedBy,
 		Citations: c.Citations, Summaries: c.Summaries, Attempts: c.Attempts, RecoveredBy: c.RecoveredBy,
-		Derived: c.Derived, Download: c.Download, Extractions: c.Extractions,
+		Derived: c.Derived, Download: c.Download, Extractions: c.Extractions, Collections: c.Collections,
 		Ingest: archiveIngestView{
 			State: c.Ingest.State, Reason: c.Ingest.Reason, Source: c.Ingest.Source, ObservedAt: c.Ingest.ObservedAt,
 			LedgerStatus: c.Ingest.LedgerStatus, WikiPage: c.Ingest.WikiPage,

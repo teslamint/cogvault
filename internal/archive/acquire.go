@@ -57,6 +57,17 @@ var (
 	ErrAccessRestricted = errors.New("access restricted")
 )
 
+// RemoteStatusError is a refused HTTP status. It matches ErrRemote, so
+// callers that only test errors.Is(err, ErrRemote) are unaffected; the
+// collector reads Status to decide whether a later try can succeed.
+type RemoteStatusError struct{ Status int }
+
+func (e *RemoteStatusError) Error() string {
+	return fmt.Sprintf("%v: HTTP %d", ErrRemote, e.Status)
+}
+
+func (e *RemoteStatusError) Is(target error) bool { return target == ErrRemote }
+
 // blockedPrefixes are non-public ranges netip's predicates do not cover.
 var blockedPrefixes = func() []netip.Prefix {
 	var out []netip.Prefix
@@ -291,7 +302,7 @@ func (q Acquirer) fetch(ctx context.Context, raw string) ([]byte, AcquisitionRec
 	case http.StatusUnauthorized, http.StatusForbidden, http.StatusProxyAuthRequired, http.StatusUnavailableForLegalReasons:
 		return nil, rec, fmt.Errorf("%w: HTTP %d", ErrAccessRestricted, resp.StatusCode)
 	default:
-		return nil, rec, fmt.Errorf("%w: HTTP %d", ErrRemote, resp.StatusCode)
+		return nil, rec, &RemoteStatusError{Status: resp.StatusCode}
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
@@ -354,6 +365,12 @@ func acquiredName(final *url.URL, mediaType, contentEncoding string) string {
 // acquisition: the same bytes later share the object but get a new capture,
 // and different bytes are a separate edition. Nothing is replaced.
 func (a *Archive) Acquire(ctx context.Context, q Acquirer, rawURL string) (Result, AcquisitionRecord, error) {
+	return a.acquire(ctx, q, rawURL, SourceRequest{Supplier: AcquireSupplier})
+}
+
+// acquire is Acquire with the capture's key, supplier, and title taken
+// from base; the bytes, name, URL, and media type come from the download.
+func (a *Archive) acquire(ctx context.Context, q Acquirer, rawURL string, base SourceRequest) (Result, AcquisitionRecord, error) {
 	body, rec, err := q.fetch(ctx, rawURL)
 	if err != nil {
 		return Result{}, rec, err
@@ -374,8 +391,8 @@ func (a *Archive) Acquire(ctx context.Context, q Acquirer, rawURL string) (Resul
 	// The response record is written in the capture's transaction, so a
 	// capture never exists without it.
 	res, err := a.captureSource(ctx, SourceRequest{
-		Content: bytes.NewReader(body), OriginalName: acquiredName(final, mediaType, rec.Headers["Content-Encoding"]),
-		URL: rec.FinalURL, Supplier: AcquireSupplier, MediaType: stored,
+		Key: base.Key, Content: bytes.NewReader(body), OriginalName: acquiredName(final, mediaType, rec.Headers["Content-Encoding"]),
+		URL: rec.FinalURL, Supplier: base.Supplier, Title: base.Title, MediaType: stored,
 	}, rec.FetchedAt, string(download))
 	if err != nil {
 		return Result{}, rec, err

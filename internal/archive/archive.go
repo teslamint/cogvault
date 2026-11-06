@@ -41,7 +41,7 @@ var managedDirs = []string{
 }
 
 const (
-	schemaVersion = 5
+	schemaVersion = 6
 	maxFieldRunes = 1000
 	maxKeyRunes   = 200
 	autoKeyPrefix = "digest:"
@@ -145,7 +145,7 @@ CREATE TABLE IF NOT EXISTS citations (
  PRIMARY KEY (report_id, position),
  CHECK ((cited_capture_id IS NULL) <> (cited_url = '')));
 CREATE INDEX IF NOT EXISTS citations_cited ON citations(cited_capture_id);
-` + v2Tables + v3Tables + linkOnceIndex
+` + v2Tables + v3Tables + linkOnceIndex + v6Tables
 
 // linkOnceIndex (schema version 5) allows one linking attempt per (held
 // capture, result capture) pair, so concurrent reassessments of the same
@@ -229,6 +229,10 @@ type Capture struct {
 	Extractions []Extraction `json:"extractions"`
 	// PageLinks are the archive's capture-to-page associations (pagelinks.go).
 	PageLinks []PageLink `json:"page_links"`
+	// Collections are the collection jobs that stored this capture, each
+	// with whether its bytes match what the research read or were recovered
+	// later (jobs.go).
+	Collections []Collection `json:"collections,omitempty"`
 }
 
 // Citation is one report citation. Exactly one of CaptureID and URL is set;
@@ -396,6 +400,8 @@ func migrate(db *sql.DB) error {
 		return migrateV1(db)
 	case 2, 3, 4:
 		return migrateLinks(db, v)
+	case 5:
+		return migrateJobs(db)
 	default:
 		return fmt.Errorf("unsupported registry schema version %d", v)
 	}
@@ -422,8 +428,26 @@ func migrateLinks(db *sql.DB, from int) error {
 	if err := backfillPageLinks(ctx, tx); err != nil {
 		return fmt.Errorf("migrate registry v%d: %w", from, err)
 	}
-	if _, err := tx.ExecContext(ctx, linkOnceIndex); err != nil {
+	if _, err := tx.ExecContext(ctx, linkOnceIndex+v6Tables); err != nil {
 		return fmt.Errorf("migrate registry v%d: %w", from, err)
+	}
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// migrateJobs upgrades a version 5 registry: schema 6 only adds the
+// collection job tables, so the upgrade creates them and records the version.
+func migrateJobs(db *sql.DB) error {
+	ctx := context.Background()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, v6Tables); err != nil {
+		return fmt.Errorf("migrate registry v5: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
 		return err
@@ -460,7 +484,7 @@ func migrateV1(db *sql.DB) error {
 		`ALTER TABLE objects ADD COLUMN state_at TEXT NOT NULL DEFAULT ''`,
 		v2Tables,
 		v3Tables,
-		linkOnceIndex,
+		linkOnceIndex + v6Tables,
 	}
 	for _, s := range steps {
 		if _, err := tx.ExecContext(ctx, s); err != nil {
@@ -949,6 +973,9 @@ func (a *Archive) status(ctx context.Context, captureID string) (Capture, error)
 		return Capture{}, err
 	}
 	if c.PageLinks, err = a.pageLinks(ctx, pageLinksByCapture, c.CaptureID); err != nil {
+		return Capture{}, err
+	}
+	if c.Collections, err = a.collections(ctx, c.CaptureID); err != nil {
 		return Capture{}, err
 	}
 	rows, err := a.db.QueryContext(ctx, `SELECT t.position, COALESCE(t.cited_capture_id, ''), t.cited_url, COALESCE(CASE WHEN o.state = 'active' THEN s.completeness END, '') FROM citations t LEFT JOIN captures s ON s.capture_id = t.cited_capture_id LEFT JOIN objects o ON o.object_id = s.object_id WHERE t.report_id = ? ORDER BY t.position`, c.CaptureID)
