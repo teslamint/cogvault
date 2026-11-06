@@ -836,6 +836,29 @@ gate; tests drive the loop on temporary roots by passing their own gate to
 worker instead of exiting, because a restart policy would turn an exit into a
 crash loop; `--once` returns the refusal.
 
+Source policies (`internal/archive/sourcepolicy.go`) are the one narrow exception
+to the acquirer's blanket query refusal. `fetch` calls `admitFirstURL` instead
+of `checkAcquireURL`: a URL with no query takes the generic checks, and a URL
+with a query is admitted only when `matchSource` matches it against the
+`sourcePolicies` table; a non-match returns the unchanged generic refusal. The
+match is on the raw query string with a fixed-shape regular expression (not
+parsed parameters), so a different spelling of the same parameters does not match.
+`CheckRedirect` allows a query only when `len(via) == 1 && !rec.SignedRedirect
+&& pm.matchRedirect(req.URL)`: the signed redirect is the first redirect, once,
+on the policy's host, for the file the first URL named (host, path, and the
+token's `acl` are all derived from the identifiers the first URL captured);
+every other hop takes `checkAcquireURL`, which refuses any query, so a token
+cannot be repeated or passed on. The DNS check, the checked dial, the redirect
+limit, and the size and time bounds are the same code for every hop. The token
+is redacted at the boundary: hop and final URLs go through `policyMatch.redact`
+before they are recorded, the capture's URL is the first URL, `Referer` is
+deleted in `CheckRedirect` (Go sets it from the previous URL before it calls
+the check, so without that the signed URL would reach a further hop), and the
+client's `*url.Error`, which repeats the request URL, is unwrapped to its cause.
+`sourcePolicies` is a variable only so a test in this package can swap in a
+plain-http copy for a local server; nothing else writes it. `SubmitJob` stores
+the policy's normalized first URL, so a repeated submission is the same job.
+
 The browser executor splits along the dependency line. `internal/archive`
 (browser.go) has no browser code: it owns the URL policy `CheckBrowserURL`
 (the one place a query is admitted), the outcome codes, the `BrowserDriver`

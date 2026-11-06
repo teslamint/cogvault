@@ -229,8 +229,12 @@ func (a *Archive) SubmitJob(ctx context.Context, req JobRequest) (job Job, exist
 		if u, perr = url.Parse(req.URL); perr != nil {
 			return Job{}, false, fmt.Errorf("%w: unparsable URL", ErrInvalid)
 		}
-		if err := checkAcquireURL(u); err != nil {
+		pm, err := admitFirstURL(u)
+		if err != nil {
 			return Job{}, false, err
+		}
+		if pm != nil {
+			u, _ = url.Parse(pm.first)
 		}
 	}
 	if req.Submitter == "" {

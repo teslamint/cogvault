@@ -135,6 +135,10 @@ type AcquisitionRecord struct {
 	Headers      map[string]string `json:"headers"`
 	FetchedAt    string            `json:"fetched_at"`
 	Size         int64             `json:"size"`
+	// SignedRedirect is true when the download went through the one signed
+	// redirect a source policy allows. The recorded URLs then carry no token
+	// (sourcepolicy.go).
+	SignedRedirect bool `json:"signed_redirect,omitempty"`
 }
 
 // recordedHeaders are the response headers kept as provenance.
@@ -226,10 +230,14 @@ func (q Acquirer) fetch(ctx context.Context, raw string) ([]byte, AcquisitionRec
 	if err != nil {
 		return nil, rec, fmt.Errorf("%w: unparsable URL", ErrInvalid)
 	}
-	if err := checkAcquireURL(u); err != nil {
+	pm, err := admitFirstURL(u)
+	if err != nil {
 		return nil, rec, err
 	}
 	rec.RequestedURL = u.String()
+	if pm != nil {
+		rec.RequestedURL = pm.first
+	}
 	timeout, limit := q.Timeout, q.MaxBytes
 	if timeout <= 0 {
 		timeout = AcquireTimeout
@@ -261,15 +269,24 @@ func (q Acquirer) fetch(ctx context.Context, raw string) ([]byte, AcquisitionRec
 		Transport: transport,
 		Timeout:   timeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			rec.Hops = append(rec.Hops, Hop{URL: via[len(via)-1].URL.String(), Address: lastAddr(), Status: req.Response.StatusCode})
+			rec.Hops = append(rec.Hops, Hop{URL: pm.redact(via[len(via)-1].URL), Address: lastAddr(), Status: req.Response.StatusCode})
 			if len(via) > acquireMaxRedirects {
 				return fmt.Errorf("%w: more than %d redirects", ErrRemote, acquireMaxRedirects)
 			}
-			if err := checkAcquireURL(req.URL); err != nil {
+			// The one redirect that may carry a query is the signed redirect the
+			// first URL's policy names. It is allowed only as the FIRST redirect
+			// (len(via) == 1) and only once (SignedRedirect not yet set); every
+			// other hop takes the generic checks, which refuse any query, so a
+			// token can be neither repeated nor passed on a further hop.
+			if len(via) == 1 && !rec.SignedRedirect && pm.matchRedirect(req.URL) {
+				rec.SignedRedirect = true
+			} else if err := checkAcquireURL(req.URL); err != nil {
 				return err
 			}
 			req.Header.Del("Authorization")
 			req.Header.Del("Cookie")
+			// Go sets Referer to the previous URL; never pass a signed URL on.
+			req.Header.Del("Referer")
 			return nil
 		},
 	}
@@ -290,7 +307,7 @@ func (q Acquirer) fetch(ctx context.Context, raw string) ([]byte, AcquisitionRec
 		return nil, rec, err
 	}
 	defer resp.Body.Close()
-	rec.FinalURL = resp.Request.URL.String()
+	rec.FinalURL = pm.redact(resp.Request.URL)
 	rec.Hops = append(rec.Hops, Hop{URL: rec.FinalURL, Address: lastAddr(), Status: resp.StatusCode})
 	for _, h := range recordedHeaders {
 		if v := resp.Header.Get(h); v != "" {
@@ -390,9 +407,22 @@ func (a *Archive) acquire(ctx context.Context, q Acquirer, rawURL string, base S
 	}
 	// The response record is written in the capture's transaction, so a
 	// capture never exists without it.
+	name := acquiredName(final, mediaType, rec.Headers["Content-Encoding"])
+	captureURL := rec.FinalURL
+	if rec.SignedRedirect {
+		// The final URL is the signed redirect with its token removed; the stable
+		// identity of the source is the URL that was asked for, and its policy
+		// names the file.
+		captureURL = rec.RequestedURL
+		if ru, perr := url.Parse(rec.RequestedURL); perr == nil {
+			if n := matchSource(ru).storedName(); n != "" && strings.HasSuffix(name, ".pdf") {
+				name = n
+			}
+		}
+	}
 	res, err := a.captureSource(ctx, SourceRequest{
-		Key: base.Key, Content: bytes.NewReader(body), OriginalName: acquiredName(final, mediaType, rec.Headers["Content-Encoding"]),
-		URL: rec.FinalURL, Supplier: base.Supplier, Title: base.Title, MediaType: stored,
+		Key: base.Key, Content: bytes.NewReader(body), OriginalName: name,
+		URL: captureURL, Supplier: base.Supplier, Title: base.Title, MediaType: stored,
 	}, rec.FetchedAt, string(download))
 	if err != nil {
 		return Result{}, rec, err

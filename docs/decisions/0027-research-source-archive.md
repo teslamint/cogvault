@@ -470,9 +470,10 @@ production. None is decided here; the worker deployment template
    hosts or suffixes with an owner who maintains it; a denylist. Also: may a
    redirect leave the allowlist.
 4. **URL shape.** Today every query and fragment is refused, because a query
-   can carry a signed URL or token. Many scholarly landing pages identify the
-   item by a query parameter, so this refuses them. Decide whether queries
-   are allowed, only on allowlisted hosts, and which parameters.
+   can carry a signed URL or token, with one audited exception (see "Audited
+   source policies"). Many scholarly landing pages identify the item by a
+   query parameter, so this refuses them. Decide whether more queries are
+   allowed, only on allowlisted hosts, and which parameters.
 5. **Volume and rate.** Today there is no cap on queued jobs, jobs per
    submitter or per day, per-host spacing, or archive disk use; the worker is
    one process and runs jobs one at a time, and `max_attempts` is the only
@@ -492,18 +493,74 @@ production. None is decided here; the worker deployment template
    re-fetch), and how long job rows and attempt records are kept (they never
    expire today).
 
-**Worked example: the BOK PDF.** The reference manifest's BOK source
-(`https://www.bok.or.kr/portal/cmmn/file/fileDown.do?atchFileId=…&fileSn=2`)
-is a public PDF. Checked live with a plain HTTP client on 2026-11-06: a 302 to a
-CDN URL whose query carries a signed `token=…~hmac=…`, then 200
-`application/pdf`, 2,744,626 bytes, SHA-256 `a7e925e7…aaca1f`, equal to the
-manifest copy. The HTTP executor refuses it twice: the first URL has a query,
-and the redirect target carries a signed token. Admitting it needs decisions 3
-and 4 together: an allowlist entry for the portal and its file CDN host, the
-parameters allowed on the first hop (`atchFileId`, `fileSn`), and a rule that
-a site-issued signed query on a redirect to an allowlisted host is acceptable.
-None of that is decided, and the SSRF rules were not relaxed to make this
-case pass.
+## Audited source policies
+
+The blanket query refusal stays. A **source policy**
+(`internal/archive/sourcepolicy.go`) is the one narrow exception: a URL shape
+that carries only public identifiers, plus the exact signed redirect it is known
+to produce. It is a code-reviewed table, not a setting or a request field. The
+only entry is the Bank of Korea public file download (the reference manifest's
+BOK source), whose exact shapes are in `SPEC.md` §9.16.
+
+**What it preserves.** Per-hop DNS with a public-address check and a connection
+to the checked address, no credentials or cookies or proxy, at most 5 redirects,
+the 32 MiB and time bounds, and `Content-Length` checking. **What it adds.** The
+first URL is matched on its raw query with a fixed-shape expression (two
+parameters, fixed order, hex and digit classes), so there is no ordering,
+duplication, or encoding slack. The signed redirect is accepted only as the
+**first** redirect and only **once**, only on `file-cdn.bok.or.kr`, only for the
+**same file** the first URL named (host, path, and the token's `acl` must agree),
+with one token of the observed shape and nothing else. Any later hop that
+carries a query is refused by the generic rule.
+
+**Token handling.** The token is a short-lived signature, so it is never stored,
+logged, or forwarded: recorded hop and final URLs show `?token=redacted`; the
+capture's URL is the first URL; `Referer` is removed on every redirect (Go sets it
+from the previous URL before the redirect check, so the signed URL would
+otherwise travel to a further hop); error text never repeats a request URL.
+
+**Evidence.**
+
+- *Tests* (`internal/archive/sourcepolicy_test.go`): the first-URL and redirect
+  shape tables (about 50 off-policy spellings refused), a local end-to-end job
+  over a plain-http copy of the policy, a scan of every stored table for the token,
+  one-signed-hop enforcement (a second signed hop and a signed hop after another
+  hop refused), other-file, extra-parameter, other-host, and first-host redirects
+  refused with the next host never contacted, the redirect limit, DNS refusals
+  for the CDN host (private, loopback, metadata, shared, mixed, and a first
+  private answer followed by a public one: one lookup per fetch), errors after
+  the signed hop (broken body, 500, timeout, length mismatch, oversize, 403) free
+  of the token, and a `Referer`-recording server. Mutation checks: allowing the
+  signed redirect on any hop, keeping `Referer`, and recording URLs unredacted
+  each make tests fail.
+- *Live, isolated local root* (2026-11-06; a container with the HTTP worker's
+  constraints; gate evidence generated locally on temporary roots; no NAS, no
+  credentials): the BOK URL was queued as an HTTP job, the worker passed the gate
+  and fetched it through the real signed redirect, and the job ended `held`: object
+  `sha256:a7e925e7…aaca1f`, 2,744,626 bytes, `application/pdf`, equal to the
+  expected copy; the recorded final URL is `…/tempFile.pdf?token=redacted`; the
+  registry contains neither `hmac` nor `token=st=`. The manual archive was not
+  read or written.
+
+**Unresolved policy (not decided here).**
+
+1. **Terms.** That the file is a public download does not mean BOK's terms or
+   robots rules allow automated collection. No review was done.
+2. **Scope of ids.** The policy admits any `atchFileId`/`fileSn` of that shape,
+   not only the fixture's. Whether to admit any public BOK attachment or a list
+   of approved ids is open; the site decides access, and no credentials are used.
+3. **Ownership.** Who approves the next source policy, and how often an existing
+   one is re-checked, is open. Today it is a code change.
+4. **Drift.** Only the shapes observed on 2026-11-06 are admitted. A change of
+   CDN host, path layout, token layout, or `fileSn` width fails closed (the job
+   ends `failed` with no bytes) until the table is updated.
+5. **Token expiry.** `exp` is not checked here; the CDN enforces it, and an expired
+   token fails as a refusal. Nothing stores a token that could be replayed.
+6. **Completeness.** The bytes equal the expected copy, but a download alone does
+   not show a document is complete or the intended edition, so the capture is
+   held with completeness `unknown`; release stays an operator `reassess`.
+7. **Exposure and rate.** A client that may submit may make the host fetch this
+   BOK file; decisions 1, 2, and 5 above still gate that. No rate limit exists.
 
 ## KCI official-browser executor
 
@@ -596,12 +653,27 @@ download endpoint, so a real click is used and no download URL is built.
    amd64 the image builds and the worker's gate works, but Chromium did not
    launch under QEMU emulation, which says nothing about a native host, so
    **Chromium on x86_64 is unverified**, as are Docker 24.0.2 and Synology
-   behavior. A non-root container without user namespaces needs
-   `--no-sandbox`, which weakens the browser. Nothing ran on the NAS.
-4. **A terms review** for automating the portal. The executor does one
-   official download per job and never crawls, but whether the portal's terms
-   allow automation is a human decision (decision 6 above).
-5. **Rate limits.** There are none beyond the per-job attempt budget
+   behavior. Nothing ran on the NAS.
+4. **`--no-sandbox` is a risk that needs an operational approval.**
+   Chromium's own documentation
+   (`docs/security/apparmor-userns-restrictions.md`) says that `--no-sandbox`
+   disables critical security features and must not be used to browse the open
+   web. This executor visits only the fixed KCI host, but that page's scripts and
+   the downloaded file are third-party content, and the article ID comes from a
+   job a client may have submitted. The compensating controls are the container
+   limits, the pinned resolver and request guard, a fresh profile per fetch, no
+   credentials, and no ports. They reduce exposure; they do not replace the
+   sandbox. Whether to accept this is a decision for the permissions owner and
+   is **not made here**; the alternative is a runtime in which Chromium's sandbox
+   works.
+5. **Permission is not availability.** The KCI FAQ (as cited above) says free
+   full text is offered where the society consented. That describes what a reader
+   may be given. It does not say that automated collection, copying, or
+   redistribution is permitted, and no terms review was done. Whether the
+   portal's terms and the societies' licenses allow this executor, and what may
+   be stored or shared, is a human decision (decision 6 above) that gates enabling
+   it. A stored KCI file stays held and is not handed to ingest on its own.
+6. **Rate limits.** There are none beyond the per-job attempt budget
    (decision 5 above).
 
 **End-to-end case that remains to be run.** Three human-verified KCI detail

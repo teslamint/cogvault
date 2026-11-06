@@ -177,13 +177,36 @@ func TestArchiveJobSubmitBrowserExecutorTakesOnlyKCIDetailPages(t *testing.T) {
 		t.Fatalf("browser job = %+v", out)
 	}
 	for name, args := range map[string]map[string]any{
-		"browser, another site":  {"url": "https://www.bok.or.kr/portal/cmmn/file/fileDown.do?atchFileId=4826d55c88464526b2c36e125afd84fd&fileSn=2", "submitter": "c", "executor": "browser"},
-		"browser, extra param":   {"url": kci + "&token=x", "submitter": "c", "executor": "browser"},
-		"http, KCI query":        {"url": kci, "submitter": "c"},
-		"http, BOK signed query": {"url": "https://www.bok.or.kr/portal/cmmn/file/fileDown.do?atchFileId=4826d55c88464526b2c36e125afd84fd&fileSn=2", "submitter": "c"},
+		"browser, another site":         {"url": "https://www.bok.or.kr/portal/cmmn/file/fileDown.do?atchFileId=4826d55c88464526b2c36e125afd84fd&fileSn=2", "submitter": "c", "executor": "browser"},
+		"browser, extra param":          {"url": kci + "&token=x", "submitter": "c", "executor": "browser"},
+		"http, KCI query":               {"url": kci, "submitter": "c"},
+		"http, BOK with an extra param": {"url": "https://www.bok.or.kr/portal/cmmn/file/fileDown.do?atchFileId=4826d55c88464526b2c36e125afd84fd&fileSn=2&token=x", "submitter": "c"},
+		"http, BOK with a token only":   {"url": "https://www.bok.or.kr/portal/cmmn/file/fileDown.do?token=st=1~exp=2~hmac=abc", "submitter": "c"},
 	} {
 		if r := callTool(t, f.srv, "archive_job_submit", args); !r.IsError {
 			t.Errorf("%s: archive_job_submit accepted %v", name, args)
 		}
+	}
+}
+
+// The one audited query URL the HTTP executor takes is the BOK file download in
+// its exact shape (sourcepolicy.go). The job stores that URL and nothing else is
+// admitted with it.
+func TestArchiveJobSubmitAdmitsTheAuditedBOKSourceOnly(t *testing.T) {
+	f := setupArchiveTools(t, true)
+	const bok = "https://www.bok.or.kr/portal/cmmn/file/fileDown.do?atchFileId=4826d55c88464526b2c36e125afd84fd&fileSn=2"
+	var out struct {
+		Job struct {
+			URL      string `json:"url"`
+			Executor string `json:"executor"`
+			State    string `json:"state"`
+		} `json:"job"`
+	}
+	toolJSON(t, callTool(t, f.srv, "archive_job_submit", map[string]any{"url": bok, "submitter": "c"}), &out)
+	if out.Job.URL != bok || out.Job.Executor != "http" || out.Job.State != "queued" {
+		t.Fatalf("BOK job = %+v", out)
+	}
+	if r := callTool(t, f.srv, "archive_job_submit", map[string]any{"url": bok, "submitter": "c", "executor": "browser"}); !r.IsError {
+		t.Fatal("the browser executor accepted the BOK URL")
 	}
 }

@@ -1361,7 +1361,8 @@ verified judgment, backup scheduling, or backup expiry.
   record of the requested and final URL, each hop's status, and selected
   response headers. Refused before any connection: non-`http(s)` URLs,
   userinfo, any query (including a bare `?`), and any fragment, on the first
-  URL and on every redirect (at most 5). Every DNS answer must be a public
+  URL and on every redirect (at most 5), except the audited source policy
+  below. Every DNS answer must be a public
   address (no loopback, private, link-local, shared, documentation,
   benchmark, multicast, reserved, NAT64, 6to4, Teredo, or cloud metadata
   ranges); the connection goes to the checked address, so a second lookup
@@ -1374,6 +1375,35 @@ verified judgment, backup scheduling, or backup expiry.
   capture's URL again and records an attempt (`acquired` with the new
   capture, `human_action_required` for access-restricted, `failed`
   otherwise); the earlier capture is not changed.
+- **Audited source policies** (`internal/archive/sourcepolicy.go`; applies to
+  `acquire`, `acquire --recover`, and HTTP jobs): the blanket refusal of every
+  query stays. A source policy is the one narrow exception: a URL shape known
+  to carry only public identifiers, and the exact signed redirect it is known
+  to produce. Adding a source is a code change that is reviewed there, never
+  a setting or a request field. The only policy is the Bank of Korea public
+  file download:
+  - **First URL**, matched on the raw query string, not by parsing parameters:
+    `https://www.bok.or.kr/portal/cmmn/file/fileDown.do?atchFileId=<32 lowercase
+    hex>&fileSn=<1 to 3 digits>`, exactly those two parameters in that order,
+    default port only, no userinfo, fragment, or encoded path. Any other spelling
+    is refused with the generic query refusal.
+  - **Signed redirect**, allowed only as the **first** redirect and only
+    **once**: `https://file-cdn.bok.or.kr/portal/<atchFileId>/<fileSn>/tempFile.pdf`
+    with exactly one query, `token=st=<digits>~exp=<digits>~acl=/portal/<atchFileId>/<fileSn>/tempFile.pdf*~hmac=<32 to 128 lowercase hex>`.
+    The host, the path, and the `acl` must name the same file as the first
+    URL. A signed URL on any other host, for another file, with another
+    parameter, on a later hop, or repeated is refused, and no later hop may
+    carry a query.
+  - **Unchanged for every hop,** this policy included: every DNS answer must be
+    public and the connection goes to the checked address (resolved once per
+    connection), no credentials, cookies, or proxy, at most 5 redirects, a
+    32 MiB body bound, the time bound, and `Content-Length` checking.
+  - **The token is never stored, logged, or sent on.** Recorded hop and final
+    URLs show `?token=redacted`; the capture's URL is the first URL; the
+    acquirer strips `Referer` on every redirect (Go sets it before the
+    redirect check, and it would carry the signed URL); error text never
+    repeats a URL. The capture is named `bok-<first 8 hex>-<fileSn>.pdf`.
+  - Stored bytes are held with completeness `unknown`, like every download.
 - **Collection jobs** (`job` CLI and the `archive_job_*` MCP tools; the
   worker `job run` is archive host only): a durable queue
   in the registry (schema 6: `jobs`, and `job_attempts`, which is
@@ -1388,8 +1418,9 @@ verified judgment, backup scheduling, or backup expiry.
     executor, edition hint, report, and claim, so the same request from any
     client returns the same job and changes nothing (the first submitter
     stays). A repeated `--key` for another URL is a conflict. The URL gets
-    the `acquire` checks (http(s); no userinfo, query, or fragment), so a
-    refused URL is never queued. `--max-attempts` is 1 to 20, default 5.
+    the `acquire` checks (http(s); no userinfo, query, or fragment; the one
+    exception is an audited source policy, see *Audited source policies*),
+    so a refused URL is never queued. `--max-attempts` is 1 to 20, default 5.
   - **States:** `queued`, `running`, `held` (bytes stored but not hand-off
     eligible), `acquired` (bytes stored with `verified` completeness),
     `failed`, `human_action_required`. The public HTTP worker ends a stored
