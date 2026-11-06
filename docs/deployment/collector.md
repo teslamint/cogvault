@@ -72,6 +72,7 @@ Importing manual bundles into a registry is a separate task (`archive capture` /
 2. The policy decisions for MCP fetch scope are made (ADR 0027, "Missing decisions for MCP fetch scope").
 3. A released image contains `archive job` (ADR 0025 release flow). No such release exists yet. Pin the image by digest in the stack once it does.
 4. The archive root is chosen and inventoried (above).
+5. The evidence directory (`EVIDENCE_DIR`) exists on the NAS host with `backups/`, `reports/`, and `replica/` already in it, and the restore test has been run **inside a container that sees the evidence at the container paths below** (see "The restore test").
 
 ## Rollout (after the preconditions)
 
@@ -79,17 +80,60 @@ Each step has an exit check. Stop at the first failed check and use the rollback
 
 **0. Back up.** With the current binary, run `archive backup --to <new dir>` on the archive root (if one already exists), and copy the NAS `config.yaml` and both compose files aside.
 
+**Mounts: one set, in both serve and the collector.** The activation check runs in both processes and reads files, so both need the evidence at the **same container paths** that `config.yaml` names:
+
+| Container path | Host source | Mode | Read by |
+|---|---|---|---|
+| `/config/config.yaml` | `${COGVAULT_DIR}/config.yaml` | ro | both (the existing serve mount already does this) |
+| `/data/archive` | `${ARCHIVE_DIR}` | rw | both |
+| `/evidence/reports` | `${EVIDENCE_DIR}/reports` | **ro** | `archive.deployment.restore_test_report` |
+| `/evidence/replica` | `${EVIDENCE_DIR}/replica` | **ro** | `archive.deployment.deletion_log_replica` |
+
+`backups/` is **not** mounted into the long-running containers: `backup_target` (`/evidence/backups`) is only compared as a path against the path recorded in the report. The collector stack already has these mounts. For serve, add these lines to the `volumes:` of the `cogvault` service in `compose.yaml` (a documented change, not applied by this PR):
+
+```
+      - ${ARCHIVE_DIR}:/data/archive
+      - ${EVIDENCE_DIR}/reports:/evidence/reports:ro
+      - ${EVIDENCE_DIR}/replica:/evidence/replica:ro
+```
+
+Use `/evidence/...` in `config.yaml` exactly as in `config.archive.example.yaml`. A different path, a typo, or a missing mount makes the check fail with a coded error, never a silent pass; the tests `TestWorkerGateReadsEvidenceFromConfiguredMountPaths` and the reload cases pin this.
+
+**The restore test.** The restore-test report records the backup path and the replica path exactly as the process that ran it saw them, and the activation check compares them to `config.yaml`. Running it on the host with host paths therefore produces a report the containers reject. Run it once, in a throwaway container with the evidence at the container paths (the archive root is opened read-write because `Open` takes the archive lock):
+
+```
+docker run --rm --user ${NAS_UID}:${NAS_GID} --read-only --tmpfs /tmp \
+  -v ${ARCHIVE_DIR}:/data/archive \
+  -v ${EVIDENCE_DIR}/backups:/evidence/backups:ro \
+  -v ${EVIDENCE_DIR}/replica:/evidence/replica:ro \
+  -v ${EVIDENCE_DIR}/reports:/evidence/reports \
+  -v <scratch dir on the NAS local disk>:/scratch \
+  ghcr.io/teslamint/cogvault:<version> \
+  archive --root /data/archive restore-test \
+    --backup /evidence/backups/<backup name> \
+    --report /evidence/reports/restore-test.json \
+    --deletion-log /evidence/replica/deletions-log.jsonl \
+    --scratch /scratch
+```
+
+`--report` must name a file that does not exist, so move an old report aside first. The command exits non-zero if the restore test fails.
+
 **1. Stage 1: archive mounted, capture off.**
-- In the serve stack add the bind mount `${ARCHIVE_DIR}:/data/archive`, and merge the stage 1 block of `config.archive.example.yaml` into `config.yaml` (`capture_enabled: false`, no `deployment`). Redeploy serve with the new image.
+- Serve: add the three mounts above and merge the stage 1 block of `config.archive.example.yaml` into `config.yaml` (`capture_enabled: false`, **no** `deployment`). Redeploy serve with the new image.
 - Check: serve starts; `tools/list` has no `archive_*` tool; the existing wiki tools work as before.
 - Deploy the collector stack (`compose.collector.yaml`, env from `env.collector.example`).
-- Check: `docker logs` shows `paused: archive capture activation blocked: capture_disabled`; the container is healthy; `ls` of the archive root shows files owned by `NAS_UID:NAS_GID`.
+- Check: `docker logs` shows `paused: archive capture activation blocked: capture_disabled`; the container is healthy; `ls` of the archive root shows files owned by `NAS_UID:NAS_GID`; `docker exec <container> ls /evidence/reports /evidence/replica` lists the report and the replica (read-only mounts present).
 
-**2. Stage 2: capture on.** Only with a human sign-off on the item 14 evidence.
-- Add the `deployment` attestations to `config.yaml` and set `capture_enabled: true`.
-- Signal serve to reload: `docker kill --signal=HUP <serve container>`. A blocked activation is rejected and logged with a code and key names only.
+**2a. Stage 2a: attestations, capture still off, serve restarted.** Only with a human sign-off on the item 14 evidence. `archive.deployment` is **restart-only**: a SIGHUP reload that changes it is rejected (`restart_only_changed`) and changes nothing.
+- Add the `deployment` block (container paths) to `config.yaml`, keep `capture_enabled: false`, then **restart serve** (redeploy or `docker restart <serve container>`).
+- Check: serve starts with the archive tools still absent; the collector logs the paused reason (`capture_disabled`). The collector re-reads the config by itself and needs no restart.
+
+**2b. Stage 2b: capture on; reload changes only `capture_enabled`.**
+- Set `archive.capture_enabled: true` and nothing else, then `docker kill --signal=HUP <serve container>`. A blocked activation is rejected and logged with a code and key names only; capture stays off, and the code says which attestation to fix.
 - Check: `tools/list` now shows the `archive_*` tools including `archive_job_submit`; within the worker poll interval the worker logs `resumed`.
 - Smoke with one operator-submitted job (public URL, no query): `docker exec <collector container> cogvault archive --root /data/archive job submit <url> --submitter operator`, then `... job status <job-id>`. Expect `held` (bytes stored, completeness `unknown`) and a `collections` entry on the capture.
+
+**The replica must stay current.** The worker re-runs the activation check on every poll, and the check requires the replica to hold every record of the live deletion log. After any quarantine, restore, or purge on the NAS, update the off-NAS replica; until it is current the worker logs `paused: ...deletion_log_replica_not_current` and claims nothing. `serve` checks only at start and on reload, so its tools stay as they are. Changing which files the attestations name (not their contents) needs a serve restart; replacing the report or replica file at the same path does not.
 
 ## Switching off, and rollback
 
@@ -107,3 +151,4 @@ The worker refuses non-public destinations in-process: every DNS answer must be 
 - No compose file here was deployed or run. The stack YAML was parsed and rendered with sample variables only; `docker compose config` was not available on the review host.
 - No run against a NAS: volume ownership, container uid, outbound path, and Portainer behavior are untested.
 - A live public download was not exercised from the build host (no outbound access for Go binaries there); the happy path is covered by local `httptest` servers.
+- The restore-test `docker run` command and the read-only evidence mounts were not run. What is tested is the activation gate itself: with real evidence (a backup, an off-root replica, and a real `restore-test` report) under mount-style paths, the gate passes, and it refuses a missing report, a missing replica, a `backup_target` at another path, and a replica at another path (`TestWorkerGateReadsEvidenceFromConfiguredMountPaths`). That `archive.deployment` is restart-only on reload is pinned by a reload test.

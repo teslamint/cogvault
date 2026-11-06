@@ -137,6 +137,14 @@ func TestArchiveReloadRejectionsKeepStateAndLogNoValues(t *testing.T) {
 			f.writeConfig(t, true, "")
 		}},
 		{name: "production activation", wantCode: "deployment_settings_missing", wantKey: "archive.deployment.backup_target", enabled: true, activation: productionActivation},
+		// archive.deployment is restart-only: adding the attestations and enabling
+		// capture in one reload is rejected, so an operator restarts serve with
+		// capture off first and reloads only capture_enabled afterwards.
+		{name: "restart-only deployment", wantCode: "restart_only_changed", wantKey: "archive.deployment", enabled: true, edit: func(f *archiveServeFixture) {
+			body := "wiki_dir: " + f.wikiDir + "\ndb_path: " + f.dbPath + "\nadapter: obsidian\narchive:\n  root: " + f.archiveRoot +
+				"\n  capture_enabled: true\n  deployment:\n    backup_target: /evidence/backups\n    backup_schedule: daily\n    restore_test_report: /evidence/reports/r.json\n    permissions_owner: o\n    handoff_mount: m\n    deletion_log_replica: /evidence/replica/log.jsonl\n"
+			os.WriteFile(f.configPath, []byte(body), 0o600)
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

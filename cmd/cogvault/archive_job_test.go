@@ -238,3 +238,115 @@ func TestJobRunWithUnprovenDeploymentClaimsNothing(t *testing.T) {
 		t.Fatalf("a blocked worker touched the job: %+v", after)
 	}
 }
+
+func writeDeploymentConfig(t *testing.T, base, root, backupTarget, report, replica string) string {
+	t.Helper()
+	wiki := filepath.Join(base, "wiki")
+	if err := os.MkdirAll(wiki, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(base, "config.yaml")
+	body := "wiki_dir: " + wiki + "\ndb_path: " + filepath.Join(base, "index.db") + "\nadapter: obsidian\narchive:\n  root: " + root +
+		"\n  capture_enabled: true\n  deployment:\n    backup_target: " + backupTarget + "\n    backup_schedule: daily\n    restore_test_report: " + report +
+		"\n    permissions_owner: operator\n    handoff_mount: hm\n    deletion_log_replica: " + replica + "\n"
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// The gate reads the restore-test report and the deletion-log replica from
+// the paths in archive.deployment, and compares the report's recorded backup
+// and replica paths to the same config. So a container that mounts the
+// evidence at different paths than the restore test saw, or does not mount a
+// file at all, stays blocked. The layout mirrors the rollout: backups/ is the
+// backup target (never mounted into the long-running containers; only
+// compared as a path), reports/ and replica/ are the read-only mounts.
+func TestWorkerGateReadsEvidenceFromConfiguredMountPaths(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "archive")
+	ev := filepath.Join(base, "evidence")
+	for _, d := range []string{"backups", "reports", "replica"} {
+		if err := os.MkdirAll(filepath.Join(ev, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a, err := archive.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	res, err := a.CaptureSource(ctx, archive.SourceRequest{Content: strings.NewReader("evidence fixture"), OriginalName: "e.md"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	im, _ := a.ImpactOf(ctx, res.ObjectID)
+	if err := a.Quarantine(ctx, res.ObjectID, im.Digest); err != nil { // a non-empty deletion log
+		t.Fatal(err)
+	}
+	a.Close()
+
+	backup := filepath.Join(ev, "backups", "b1")
+	b, err := archive.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Backup(ctx, backup); err != nil {
+		t.Fatal(err)
+	}
+	b.Close()
+	live, err := os.ReadFile(filepath.Join(root, "deletions", "log.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	replica := filepath.Join(ev, "replica", "deletions-log.jsonl")
+	if err := os.WriteFile(replica, live, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	report := filepath.Join(ev, "reports", "restore-test.json")
+	if _, _, err := executeCommand("archive", "--root", root, "restore-test", "--backup", backup, "--report", report, "--deletion-log", replica, "--scratch", t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+
+	target := filepath.Join(ev, "backups")
+	allowed := func(cfg string) error { return workerAllowed(cfg, root, productionActivation) }
+	if err := allowed(writeDeploymentConfig(t, base, root, target, report, replica)); err != nil {
+		t.Fatalf("evidence at the configured paths was refused: %v", err)
+	}
+
+	cases := []struct {
+		name, target, report, replica, want string
+	}{
+		{"report not mounted", target, filepath.Join(base, "unmounted", "restore-test.json"), replica, "restore_test_not_passed"},
+		{"replica not mounted", target, report, filepath.Join(base, "unmounted", "log.jsonl"), "deletion_log_replica_not_current"},
+		// The restore test saw the backup under evidence/backups; a config whose
+		// backup_target is another path (host path versus container path) is refused.
+		{"backup_target at another path", filepath.Join(base, "elsewhere"), report, replica, "restore_report_not_for_backup_target"},
+		// The report names the replica it used by path; a config that points at a
+		// copy mounted at another path is refused even though that copy is current.
+		{"replica at another path", target, report, copyTo(t, replica, filepath.Join(base, "other-mount", "log.jsonl")), "restore_report_without_replica"},
+	}
+	for _, tc := range cases {
+		err := allowed(writeDeploymentConfig(t, base, root, tc.target, tc.report, tc.replica))
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want %s", tc.name, err, tc.want)
+		} else if strings.Contains(err.Error(), base) {
+			t.Errorf("%s: the refusal exposes a path: %v", tc.name, err)
+		}
+	}
+}
+
+func copyTo(t *testing.T, from, to string) string {
+	t.Helper()
+	data, err := os.ReadFile(from)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(to), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(to, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return to
+}

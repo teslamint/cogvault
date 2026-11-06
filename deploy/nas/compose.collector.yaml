@@ -17,7 +17,8 @@
 # resumes within --poll when the config changes, with no restart.
 #
 # Required .env (see env.collector.example): COGVAULT_VERSION (an image that
-# contains `archive job`), NAS_UID, NAS_GID, COGVAULT_DIR, ARCHIVE_DIR.
+# contains `archive job`), NAS_UID, NAS_GID, COGVAULT_DIR, ARCHIVE_DIR,
+# EVIDENCE_DIR.
 services:
   cogvault-collector:
     image: ghcr.io/teslamint/cogvault:${COGVAULT_VERSION:?set COGVAULT_VERSION in .env to a release that contains archive job}
@@ -38,6 +39,14 @@ services:
       # from the config and writes only the archive root.
       - ${COGVAULT_DIR:?set COGVAULT_DIR in .env}/config.yaml:/config/config.yaml:ro
       - ${ARCHIVE_DIR:?set ARCHIVE_DIR in .env to a dedicated, inventoried archive root on the NAS local disk}:/data/archive
+      # ADR 0027 item 14 evidence, READ-ONLY, at the SAME container paths as in
+      # the serve stack and in config.yaml (archive.deployment). The activation
+      # check reads the restore-test report and the deletion-log replica from
+      # these paths and compares the paths recorded in the report to the config,
+      # so a different path, or a missing mount, keeps the worker paused.
+      # backups/ is not mounted: backup_target is compared as a path only.
+      - ${EVIDENCE_DIR:?set EVIDENCE_DIR in .env to the directory holding reports/ and replica/}/reports:/evidence/reports:ro
+      - ${EVIDENCE_DIR}/replica:/evidence/replica:ro
     # No published ports and no inbound listener. The worker only dials out.
     read_only: true
     tmpfs:
