@@ -952,6 +952,42 @@ SIGHUP reload. `serveListener` runs reloads on one worker, cancels its
 context on shutdown, and waits for it before returning, so `runServe` closes
 the archive only after the last reload ends.
 
+### 2.14a trial (no-backup public-PDF collector, ADR 0028)
+
+`internal/trial` and `cmd/cogvault-trial` are a second, narrower runner of the HTTP
+collector, built so that it cannot be mistaken for production capture. It is a
+separate binary (Dockerfile target `trial`) that links `internal/archive` and
+`internal/version` and nothing else of the application: not `ingest`, `mcp`,
+`storage`, `index`, `adapter`, `config`, or `archivegate`, which is where the
+item 14 activation check lives. A package test lists the dependencies and fails if
+any of them appears. Its worker loop is its own (`Service.Loop`), not
+`archivegate.RunLoop`, so the production gate code is not in the binary at all.
+
+`config.go` builds a `Config` from `COGVAULT_TRIAL_*` environment variables, so the
+worker and a `docker exec` command in one container read one policy. Validation is
+strict: an unknown `COGVAULT_TRIAL_*` name, a wrong acceptance sentence, a host that
+is not a lowercase DNS name, or a value over a hard cap is refused, and the error
+names the setting and the class of problem, never the value. `root.go` is the root
+guard: it resolves real paths, refuses a symbolic-link root, any overlap (equal,
+inside, or containing) with the built-in or configured protected paths, any parent
+directory that holds production artifacts (`registry.db`, `archive.lock`, `objects`,
+`.cogvault.db`, `config.yaml`, `_wiki`, `.obsidian`), and a root that has content but
+no trial marker; an empty or new root gets the marker (`O_EXCL`). `check` runs it
+without creating anything.
+
+`service.go` enforces the policy where it cannot be bypassed. The `archive.Acquirer`
+gained two hooks, `AllowHost` (asked for the first URL and for every redirect before
+a request to it, refusal is `ErrHostNotAllowed`) and `PDFOnly` (`ErrNotPDF`, before
+anything is stored); production callers leave both unset, so their behavior is
+unchanged. `RunOnce` checks the request budget (`Archive.JobActivity`, counted from
+the registry, so it survives a restart), claims one http job, checks the claimed job
+against the policy (`refuse`), and only then calls `Archive.RunClaimedJob`, the second
+half of `RunNextJob`, with the policy-bound Acquirer. A job that fails the policy is
+completed as failed with a fixed reason and nothing is sent. There is no delete path:
+`Loop` and the commands only create the marker and the `PAUSE` file and write through
+the archive's own capture and job code. The loop logs a pause, a wait, and a worker
+error once per change, keeps polling, and never exits for them.
+
 ---
 
 ## 3. Data flow

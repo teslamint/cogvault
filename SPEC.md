@@ -1562,6 +1562,60 @@ verified judgment, backup scheduling, or backup expiry.
       and `CompleteJob(id, owner, attempt, outcome)` under the attempt-number
       fence are all a worker needs; `RunNextBrowserJob` is the browser
       worker's runner and takes a `BrowserDriver`.
+  - **No-backup public-PDF trial** (`cogvault-trial`, `internal/trial`, ADR
+    0028). A separate binary and policy, **not** a way past the item 14
+    activation gate, which is unchanged: `cogvault archive job run`, `serve`,
+    and `cogvault-kci` still run only behind it, and the trial binary never calls
+    it. The trial exists because the operator accepted, in writing, that it has
+    no backup and that its originals and job history are lost if the NAS fails.
+    - **Policy, from the environment** (`COGVAULT_TRIAL_*`, read by the worker
+      and by a command run with `docker exec` in the same container; an unknown
+      `COGVAULT_TRIAL_*` name is refused): `ACK` must equal the acceptance
+      sentence exactly, `ACCEPTED_BY` is required, `ALLOWED_HOSTS` lists exact
+      lowercase DNS names (no address, wildcard, scheme, or port; at most 10),
+      and the limits have defaults and hard caps the program enforces: queued
+      jobs 10 (cap 50), submissions per day 20 (100), requests per hour 20 (60),
+      requests per day 60 (200), minimum interval 10 s (at least 2 s), attempts
+      3 (5), body 32 MiB (cap 32 MiB). A refused setting names the setting and the
+      class of the problem, never the value.
+    - **Own root and registry.** The root (default `/trial/data`) must be an
+      absolute clean path at least two levels deep, not a symbolic link, and must
+      not overlap, contain, or sit inside a protected path (built in:
+      `/volume1/docker/cogvault`, `/data`, `/config`, `/evidence`; extra ones in
+      `FORBIDDEN_PATHS`; compared by real path), and no parent directory may hold
+      a `registry.db`, `archive.lock`, `objects`, `.cogvault.db`, `config.yaml`,
+      `_wiki`, or `.obsidian`. A root that has content must carry the trial
+      marker `.cogvault-trial.json` (mode `no-backup-trial`); an empty or new root
+      gets one. Any other root is refused at start and by every command, before
+      anything is written. A Docker named volume is the default storage.
+    - **What it fetches.** Only `https` URLs on an allowlisted host, no userinfo
+      or non-default port, at most 2048 characters, checked at submit, again for
+      **every job the worker claims** (so a job queued by `archive job submit` on
+      the same root cannot widen the policy: it is ended as failed with "nothing
+      was sent"), and for every redirect (a redirect off the list is refused
+      before any request to it). Only a body starting `%PDF-` is stored, held
+      with completeness `unknown`; the stored attempt records the response
+      (final URL, status, headers, size, fetch time) and the object's SHA-256.
+      A changed upstream file is not an error: the digest and response are
+      recorded for comparison. The public-address rule, the checked-address dial,
+      the redirect limit, and the time bound of `acquire` are unchanged. Executor
+      `browser` jobs are never claimed; there is no login, KCI, or restricted
+      access path.
+    - **Request budget** is counted from the registry (so it survives a restart
+      and does not depend on how a job was queued) and checked **before** each
+      claim: requests in the last hour and in the last 24 hours, and the minimum
+      time since the last try. Submission also refuses a full queue or the daily
+      submission limit. A refused-by-policy job counts as a try.
+    - **Control.** `check` (validates; creates nothing), `submit URL`, `status
+      [JOB_ID]` (a job, or the budget in use), `run [--once]` (the worker),
+      `pause` and `resume` (create or remove a `PAUSE` file in the root; a paused
+      worker stays up and logs once), `version`. A stop signal abandons a
+      download in progress without a record and its lease expiry resumes the job
+      after a restart. There is **no delete or cleanup command**; removing a trial
+      root is a manual step (`docs/deployment/trial.md`). The binary links neither
+      the ingest pipeline, the MCP server, the wiki storage, the index, nor the
+      production gate (a test checks this), so a trial capture is never handed
+      to ingest. The trial opens no inbound port.
   - **Transports.** Two, over one queue. The `job` CLI runs on the archive
     host. The MCP tools `archive_job_submit`, `archive_job_status`, and
     `archive_job_retry` let a chat client on another machine queue a URL and

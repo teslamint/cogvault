@@ -1,0 +1,73 @@
+# Stack template (NOT applied): the no-backup public-PDF collector trial.
+# Policy and design: docs/decisions/0028-no-backup-public-pdf-trial.md.
+# Deployment steps and checks: docs/deployment/trial.md.
+#
+# This is a SEPARATE Portainer stack. It does not change the existing cogvault
+# stack, its config, its archive or wiki, its credentials, or its ports, and it
+# does not use the ADR 0027 production gate (cogvault-trial never calls it).
+#
+# What it is: one worker container that fetches public https PDFs from an exact
+# host allowlist, within fixed request limits, into its OWN root and registry in
+# a dedicated Docker named volume. Nothing reads that volume but this stack. No
+# backup exists: if the NAS fails, the trial's originals and job history are
+# lost, and the operator accepted that by setting COGVAULT_TRIAL_ACK below.
+#
+# Submit and read from Portainer's container console, or `docker exec`:
+#   cogvault-trial submit https://www.rfc-editor.org/rfc/rfc9110.pdf
+#   cogvault-trial status [JOB_ID]
+# (the command sees this container's environment, so it applies the same policy
+# as the worker; the worker re-checks every job before it sends anything).
+#
+# Compose features used: services, environment, volumes (named), read_only,
+# tmpfs, cap_drop, security_opt, mem_limit, cpus, pids_limit, restart,
+# stop_grace_period. No build, no ports, no networks, no secrets, no configs.
+
+services:
+  cogvault-trial:
+    image: ${COGVAULT_TRIAL_IMAGE:?set COGVAULT_TRIAL_IMAGE in the stack env to the trial image, pinned by digest (name@sha256:...) or the tag of the image you imported}
+    container_name: cogvault-trial
+    # The image runs as uid 1000 and owns /trial/data. Do not set `user:` here: a
+    # named volume gets its owner from the image on first use.
+    command: ["run"]
+    restart: unless-stopped
+    environment:
+      HOME: /tmp
+      COGVAULT_TRIAL_ROOT: /trial/data
+      # The explicit act of accepting that there is no backup: paste the sentence
+      # from docs/deployment/trial.md (or env.trial.example) into the stack env.
+      COGVAULT_TRIAL_ACK: ${COGVAULT_TRIAL_ACK:?set COGVAULT_TRIAL_ACK to the acceptance sentence}
+      COGVAULT_TRIAL_ACCEPTED_BY: ${COGVAULT_TRIAL_ACCEPTED_BY:?set COGVAULT_TRIAL_ACCEPTED_BY to who accepted it and the date}
+      # Exact host names only (no wildcard, no address, no port).
+      COGVAULT_TRIAL_ALLOWED_HOSTS: ${COGVAULT_TRIAL_ALLOWED_HOSTS:-www.rfc-editor.org}
+      COGVAULT_TRIAL_MAX_QUEUED: ${COGVAULT_TRIAL_MAX_QUEUED:-10}
+      COGVAULT_TRIAL_MAX_SUBMITS_PER_DAY: ${COGVAULT_TRIAL_MAX_SUBMITS_PER_DAY:-20}
+      COGVAULT_TRIAL_MAX_FETCHES_PER_HOUR: ${COGVAULT_TRIAL_MAX_FETCHES_PER_HOUR:-20}
+      COGVAULT_TRIAL_MAX_FETCHES_PER_DAY: ${COGVAULT_TRIAL_MAX_FETCHES_PER_DAY:-60}
+      COGVAULT_TRIAL_MIN_INTERVAL: ${COGVAULT_TRIAL_MIN_INTERVAL:-10s}
+      COGVAULT_TRIAL_MAX_ATTEMPTS: ${COGVAULT_TRIAL_MAX_ATTEMPTS:-3}
+    volumes:
+      # A dedicated named volume: its data lives under the Docker root directory,
+      # physically apart from the production install directory
+      # (/volume1/docker/cogvault). To use a host directory instead, replace this
+      # line with ${COGVAULT_TRIAL_DIR}:/trial where COGVAULT_TRIAL_DIR is a NEW,
+      # EMPTY directory outside /volume1/docker/cogvault owned by uid 1000. The
+      # worker refuses a root that overlaps a protected path or is not an empty or
+      # marked trial root.
+      - cogvault-trial-data:/trial
+    # No published ports and no inbound listener. The worker only dials out.
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    cpus: "0.5"
+    pids_limit: 64
+    # A stop abandons a download in progress without a record; its lease expires
+    # and the next start resumes the job. Nothing is deleted.
+    stop_grace_period: 20s
+
+volumes:
+  cogvault-trial-data:
+    name: cogvault-trial-data

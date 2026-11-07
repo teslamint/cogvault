@@ -31,6 +31,13 @@ func (a *Archive) RunNextJob(ctx context.Context, q Acquirer, owner string, leas
 	if err != nil || job == nil {
 		return nil, err
 	}
+	return a.RunClaimedJob(ctx, q, job, owner)
+}
+
+// RunClaimedJob runs a job this worker has already claimed, which lets a caller
+// inspect the job (its URL, executor, attempt budget) between the claim and the
+// first request, and refuse it with CompleteJob before anything is sent.
+func (a *Archive) RunClaimedJob(ctx context.Context, q Acquirer, job *Job, owner string) (*Job, error) {
 	// The capture and the job's completion are written in one transaction,
 	// behind the lease check: a try whose lease was reclaimed while it
 	// downloaded stores nothing and returns ErrLeaseLost.
@@ -83,6 +90,10 @@ func classifyAcquire(res Result, rec AcquisitionRecord, err error) JobOutcome {
 		out.Detail = fmt.Sprintf("access restricted (HTTP %d or similar); a person must obtain an authorized copy, the collector never uses credentials", accessStatus(rec))
 	case errors.Is(err, ErrBlockedAddress):
 		out.State, out.Detail = JobFailed, "destination is not a public address"
+	case errors.Is(err, ErrHostNotAllowed):
+		out.State, out.Detail = JobFailed, "a host is not on the allowed list (the first URL or a redirect); nothing was sent to it"
+	case errors.Is(err, ErrNotPDF):
+		out.State, out.Detail = JobFailed, "the response is not a PDF"
 	case errors.Is(err, ErrInvalid):
 		out.State, out.Detail = JobFailed, "the URL or a redirect was refused (scheme, credentials, query, or fragment)"
 	case errors.Is(err, ErrTooLarge):

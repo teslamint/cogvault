@@ -40,6 +40,34 @@ ENV HOME=/tmp
 ENTRYPOINT ["/usr/local/bin/cogvault-kci"]
 COPY --from=build-kci /out/cogvault-kci /usr/local/bin/cogvault-kci
 
+# ---- Target "trial": the no-backup public-PDF trial (ADR 0028). Build it
+# explicitly: docker build --target trial .  It holds only cogvault-trial, which
+# links neither the ingest pipeline, the MCP server, nor the production gate.
+# /trial/data is created here, owned by the runtime user, so a Docker named
+# volume mounted at /trial starts with the right owner (an empty named volume
+# copies the image directory's content and ownership on first use).
+FROM build AS build-trial
+ARG TARGETOS TARGETARCH
+ARG VERSION=dev
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -trimpath \
+    -ldflags "-s -w -X github.com/teslamint/cogvault/internal/version.injected=${VERSION}" \
+    -o /out/cogvault-trial ./cmd/cogvault-trial
+
+FROM alpine:3.22@sha256:bfe7ceb9f09ec0566c48fb93356e45a47a00be5a1dd14fa5b909e7709c66b034 AS trial
+LABEL org.opencontainers.image.title="cogvault-trial" \
+      org.opencontainers.image.description="No-backup public-PDF collector trial (ADR 0028). Own root and registry; https allowlist only; no ingest."
+RUN apk add --no-cache ca-certificates tzdata \
+    && adduser -D -u 1000 cogvault \
+    && mkdir -p /trial/data \
+    && chown -R 1000:1000 /trial
+USER cogvault
+WORKDIR /trial
+ENV HOME=/tmp
+ENTRYPOINT ["/usr/local/bin/cogvault-trial"]
+CMD ["run"]
+COPY --from=build-trial /out/cogvault-trial /usr/local/bin/cogvault-trial
+
 # git: wiki_delete (and opt-in git.auto_commit) shell out to it.
 FROM alpine:3.22
 RUN apk add --no-cache ca-certificates git tzdata \

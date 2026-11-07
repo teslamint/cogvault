@@ -634,3 +634,49 @@ func (a *Archive) collections(ctx context.Context, captureID string) ([]Collecti
 	}
 	return out, rows.Err()
 }
+
+// JobActivity is what the queue did since a time. A worker's request budget and
+// a submitter's quota are counted from it, so they survive a restart and do not
+// depend on who queued a job.
+type JobActivity struct {
+	// Active is the jobs waiting or running now (not limited by since).
+	Active int
+	// Created is the jobs created at or after since.
+	Created int
+	// Fetches is the tries started at or after since: recorded attempts
+	// (including those whose lease expired) and jobs running now.
+	Fetches int
+	// LastStart is the start time of the latest try at or after since, or the
+	// zero time when there is none.
+	LastStart time.Time
+}
+
+// JobActivity counts queue activity at or after since.
+func (a *Archive) JobActivity(ctx context.Context, since time.Time) (JobActivity, error) {
+	var out JobActivity
+	s := jobTime(since)
+	if err := a.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM jobs WHERE state IN ('queued','running')`).Scan(&out.Active); err != nil {
+		return out, err
+	}
+	if err := a.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM jobs WHERE created_at >= ?`, s).Scan(&out.Created); err != nil {
+		return out, err
+	}
+	var attempts, running int
+	var lastAttempt, lastRunning sql.NullString
+	if err := a.db.QueryRowContext(ctx, `SELECT COUNT(*), MAX(started_at) FROM job_attempts WHERE started_at >= ?`, s).Scan(&attempts, &lastAttempt); err != nil {
+		return out, err
+	}
+	if err := a.db.QueryRowContext(ctx, `SELECT COUNT(*), MAX(started_at) FROM jobs WHERE state = 'running' AND started_at >= ?`, s).Scan(&running, &lastRunning); err != nil {
+		return out, err
+	}
+	out.Fetches = attempts + running
+	for _, v := range []sql.NullString{lastAttempt, lastRunning} {
+		if !v.Valid || v.String == "" {
+			continue
+		}
+		if t, err := time.Parse(jobTimeLayout, v.String); err == nil && t.After(out.LastStart) {
+			out.LastStart = t
+		}
+	}
+	return out, nil
+}

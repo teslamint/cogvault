@@ -154,6 +154,8 @@ Importing manual bundles into a registry is a separate task (`archive capture` /
 |---|---|
 | Unit and package tests; isolated containers **on a development Mac** on temporary roots (this document's "Rehearsal" and "Validation record"); static checks of the amd64 image | Any run on the live NAS or Portainer, including a temporary stack; real credentials or the live config; enabling capture; publishing an image; a live request to KCI beyond the one recorded download |
 
+**The one exception is the explicitly approved no-backup trial (ADR 0028, `docs/deployment/trial.md`)**: a separate binary, stack, root, and registry for public https PDFs on an exact allowlist, which does not use or satisfy the item 14 gate. It is also not deployed or applied; its own document lists what may be run and what was verified. The rest of this document (the production worker and the KCI worker) is unchanged and still blocked.
+
 Decisions a human must make before the template can be used (each needs an ADR, or an update of ADR 0027 that supersedes the item it changes):
 
 1. **Durability policy (item 14).** Pay for and run an off-NAS backup, replica, and restore test, **or** write a new ADR that replaces item 14 with a cheaper policy and says what loss is accepted. Without one of these the worker stays paused.

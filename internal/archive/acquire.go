@@ -59,6 +59,12 @@ var (
 	// ErrStore is a downloaded file that could not be stored (disk, registry,
 	// permissions): the download itself worked, so it is not a network fault.
 	ErrStore = errors.New("the downloaded file could not be stored")
+	// ErrHostNotAllowed is a request to a host the Acquirer's AllowHost refuses,
+	// on the first URL or on a redirect. Nothing is sent to that host.
+	ErrHostNotAllowed = errors.New("host is not on the allowed list")
+	// ErrNotPDF is a body that does not start with the PDF header, refused by an
+	// Acquirer with PDFOnly before anything is stored.
+	ErrNotPDF = errors.New("the response is not a PDF")
 )
 
 // scrubbedError is a transport or parser error reduced to a fixed message. The
@@ -166,6 +172,12 @@ type Acquirer struct {
 	Timeout  time.Duration
 	MaxBytes int64
 	Now      func() time.Time
+	// AllowHost, when set, is asked for the lowercase host of the first URL and
+	// of every redirect before any request to it; false refuses with
+	// ErrHostNotAllowed. It narrows the public-address rule, never widens it.
+	AllowHost func(host string) bool
+	// PDFOnly refuses a body that does not start with "%PDF-" (ErrNotPDF).
+	PDFOnly bool
 }
 
 // Hop is one request in an acquisition: its URL, the checked address the
@@ -283,6 +295,9 @@ func (q Acquirer) fetch(ctx context.Context, raw string) ([]byte, AcquisitionRec
 	if err != nil {
 		return nil, rec, err
 	}
+	if q.AllowHost != nil && !q.AllowHost(strings.ToLower(u.Hostname())) {
+		return nil, rec, fmt.Errorf("%w: the first URL", ErrHostNotAllowed)
+	}
 	rec.RequestedURL = u.String()
 	if pm != nil {
 		rec.RequestedURL = pm.first
@@ -327,6 +342,9 @@ func (q Acquirer) fetch(ctx context.Context, raw string) ([]byte, AcquisitionRec
 			// (len(via) == 1) and only once (SignedRedirect not yet set); every
 			// other hop takes the generic checks, which refuse any query, so a
 			// token can be neither repeated nor passed on a further hop.
+			if q.AllowHost != nil && !q.AllowHost(strings.ToLower(req.URL.Hostname())) {
+				return fmt.Errorf("%w: a redirect", ErrHostNotAllowed)
+			}
 			if len(via) == 1 && !rec.SignedRedirect && pm.matchRedirect(req.URL) {
 				rec.SignedRedirect = true
 			} else if err := checkAcquireURL(req.URL); err != nil {
@@ -354,7 +372,7 @@ func (q Acquirer) fetch(ctx context.Context, raw string) ([]byte, AcquisitionRec
 		if errors.As(err, &ue) {
 			err = ue.Err
 		}
-		if !errors.Is(err, ErrBlockedAddress) && !errors.Is(err, ErrInvalid) && !errors.Is(err, ErrRemote) && !errors.Is(err, ErrAccessRestricted) && !errors.Is(err, ErrTooLarge) {
+		if !errors.Is(err, ErrBlockedAddress) && !errors.Is(err, ErrInvalid) && !errors.Is(err, ErrRemote) && !errors.Is(err, ErrAccessRestricted) && !errors.Is(err, ErrTooLarge) && !errors.Is(err, ErrHostNotAllowed) {
 			err = &scrubbedError{err}
 		}
 		return nil, rec, err
@@ -383,6 +401,9 @@ func (q Acquirer) fetch(ctx context.Context, raw string) ([]byte, AcquisitionRec
 	}
 	if resp.ContentLength >= 0 && resp.ContentLength != int64(len(body)) {
 		return nil, rec, fmt.Errorf("%w: got %d bytes, Content-Length says %d", ErrRemote, len(body), resp.ContentLength)
+	}
+	if q.PDFOnly && !bytes.HasPrefix(body, []byte("%PDF-")) {
+		return nil, rec, ErrNotPDF
 	}
 	rec.Size = int64(len(body))
 	return body, rec, nil

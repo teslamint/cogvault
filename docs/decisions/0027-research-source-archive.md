@@ -331,6 +331,13 @@ are listed separately.
     wiki, NAS, configuration, or credentials) are allowed before these
     settings exist.
 
+    **A separate, explicitly approved no-backup trial exists (ADR 0028).** It runs
+    a different binary (`cogvault-trial`) on its own root and registry, collects
+    public https PDFs from an exact allowlist within fixed limits, and is not
+    connected to ingest, the wiki, or the production archive. It neither amends nor
+    satisfies this item: the gate above stays closed for production capture, and
+    nothing from the trial counts as evidence for it.
+
 ## Prototype status
 
 Implemented on branch `proto/research-archive` (PR #59), not deployed:
