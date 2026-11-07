@@ -39,8 +39,8 @@ Add a separate, narrower way to run the HTTP collector, and keep item 14 as it i
    `/volume1/docker/cogvault`). It must not overlap, contain, or sit inside a
    protected path, and must be empty or carry a trial marker; otherwise the program
    refuses to start and every command refuses before it writes. Nothing the trial
-   writes is read by the MCP server, the ingest pipeline, or the wiki, and the binary
-   links none of them (a test checks the dependency list).
+   writes is read by the production MCP server, the ingest pipeline, or the wiki, and the binary
+   links none of those packages (a test checks the dependency list).
 3. **Explicit acceptance.** The program starts only when `COGVAULT_TRIAL_ACK` equals the
    acceptance sentence exactly and `COGVAULT_TRIAL_ACCEPTED_BY` names who accepted it
    and when. The acceptance is recorded in the root's marker.
@@ -68,8 +68,9 @@ Add a separate, narrower way to run the HTTP collector, and keep item 14 as it i
    command and no automatic cleanup**; removing a trial root is a documented manual
    step. A stop abandons a download in progress without a record, and the lease expiry
    resumes it.
-8. **No new inbound surface.** The trial opens no port. Submission and reads run through
-   the container's console or `docker exec`.
+8. **Original deployment has no inbound surface.** The deployed worker opens no port.
+   Submission and reads run through the container's console or `docker exec`.
+   The software-only MCP addendum below does not deploy an inbound route.
 
 ## Why
 
@@ -111,7 +112,7 @@ Add a separate, narrower way to run the HTTP collector, and keep item 14 as it i
   archive.
 - **Reuse the production archive root with a separate registry file.** One typo away from
   mixing; the marker and overlap rules exist to prevent exactly this.
-- **Ship it as a feature of the MCP server.** That adds an inbound path and a link to the
+- **Ship it as a feature of the production MCP server.** That adds an inbound path and a link to the
   ingest-facing code.
 - **A `cleanup` command.** A destructive command on a store that holds the only copy of the
   trial's history is more risk than the trial needs; cleanup is manual and explicit.
@@ -146,3 +147,84 @@ feature; removing that one setting allowed the stack to start. The RFC 9110 PDF
 was fetched once and held with a verified SHA-256 and one attempt, and the same
 record survived a stack stop/start and image redeployment. The complete run record
 is in `docs/deployment/trial.md`. The production gate remains closed.
+
+
+## Trial chat MCP software addendum (2026-11-07 UTC)
+
+This records the initial two-tool surface; the selected-source software addendum
+below supersedes only its tool inventory and report capabilities. Subsequent
+live endpoint/client evidence is in the deployment guide.
+
+The user explicitly approved proceeding with a submission/status-only MCP
+connection for ChatGPT and Claude, with separate confirmation if new
+authorization or external access settings are needed. This approval covers the
+narrow software surface, not new credentials, grants, client registrations,
+network routes, deployment or production modifications.
+
+`internal/trialmcp` and explicit `cogvault-trial serve` expose exactly
+`trial_submit(url)` and `trial_status(job_id?)`. They never import the production
+MCP/config/wiki/ingest packages. Submission uses `trial.Service.Submit`; the worker
+still independently enforces every request policy and budget. Status is a
+sanitized bounded projection, with no raw archive records, response headers,
+paths, worker identity or arbitrary error text. No retry, pause/resume, deletion,
+download, shell, Docker or Portainer surface is introduced.
+
+Stdio is the default. Optional Streamable HTTP is authenticated even on loopback,
+with an explicit pathless public HTTPS URL, a validated exact endpoint path
+(default `/mcp`), bounded bodies and Origin checks. Existing `internal/httpauth`
+supports bearer or OAuth; OAuth requires a distinct trial audience and required
+scopes. This permits reusing authentication software, not production resource
+authorization. Existing worker/container defaults remain unchanged.
+
+The deployed scope remains only `www.rfc-editor.org`, two queued jobs, two
+submissions/day, one fetch/hour, two fetches/day, 30 seconds between attempts,
+and two attempts maximum. Repository trial templates match those recorded
+limits; generic program defaults and hard caps are not deployment permission.
+No trial HTTP route or working ChatGPT/Claude integration is established by this
+change. The isolated no-backup root/volume and closed production gate remain.
+
+## Selected-source report software addendum
+
+The trial can test source preservation for a completed research report without
+opening production. Its local software adds strict selected-source manifest
+import, report/source linkage, per-capture status, and operator-only existing-file
+import. Report bodies, raw research JSON, activity logs and arbitrary remote file
+paths are excluded. Source completeness is per capture, not per citation/source:
+a partial HTML abstract remains partial beside a later PDF.
+
+The MCP inventory is four tools: `trial_submit`, `trial_status`,
+`trial_import_manifest`, `trial_report_status`. Import/status use the existing
+trial-only authentication boundary; this design adds no Auth0 scope, client,
+tunnel route, production permission or background acquisition. The local CLI,
+not MCP, can read an explicitly selected file after exact size/hash checks.
+Actual file transfers and deployment are separate authorized actions.
+
+The old RFC/PDF-only acquisition defaults and persisted attempt budgets remain.
+Operator-controlled exact initial/redirect URL lists can narrow requests; report
+manifests never grant network authority. PDF+HTML must be explicitly enabled for
+network collection. Robots and terms checks remain a manual prerequisite; no
+claim of automatic compliance is made. Restricted access and recognizable HTML
+challenges stop. Trial HTTP 429 stops for operator attention rather than ignoring
+Retry-After with automatic backoff. The production collector's defaults remain.
+
+The historical request limits actually count job attempts, including refused
+claims. This addendum makes that unit visible without resetting the ledger.
+An attempt has a configurable 0..5 redirect bound, default 5, so it sends at most
+1 + the bound HTTP requests. Legacy request-counter field names remain aliases;
+new attempt fields and the per-attempt HTTP upper bound state the real limit.
+
+Metadata growth is bounded independently of fetch budgets: ten immutable
+manifests, each at most 8 KiB and five sources, and five imported captures per
+source (each at most 32 MiB). Identical registrations are idempotent. Cross-process
+admission locks serialize checks with storage. Separate completeness/provenance,
+external-reference honesty, manual-source fetch refusal, media checks, caps,
+restart, denied redirects and unchanged production dependencies are regression
+test requirements. None of this proves backup, recovery, ingest or legal access.
+
+The first authorized real-report run subsequently deployed only the listener
+image and imported three selected existing files into the isolated trial. It
+preserved separate HTML/PDF completeness, left one selected source missing, and
+verified stored hashes without a fetch, submission, budget reset or production
+change. The deployment guide's first selected-report import record owns the
+image/build evidence and the distinction between four-tool UI discovery, CLI
+report verification and still-unverified native report-tool execution.

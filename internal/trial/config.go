@@ -2,7 +2,7 @@
 // (ADR 0028). It is a separate, narrower way to run the HTTP collector, and it
 // is deliberately not the production path: it never calls the ADR 0027 item 14
 // activation gate, it has its own root and registry, and it cannot reach the
-// wiki, the ingest pipeline, the MCP server, or the production archive. The
+// wiki, the ingest pipeline, the production MCP server, or the production archive. The
 // production gate is unchanged; this package only runs what ADR 0028 approves.
 //
 // Its safety comes from what it refuses, in this order of importance:
@@ -51,6 +51,10 @@ const (
 	EnvMinInterval      = envPrefix + "MIN_INTERVAL"
 	EnvMaxAttempts      = envPrefix + "MAX_ATTEMPTS"
 	EnvMaxBytes         = envPrefix + "MAX_BYTES"
+	EnvMediaTypes       = envPrefix + "MEDIA_TYPES"
+	EnvAllowedURLs      = envPrefix + "ALLOWED_URLS"
+	EnvRedirectURLs     = envPrefix + "REDIRECT_URLS"
+	EnvMaxRedirects     = envPrefix + "MAX_REDIRECTS"
 )
 
 // Hard caps. A setting above one is refused, so no configuration can turn the
@@ -88,6 +92,13 @@ type Config struct {
 	AcceptedBy string
 	// AllowedHosts are the exact lowercase host names that may be fetched.
 	AllowedHosts []string
+	// URL policy is operator-controlled, never populated by a source manifest.
+	// Empty lists retain the legacy host-only policy for unlinked submissions;
+	// report-linked submissions require an exact AllowedURLs entry.
+	AllowedURLs  []string
+	RedirectURLs []string
+	AllowHTML    bool
+	MaxRedirects int
 	// ForbiddenPaths are protected paths the root must not overlap. The built-in
 	// ones are always included; these are extra.
 	ForbiddenPaths []string
@@ -115,6 +126,7 @@ var knownEnv = map[string]bool{
 	EnvRoot: true, EnvAck: true, EnvAcceptedBy: true, EnvAllowedHosts: true, EnvForbiddenPaths: true,
 	EnvMaxQueued: true, EnvMaxSubmitsPerDay: true, EnvMaxFetchesHour: true, EnvMaxFetchesDay: true,
 	EnvMinInterval: true, EnvMaxAttempts: true, EnvMaxBytes: true,
+	EnvMediaTypes: true, EnvAllowedURLs: true, EnvRedirectURLs: true, EnvMaxRedirects: true,
 }
 
 var hostPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$`)
@@ -169,6 +181,9 @@ func FromEnviron(environ []string) (Config, error) {
 	}
 	c.ForbiddenPaths = paths
 	if err := parseLimits(env, &c); err != nil {
+		return Config{}, err
+	}
+	if err := parseReportPolicy(env, &c); err != nil {
 		return Config{}, err
 	}
 	return c, nil

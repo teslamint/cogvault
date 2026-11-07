@@ -1,9 +1,9 @@
-// Command cogvault-trial is the no-backup public-PDF trial of the collection
+// Command cogvault-trial is the no-backup selected-source trial of the collection
 // queue (ADR 0028). It is not the production collector: it has its own root and
 // registry, takes its whole policy from COGVAULT_TRIAL_* environment variables
 // (so the worker and a command run with `docker exec` in the same container
-// read one policy), fetches only https PDFs from an exact-host allowlist within
-// fixed request limits, and never links the ingest pipeline, the MCP server, the
+// read one policy), defaults to https PDFs from an exact-host allowlist within
+// fixed request limits, and never links the ingest pipeline, the production MCP server, the
 // wiki, or the ADR 0027 production activation gate.
 //
 //	cogvault-trial check              validate the policy and the root (creates nothing)
@@ -11,6 +11,14 @@
 //	cogvault-trial status [JOB_ID]    one job, or the request budget in use
 //	cogvault-trial run [--once]       the worker
 //	cogvault-trial pause | resume     create or remove the PAUSE file in the root
+//	cogvault-trial import-manifest --file FILE  register selected-source metadata
+//
+//	cogvault-trial report-status REPORT_ID     per-source capture status
+//
+//	cogvault-trial import-original --report ID --source ID --file FILE ...
+//
+//	cogvault-trial serve [--transport stdio|http]  trial-only MCP, no file access
+//
 //	cogvault-trial version
 //
 // There is no delete or cleanup command: removing a trial root is a manual step
@@ -43,7 +51,7 @@ func main() {
 
 func run(args, environ []string, out, errOut io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("a command is required: check, submit, status, run, pause, resume, version")
+		return errors.New("a command is required: check, submit, status, import-manifest, report-status, import-original, run, pause, resume, serve, version")
 	}
 	cmd, rest := args[0], args[1:]
 	if cmd == "version" {
@@ -51,7 +59,7 @@ func run(args, environ []string, out, errOut io.Writer) error {
 		return nil
 	}
 	if cmd == "-h" || cmd == "--help" || cmd == "help" {
-		fmt.Fprintln(out, "usage: cogvault-trial check | submit URL | status [JOB_ID] | run [--once] | pause | resume | version")
+		fmt.Fprintln(out, "usage: cogvault-trial check | submit URL | status [JOB_ID] | import-manifest --file FILE | report-status REPORT_ID | import-original --report ID --source ID --file FILE --sha256 HASH --bytes N --media TYPE --completeness unknown|incomplete --method METHOD | run [--once] | pause | resume | serve [--transport stdio|http] | version")
 		return nil
 	}
 	cfg, err := trial.FromEnviron(environ)
@@ -78,6 +86,14 @@ func run(args, environ []string, out, errOut io.Writer) error {
 		return submit(cfg, rest, out)
 	case "status":
 		return status(cfg, rest, out)
+	case "import-manifest":
+		return importManifest(cfg, rest, out)
+	case "report-status":
+		return reportStatus(cfg, rest, out)
+	case "import-original":
+		return importOriginal(cfg, rest, out)
+	case "serve":
+		return serve(cfg, rest, environ, os.Stdin, out, errOut)
 	case "run":
 		return worker(cfg, rest, out, errOut)
 	}
@@ -97,6 +113,8 @@ func open(cfg trial.Config) (*trial.Service, error) {
 func submit(cfg trial.Config, args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("submit", flag.ContinueOnError)
 	label := fs.String("label", "", "who or what queued it (free text)")
+	report := fs.String("report", "", "imported report ID (requires --source)")
+	source := fs.String("source", "", "source ID in the selected manifest (requires --report)")
 	asJSON := fs.Bool("json", false, "print the job as JSON")
 	if err := fs.Parse(args); err != nil {
 		return orHelp(err)
@@ -104,12 +122,21 @@ func submit(cfg trial.Config, args []string, out io.Writer) error {
 	if fs.NArg() != 1 {
 		return errors.New("submit takes exactly one URL")
 	}
+	if (*report == "") != (*source == "") {
+		return errors.New("--report and --source must be supplied together")
+	}
 	s, err := open(cfg)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
-	j, existing, err := s.Submit(context.Background(), fs.Arg(0), *label)
+	var j archive.Job
+	var existing bool
+	if *report == "" {
+		j, existing, err = s.Submit(context.Background(), fs.Arg(0), *label)
+	} else {
+		j, existing, err = s.SubmitSource(context.Background(), fs.Arg(0), *label, *report, *source)
+	}
 	if err != nil {
 		return err
 	}
@@ -148,10 +175,11 @@ func status(cfg trial.Config, args []string, out io.Writer) error {
 		}
 		if *asJSON {
 			return printJSON(out, map[string]any{"trial_id": s.Marker.ID, "paused": cfg.Paused(), "waiting_or_running": day.Active,
-				"requests_last_hour": hour.Fetches, "requests_last_day": day.Fetches, "submissions_last_day": day.Created})
+				"requests_last_hour": hour.Fetches, "requests_last_day": day.Fetches, "submissions_last_day": day.Created,
+				"attempts_last_hour": hour.Fetches, "attempts_last_day": day.Fetches, "budget_unit": "job_attempts", "max_http_requests_per_attempt": cfg.MaxRedirects + 1})
 		}
 		fmt.Fprintln(out, s.Summary())
-		fmt.Fprintf(out, "in use: waiting or running %d/%d, requests %d/%d this hour and %d/%d today, submissions %d/%d today, paused=%v\n",
+		fmt.Fprintf(out, "in use: waiting or running %d/%d, attempts %d/%d this hour and %d/%d in 24h, submissions %d/%d in 24h, paused=%v\n",
 			day.Active, cfg.MaxQueued, hour.Fetches, cfg.MaxFetchesHour, day.Fetches, cfg.MaxFetchesDay, day.Created, cfg.MaxSubmitsPerDay, cfg.Paused())
 		return nil
 	}

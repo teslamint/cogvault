@@ -1560,7 +1560,7 @@ verified judgment, backup scheduling, or backup expiry.
       and `CompleteJob(id, owner, attempt, outcome)` under the attempt-number
       fence are all a worker needs; `RunNextBrowserJob` is the browser
       worker's runner and takes a `BrowserDriver`.
-  - **No-backup public-PDF trial** (`cogvault-trial`, `internal/trial`, ADR
+  - **No-backup source archive trial** (`cogvault-trial`, `internal/trial`, ADR
     0028). A separate binary and policy, **not** a way past the item 14
     activation gate, which is unchanged: `cogvault archive job run`, `serve`,
     and `cogvault-kci` still run only behind it, and the trial binary never calls
@@ -1572,8 +1572,8 @@ verified judgment, backup scheduling, or backup expiry.
       sentence exactly, `ACCEPTED_BY` is required, `ALLOWED_HOSTS` lists exact
       lowercase DNS names (no address, wildcard, scheme, or port; at most 10),
       and the limits have defaults and hard caps the program enforces: queued
-      jobs 10 (cap 50), submissions per day 20 (100), requests per hour 20 (60),
-      requests per day 60 (200), minimum interval 10 s (at least 2 s), attempts
+      jobs 10 (cap 50), submissions per day 20 (100), job attempts per hour 20 (60),
+      job attempts per day 60 (200), minimum interval 10 s (at least 2 s), attempts
       3 (5), body 32 MiB (cap 32 MiB). A refused setting names the setting and the
       class of the problem, never the value.
     - **Own root and registry.** The root (default `/trial/data`) must be an
@@ -1591,19 +1591,27 @@ verified judgment, backup scheduling, or backup expiry.
       **every job the worker claims** (so a job queued by `archive job submit` on
       the same root cannot widen the policy: it is ended as failed with "nothing
       was sent"), and for every redirect (a redirect off the list is refused
-      before any request to it). Only a body starting `%PDF-` is stored, held
+      before any request to it). By default only a body starting `%PDF-` is stored, held
       with completeness `unknown`; the stored attempt records the response
       (final URL, status, headers, size, fetch time) and the object's SHA-256.
       A changed upstream file is not an error: the digest and response are
       recorded for comparison. The public-address rule, the checked-address dial,
       the redirect limit, and the time bound of `acquire` are unchanged. Executor
-      `browser` jobs are never claimed; there is no login, KCI, or restricted
+      `browser` jobs are never claimed; there is no login, browser, or restricted
       access path.
-    - **Request budget** is counted from the registry (so it survives a restart
+    - **Attempt budget** is counted from the registry (so it survives a restart
       and does not depend on how a job was queued) and checked **before** each
-      claim: requests in the last hour and in the last 24 hours, and the minimum
+      claim: attempts in the last hour and in the last 24 hours, and the minimum
       time since the last try. Submission also refuses a full queue or the daily
-      submission limit. A refused-by-policy job counts as a try.
+      submission limit. A refused-by-policy job counts as a try. These are not
+      HTTP request counters: a try sends at most `1 + MAX_REDIRECTS` requests.
+      `MAX_REDIRECTS` defaults to 5 and accepts 0 through 5, enforced before
+      the next hop is sent. Existing counters never reset on upgrade. Legacy
+      `requests_last_*` output keys remain attempt aliases; new
+      `attempts_last_*`, `budget_unit: job_attempts`, and
+      `max_http_requests_per_attempt` make the unit explicit. The minimum
+      interval is between attempts, not hops. Trial HTTP 429 stops with
+      `human_action_required` rather than retrying; production defaults remain.
     - **Control.** `check` (validates; creates nothing), `submit URL`, `status
       [JOB_ID]` (a job, or the budget in use), `run [--once]` (the worker),
       `pause` and `resume` (create or remove a `PAUSE` file in the root; a paused
@@ -1611,9 +1619,94 @@ verified judgment, backup scheduling, or backup expiry.
       download in progress without a record and its lease expiry resumes the job
       after a restart. There is **no delete or cleanup command**; removing a trial
       root is a manual step (`docs/deployment/trial.md`). The binary links neither
-      the ingest pipeline, the MCP server, the wiki storage, the index, nor the
+      the ingest pipeline, the production MCP server, the wiki storage, the index, nor the
       production gate (a test checks this), so a trial capture is never handed
-      to ingest. The trial opens no inbound port.
+      to ingest. The deployed worker opens no inbound port.
+    - **Trial chat MCP.** The explicit `serve` command exposes exactly
+      `trial_submit(url, report_id?, source_id?)`, `trial_status(job_id?)`,
+      `trial_import_manifest(manifest)`, and `trial_report_status(report_id)`.
+      Report/source IDs are paired optional arguments. Legacy calls still work.
+      Submission calls the same `trial.Service.Submit`, including its queue and
+      daily limits and duplicate handling; it never fetches. Status returns a
+      bounded, sanitized job/capture view or budget summary, not archive records,
+      response headers, worker identity, filesystem paths, or arbitrary errors.
+      Legacy job status deliberately omits stored URLs, including public URLs. A job
+      view contains only `job_id`, `state`, `attempts_made` and `max_attempts`;
+      submission wraps it with `existing`. A status response may also contain a
+      capture view of `sha256`, `size` and allowlisted `completeness`. Without a
+      job ID, status returns `paused`, `waiting_or_running`,
+      `requests_last_hour`, `requests_last_day` and `submissions_last_day`,
+      plus explicit attempt-unit fields and per-attempt HTTP request bound.
+      Unknown arguments and unsupported tools are refused. There are no retry,
+      pause, resume, delete, download, shell, Docker, Portainer, wiki, or ingest
+      tools. The worker remains the authority for every outgoing request.
+      Stdio is the default transport. Optional Streamable HTTP requires
+      authentication even on loopback, a pathless public HTTPS URL and an exact
+      validated endpoint path (default `/mcp`); foreign Origins and oversized
+      bodies are refused. Bearer authentication or existing OAuth infrastructure
+      may be configured; OAuth uses a distinct trial resource audience and
+      required scopes. No production audience is reused. Unknown trial policy
+      environment variables remain errors. The worker's `run` default is unchanged.
+      This approves narrow MCP software only: deploying it, creating credentials
+      or persistent access, registering clients, and changing proxy, network or
+      authorization settings require separate approval. Historical deployment
+      and client evidence is in `docs/deployment/trial.md`; implementing new
+      report software does not establish its deployment. Defaults remain
+      PDF-only, isolated and without backup; item 14 remains closed.
+    - **Selected-source manifests.** Version 1 is strict JSON, at most 8 KiB,
+      with a bounded opaque `report_id`, `selected_sha256`, and one to five
+      sources. Each has a unique `id`, public HTTPS `citation_url`, optional
+      `acquire_url`, `relation` (`citation` or `body_url`), `citation_count`,
+      and `mode` (`manual` or `http`). A body URL may have zero formal citations.
+      Optional `external_original` carries only SHA-256, size and an external
+      verification claim, never authority to fetch or copy. Unknown/duplicate
+      fields, noncanonical field casing, trailing JSON and oversized input are
+      rejected, never silently truncated. Queries admit only fixed BOK file
+      and KCI article identifiers; temporary signatures are refused. There
+      are no report-body, activity-log, file-path or attachment inputs.
+      Canonical manifest bytes are stored as a report-kind capture explicitly
+      labeled selected-source manifest, not the complete report. The selected
+      digest is a caller assertion, not proof of report coverage or citation
+      coordinates. Import queues and fetches nothing and never changes policy.
+      At most ten manifests can be registered; identical repeats return the
+      existing capture even at the cap, but changing an existing report ID
+      conflicts. Admission is serialized across processes. Unavailable records
+      still count. Status returns bounded source metadata and individual
+      captures, never original bodies, raw errors, headers or filesystem paths.
+    - **Report-linked acquisition.** Operator-only `ALLOWED_URLS` and
+      `REDIRECT_URLS` are JSON arrays of exact HTTPS initial/destination URLs,
+      each at most ten entries and 16 KiB, constrained by `ALLOWED_HOSTS`.
+      Redirect destinations omit query signatures; the archive independently
+      validates each complete redirect against its existing audited query rules.
+      A manifest cannot enroll any host/URL. Report submissions require an
+      exact initial entry; empty policy never authorizes report fetches.
+      Nonempty policy also narrows legacy submissions. Workers recheck both
+      policy and report/source association for jobs inserted by other routes.
+      `MEDIA_TYPES` remains `pdf` by default; explicit `pdf,html` permits only
+      actual PDF or matching HTML/XHTML MIME with UTF-8/ASCII identity bytes.
+      Unsupported media/encoding is refused. No scripts, linked assets, DOM
+      links or browser acquisition run. Recognizable access/challenge pages
+      stop for human action; the detector is heuristic. HTTP captures remain
+      held/unknown and `recovered_after_research`, never research-time proof.
+      Robots and terms are a separate manual operational gate; automatic
+      robots compliance is not implemented. KCI network acquisition remains
+      excluded from report-linked trial submissions.
+    - **Operator-only file import.** `import-manifest --file FILE`,
+      `report-status REPORT_ID`, and `import-original --report ID --source ID
+      --file FILE --sha256 HASH --bytes N --media TYPE --completeness STATUS
+      --method METHOD` are local CLI commands. File import reads one explicitly
+      selected regular non-symlink file, at most 32 MiB, and verifies actual
+      bytes, hash, size and media before storing. TYPE is `application/pdf` or
+      `text/html`; STATUS is `unknown` or `incomplete`; METHOD is `existing_file`,
+      `browser_download` or `direct_https`, recorded as an operator statement.
+      There is no remote path/upload tool, production mount or directory scan.
+      At most five imported captures per source are allowed. Repeats are
+      idempotent; conflicting metadata for the same bytes is refused. Multiple
+      files retain separate completeness: a partial HTML abstract never becomes
+      verified because another PDF exists. Provenance is `imported_existing`,
+      never `seen_during_research`. External verification cannot promote it.
+      File transfers and deployment require authorization; no backup, restore,
+      ingest or production-preservation claim follows from trial import.
   - **Transports.** Two, over one queue. The `job` CLI runs on the archive
     host. The MCP tools `archive_job_submit`, `archive_job_status`, and
     `archive_job_retry` let a chat client on another machine queue a URL and
