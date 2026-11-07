@@ -394,3 +394,40 @@ func TestWorkerGateConfigErrorCarriesNoValues(t *testing.T) {
 		}
 	}
 }
+
+// A host fault that persists (an unusable browser host) does not stop the loop,
+// which a restart policy would only restart, and does not flood the log: the
+// same error is logged once, claims keep being tried every poll, and a pass
+// that works logs again if the fault returns.
+func TestWorkerLoopLogsAPersistentFaultOnce(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "archive")
+	var calls atomic.Int32
+	var out, errOut syncBuffer
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- archivegate.RunLoop(ctx, func() (*archive.Archive, error) { return archive.Open(root) },
+			func() error { return nil },
+			func(context.Context, *archive.Archive) (*archive.Job, error) {
+				n := calls.Add(1)
+				if n == 6 {
+					return nil, nil // a healthy pass in between
+				}
+				if n >= 9 {
+					cancel()
+				}
+				return nil, &archive.BrowserEnvironmentError{Code: archive.BrowserEnvTempDir}
+			},
+			archivegate.Options{Poll: 5 * time.Millisecond}, &out, &errOut)
+	}()
+	if err := <-done; err != nil {
+		t.Fatalf("RunLoop = %v", err)
+	}
+	if n := calls.Load(); n < 9 {
+		t.Fatalf("the loop stopped polling after %d calls", n)
+	}
+	if got := strings.Count(errOut.String(), "worker error: browser environment: temp_dir_unavailable"); got != 2 {
+		t.Fatalf("the fault was logged %d times, want 2 (once, and again after a healthy pass):\n%s", got, errOut.String())
+	}
+}

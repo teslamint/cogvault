@@ -1516,9 +1516,11 @@ verified judgment, backup scheduling, or backup expiry.
       `challenge`, or `consent_required`.
     - **Which download counts.** Only a download that begins after the click
       is taken. One the page starts earlier is cancelled, counted
-      (`stray_downloads` in the evidence), and never stored. A request blocked
-      before the click (an unrelated subresource) is recorded but is not a
-      failed download; only a block after it ends the job as `external_site`.
+      (`stray_downloads` in the evidence), and never stored. A blocked request
+      is recorded in the evidence, but only a blocked **navigation** (a document
+      or frame request) after the click ends the job as `external_site`; a blocked
+      image, XHR, or script, before or after the click, is unrelated to the
+      download, which is still waited for.
       **Limit:** the browser's download event carries no link to the control
       that was clicked, so the click is marked just before it is dispatched, and
       a download the page started by itself in those few milliseconds would be
@@ -1533,7 +1535,17 @@ verified judgment, backup scheduling, or backup expiry.
       `consent_required`, `challenge`, `external_site`, `download_not_started`,
       and `unexpected_page`; `failed` for `too_large`, `blocked_address`, and
       `not_a_pdf`; a browser or network fault is retried within the attempt
-      budget. Codes and reasons carry no host or address.
+      budget. A fault of the **host** (no usable temporary directory, a missing
+      or non-executable browser) is different: before every claim the worker
+      checks the host (`Preflight`: a temporary directory, the browser path, and
+      after a fetch found no browser at all, a probe start of the browser), and a
+      failing host claims nothing, so no job's attempts are used; a fault found
+      after a claim records that one try as `browser_environment (<code>)` with
+      a fixed code (`temp_dir_unavailable`, `download_dir_unavailable`,
+      `chrome_not_found`, `chrome_not_executable`, never a path) and the
+      worker keeps polling (it does not exit, since a restart policy would only
+      restart it), logging the same error once. Codes and reasons carry no host
+      or address.
     - **Policy.** Free full text exists only where the society consented,
       through that button; nonpublic items offer only a preview or a lookup at
       other sites (KCI FAQ, as cited in ADR 0027). A KCI job must never be

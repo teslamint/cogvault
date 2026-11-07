@@ -342,3 +342,98 @@ func TestFailureAfterPublishLeavesNoCaptureAndTheSameBytesStoreLater(t *testing.
 		t.Fatalf("capture = %+v", c)
 	}
 }
+
+type preflightBrowser struct {
+	*fakeBrowser
+	pre func(context.Context) error
+}
+
+func (p *preflightBrowser) Preflight(ctx context.Context) error { return p.pre(ctx) }
+
+// A host that cannot run the browser at all (no temporary directory, no
+// binary) must not use up jobs' attempts: the preflight runs before a claim, a
+// failure claims nothing and returns a fixed code, and the job is untouched.
+func TestBrowserPreflightFailureClaimsNothing(t *testing.T) {
+	a, _ := openTest(t)
+	j := submit(t, a, JobRequest{URL: kciFixtureURL, Executor: ExecutorBrowser})
+	d := &preflightBrowser{
+		fakeBrowser: respond("", ""),
+		pre: func(context.Context) error {
+			return &BrowserEnvironmentError{Code: BrowserEnvTempDir}
+		},
+	}
+	for range 3 {
+		got, err := a.RunNextBrowserJob(ctx, d, "w", DefaultJobLease)
+		var env *BrowserEnvironmentError
+		if got != nil || !errors.Is(err, ErrBrowserEnvironment) || !errors.As(err, &env) || env.Code != BrowserEnvTempDir {
+			t.Fatalf("run = %+v, %v; want nothing claimed and the fixed code", got, err)
+		}
+	}
+	if len(d.calls) != 0 {
+		t.Fatalf("the driver fetched %d time(s) although the preflight failed", len(d.calls))
+	}
+	if cur := getJob(t, a, j.JobID); cur.State != "queued" || cur.AttemptsMade != 0 || len(cur.Attempts) != 0 {
+		t.Fatalf("job = %+v; want untouched", cur)
+	}
+	// A driver's own text never reaches the caller: an unrecognized fault has a fixed code.
+	d.pre = func(context.Context) error { return &BrowserEnvironmentError{Code: "/srv/private/path"} }
+	_, err := a.RunNextBrowserJob(ctx, d, "w", DefaultJobLease)
+	if err == nil || strings.Contains(err.Error(), "/srv") {
+		t.Fatalf("unrecognized code = %v", err)
+	}
+	d.pre = func(context.Context) error { return errors.New("plain error") }
+	if _, err := a.RunNextBrowserJob(ctx, d, "w", DefaultJobLease); err == nil || errors.Is(err, ErrBrowserEnvironment) {
+		t.Fatalf("a non-environment preflight error = %v", err)
+	}
+}
+
+// An environment fault found after the claim records that one try with the
+// fixed code and returns the fault; the next pass fails the preflight and
+// claims nothing, so a second job keeps its attempts. An ordinary browser fault
+// is still retried with backoff and returns no error.
+func TestBrowserEnvironmentFaultUsesOneAttemptAndStopsClaims(t *testing.T) {
+	a, _ := openTest(t)
+	first := submit(t, a, JobRequest{URL: kciFixtureURL, Executor: ExecutorBrowser})
+	second := submit(t, a, JobRequest{URL: strings.Replace(kciFixtureURL, "ART002605798", "ART000000002", 1), Executor: ExecutorBrowser})
+	healthy := true
+	d := &preflightBrowser{
+		fakeBrowser: &fakeBrowser{fn: func(context.Context, string) (BrowserFetch, error) {
+			return BrowserFetch{}, &BrowserEnvironmentError{Code: BrowserEnvChromeMissing}
+		}},
+		pre: func(context.Context) error {
+			if !healthy {
+				return &BrowserEnvironmentError{Code: BrowserEnvChromeMissing}
+			}
+			return nil
+		},
+	}
+	got, err := a.RunNextBrowserJob(ctx, d, "w", DefaultJobLease)
+	if !errors.Is(err, ErrBrowserEnvironment) || got == nil || got.JobID != first.JobID || got.State != "queued" || len(got.Attempts) != 1 {
+		t.Fatalf("run = %+v, %v", got, err)
+	}
+	at := got.Attempts[0]
+	if at.Outcome != JobRetry || !strings.Contains(at.Detail, "browser_environment (chrome_not_found)") {
+		t.Fatalf("attempt = %+v", at)
+	}
+	healthy = false
+	for range 3 {
+		if got, err := a.RunNextBrowserJob(ctx, d, "w", DefaultJobLease); got != nil || !errors.Is(err, ErrBrowserEnvironment) {
+			t.Fatalf("after the fault = %+v, %v; want nothing claimed", got, err)
+		}
+	}
+	if cur := getJob(t, a, second.JobID); cur.AttemptsMade != 0 || len(cur.Attempts) != 0 {
+		t.Fatalf("the other job lost attempts: %+v", cur)
+	}
+	if cur := getJob(t, a, first.JobID); cur.AttemptsMade != 1 {
+		t.Fatalf("the first job used %d attempts, want 1", cur.AttemptsMade)
+	}
+
+	// An ordinary browser fault: retried, no error, attempt recorded.
+	b := &fakeBrowser{fn: func(context.Context, string) (BrowserFetch, error) {
+		return BrowserFetch{}, errors.New("chrome crashed at /srv/private/profile")
+	}}
+	got, err = a.RunNextBrowserJob(ctx, b, "w", DefaultJobLease)
+	if err != nil || got == nil || got.JobID != second.JobID || got.State != "queued" || strings.Contains(got.Attempts[0].Detail, "/srv") {
+		t.Fatalf("ordinary fault = %+v, %v", got, err)
+	}
+}

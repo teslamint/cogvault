@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -164,6 +166,10 @@ func portal(t *testing.T) (*httptest.Server, func(path string) string) {
 	})
 	mux.HandleFunc("/download", func(w http.ResponseWriter, r *http.Request) {
 		downloadHits.Add(1)
+		if r.URL.Query().Get("id") == "SLOW" {
+			// The blocked subresources of the click are reported before this answers.
+			time.Sleep(600 * time.Millisecond)
+		}
 		w.Header().Set("Content-Type", "application/pdf")
 		w.Header().Set("Content-Disposition", `attachment; filename="KCI_FI001.pdf"`)
 		if r.Referer() != "" && strings.HasSuffix(r.Referer(), "/big") {
@@ -190,6 +196,13 @@ func portal(t *testing.T) (*httptest.Server, func(path string) string) {
 	})
 	mux.HandleFunc("/pixel.png", func(w http.ResponseWriter, r *http.Request) {
 		t.Error("the browser reached a host outside the allowlist")
+	})
+	// Clicking starts the download and also loads an image and makes a request on
+	// another host. Both are blocked, neither is the download, and the download
+	// (slow to answer) must still be waited for.
+	mux.HandleFunc("/click-subresources", func(w http.ResponseWriter, r *http.Request) {
+		other := "http://localhost:" + hostPort(r)
+		click("new Image().src='"+other+"/pixel.png'; fetch('"+other+"/xhr', {mode: 'no-cors'}).catch(function(){}); fncDown('SLOW')")(w, r)
 	})
 	// A click that opens another site in a popup.
 	mux.HandleFunc("/popup", func(w http.ResponseWriter, r *http.Request) {
@@ -402,5 +415,152 @@ func TestFetchRequiresTheRequestedArticleID(t *testing.T) {
 		if n := downloadHits.Load(); n != before {
 			t.Errorf("%s: the download endpoint was hit %d time(s) for another article", path, n-before)
 		}
+	}
+}
+
+// Preflight names what the host lacks with a fixed code and no path, and passes
+// on a healthy host. It needs no browser, so it always runs.
+func TestPreflightNamesWhatTheHostLacks(t *testing.T) {
+	code := func(err error) string {
+		t.Helper()
+		var env *archive.BrowserEnvironmentError
+		if !errors.As(err, &env) {
+			t.Fatalf("err = %v, want a BrowserEnvironmentError", err)
+		}
+		if strings.Contains(err.Error(), "/") {
+			t.Fatalf("the code leaks a path: %q", err.Error())
+		}
+		return env.Code
+	}
+	dir := t.TempDir()
+	notExec := filepath.Join(dir, "chrome-not-executable")
+	if err := os.WriteFile(notExec, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(dir, "chrome")
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := New(Options{ChromePath: exe}).Preflight(context.Background()); err != nil {
+		t.Fatalf("healthy host: %v", err)
+	}
+	if err := New(Options{}).Preflight(context.Background()); err != nil {
+		t.Fatalf("no browser path set (found at run time): %v", err)
+	}
+	if got := code(New(Options{ChromePath: filepath.Join(dir, "missing")}).Preflight(context.Background())); got != archive.BrowserEnvChromeMissing {
+		t.Fatalf("missing binary = %q", got)
+	}
+	if got := code(New(Options{ChromePath: notExec}).Preflight(context.Background())); got != archive.BrowserEnvChromeNotExec {
+		t.Fatalf("non-executable binary = %q", got)
+	}
+	t.Setenv("TMPDIR", filepath.Join(dir, "no-such-dir"))
+	if got := code(New(Options{ChromePath: exe}).Preflight(context.Background())); got != archive.BrowserEnvTempDir {
+		t.Fatalf("no temp dir = %q", got)
+	}
+}
+
+// A fetch that cannot make its working directory, or cannot start the browser
+// binary, returns the fixed environment fault, not a retryable plain error and
+// not text that names a path.
+func TestFetchReportsHostFaultsAsEnvironmentErrors(t *testing.T) {
+	check := func(label string, err error, want string) {
+		t.Helper()
+		var env *archive.BrowserEnvironmentError
+		if !errors.Is(err, archive.ErrBrowserEnvironment) || !errors.As(err, &env) || env.Code != want || strings.Contains(err.Error(), "/") {
+			t.Fatalf("%s = %v, want the fixed code %s", label, err, want)
+		}
+	}
+	d := testDriver()
+	d.o.ChromePath = "/nonexistent/chrome-for-test"
+	f, err := d.Fetch(context.Background(), "http://127.0.0.1:1/ok")
+	if f.Code != "" {
+		t.Fatalf("code = %q", f.Code)
+	}
+	check("missing browser binary", err, archive.BrowserEnvChromeMissing)
+
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "no-such-dir"))
+	_, err = testDriver().Fetch(context.Background(), "http://127.0.0.1:1/ok")
+	check("no temp dir", err, archive.BrowserEnvTempDir)
+}
+
+// After the click, a blocked image or request on another host is not the
+// download failing: only a blocked navigation is. The control starts a slow
+// download and also loads an image and makes a request elsewhere; the file must
+// still come back, with the blocked host recorded.
+func TestFetchWaitsForTheDownloadAfterBlockedSubresourcesOfTheClick(t *testing.T) {
+	haveChrome(t)
+	_, u := portal(t)
+	f, err := testDriver().Fetch(context.Background(), u("/click-subresources"))
+	if err != nil || f.Code != "" || string(f.Body) != pdfBody {
+		t.Fatalf("fetch = code %q, %d bytes, %v; want the file", f.Code, len(f.Body), err)
+	}
+	var ev evidence
+	if err := json.Unmarshal([]byte(f.Evidence), &ev); err != nil || len(ev.BlockedHosts) != 1 || ev.BlockedHosts[0] != "localhost" {
+		t.Fatalf("evidence = %+v, %v; want the blocked host recorded", ev, err)
+	}
+}
+
+// With no browser path set, chromedp looks for a browser by itself, which
+// Preflight cannot repeat. A fetch that found none must still stop the claims:
+// the fault is remembered, the next pass claims nothing, and the second job keeps
+// its attempts. The missing browser is simulated (startErr), so this needs none.
+func TestMissingDefaultBrowserStopsFurtherClaims(t *testing.T) {
+	const second = "https://www.kci.go.kr/kciportal/ci/sereArticleSearch/ciSereArtiView.kci?sereArticleSearchBean.artiId=ART000000002"
+	ctx := context.Background()
+	a, err := archive.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	j1, _, err := a.SubmitJob(ctx, archive.JobRequest{URL: kciFixture, Submitter: "t", Executor: archive.ExecutorBrowser})
+	if err != nil {
+		t.Fatal(err)
+	}
+	j2, _, err := a.SubmitJob(ctx, archive.JobRequest{URL: second, Submitter: "t", Executor: archive.ExecutorBrowser})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := New(Options{Resolve: func(context.Context, string) ([]netip.Addr, error) {
+		return []netip.Addr{netip.MustParseAddr("93.184.216.34")}, nil
+	}})
+	d.startErr = exec.ErrNotFound
+	if err := d.Preflight(ctx); err != nil {
+		t.Fatalf("a host not yet known to lack a browser: %v", err)
+	}
+	got, err := a.RunNextBrowserJob(ctx, d, "w", archive.DefaultJobLease)
+	var env *archive.BrowserEnvironmentError
+	if !errors.As(err, &env) || env.Code != archive.BrowserEnvChromeMissing || got == nil || len(got.Attempts) != 1 {
+		t.Fatalf("first pass = %+v, %v", got, err)
+	}
+	for range 3 {
+		if got, err := a.RunNextBrowserJob(ctx, d, "w", archive.DefaultJobLease); got != nil || !errors.As(err, &env) || env.Code != archive.BrowserEnvChromeMissing {
+			t.Fatalf("later pass = %+v, %v; want nothing claimed", got, err)
+		}
+	}
+	if cur, err := a.GetJob(ctx, j2.JobID); err != nil || cur.AttemptsMade != 0 {
+		t.Fatalf("the second job = %+v, %v; want untouched", cur, err)
+	}
+	if cur, err := a.GetJob(ctx, j1.JobID); err != nil || cur.AttemptsMade != 1 {
+		t.Fatalf("the first job = %+v, %v; want one attempt", cur, err)
+	}
+}
+
+// Once a browser starts again, the remembered fault clears and claims resume.
+func TestPreflightProbeClearsTheFaultWhenTheBrowserReturns(t *testing.T) {
+	haveChrome(t)
+	d := testDriver()
+	d.startErr = exec.ErrNotFound
+	if _, err := d.Fetch(context.Background(), "http://127.0.0.1:1/x"); !errors.Is(err, archive.ErrBrowserEnvironment) {
+		t.Fatalf("fetch = %v", err)
+	}
+	if err := d.Preflight(context.Background()); !errors.Is(err, archive.ErrBrowserEnvironment) {
+		t.Fatalf("while the browser is missing: %v", err)
+	}
+	d.startErr = nil
+	if err := d.Preflight(context.Background()); err != nil {
+		t.Fatalf("after the browser returned: %v", err)
+	}
+	if d.fault != "" {
+		t.Fatalf("the fault was not cleared: %q", d.fault)
 	}
 }

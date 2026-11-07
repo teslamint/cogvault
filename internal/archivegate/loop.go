@@ -42,6 +42,7 @@ func RunLoop(ctx context.Context, open func() (*archive.Archive, error), allowed
 		}
 	}()
 	lastBlocked := ""
+	lastErr := "" // a fault that persists (an unusable browser host) is logged once, not every poll
 	for {
 		if err := allowed(); err != nil {
 			if o.Once {
@@ -69,6 +70,9 @@ func RunLoop(ctx context.Context, open func() (*archive.Archive, error), allowed
 			}
 		}
 		j, err := run(ctx, a)
+		if err == nil {
+			lastErr = ""
+		}
 		switch {
 		case ctx.Err() != nil:
 			return nil
@@ -76,7 +80,10 @@ func RunLoop(ctx context.Context, open func() (*archive.Archive, error), allowed
 			// Another worker reclaimed the job; its try is the one that counts.
 			fmt.Fprintf(errOut, "job %s: %v\n", j.JobID, err)
 		case err != nil:
-			fmt.Fprintf(errOut, "worker error: %v\n", err)
+			if msg := err.Error(); msg != lastErr || o.Once {
+				fmt.Fprintf(errOut, "worker error: %s\n", msg)
+				lastErr = msg
+			}
 			if o.Once {
 				return err
 			}

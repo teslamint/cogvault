@@ -118,10 +118,64 @@ type BrowserDriver interface {
 	Fetch(ctx context.Context, detailURL string) (BrowserFetch, error)
 }
 
+// BrowserPreflight is an optional interface of a BrowserDriver. RunNextBrowserJob
+// calls it before it claims a job, so a host that cannot run the browser at all
+// (no usable temporary directory, no browser binary) claims nothing and uses up
+// no job's attempts. It returns a *BrowserEnvironmentError, or nil.
+type BrowserPreflight interface {
+	Preflight(ctx context.Context) error
+}
+
+// ErrBrowserEnvironment marks a fault of the host, not of the page or the
+// network: a retry cannot succeed until an operator fixes the host.
+var ErrBrowserEnvironment = errors.New("browser environment")
+
+// The fixed codes of a BrowserEnvironmentError. They name the missing piece
+// and never carry a path, so they are safe in job status and in logs.
+const (
+	BrowserEnvTempDir       = "temp_dir_unavailable"
+	BrowserEnvDownloadDir   = "download_dir_unavailable"
+	BrowserEnvChromeMissing = "chrome_not_found"
+	BrowserEnvChromeNotExec = "chrome_not_executable"
+	browserEnvUnrecognized  = "unrecognized"
+)
+
+// BrowserEnvironmentError is an environment fault with a fixed code.
+type BrowserEnvironmentError struct{ Code string }
+
+func (e *BrowserEnvironmentError) Error() string        { return "browser environment: " + e.Code }
+func (e *BrowserEnvironmentError) Is(target error) bool { return target == ErrBrowserEnvironment }
+
+// envFault returns the environment fault inside err with its code limited to the
+// fixed ones, or nil when err is not one. A driver cannot put its own text into
+// job status or a log line through it.
+func envFault(err error) *BrowserEnvironmentError {
+	var e *BrowserEnvironmentError
+	if !errors.As(err, &e) {
+		if errors.Is(err, ErrBrowserEnvironment) {
+			return &BrowserEnvironmentError{Code: browserEnvUnrecognized}
+		}
+		return nil
+	}
+	switch e.Code {
+	case BrowserEnvTempDir, BrowserEnvDownloadDir, BrowserEnvChromeMissing, BrowserEnvChromeNotExec:
+		return &BrowserEnvironmentError{Code: e.Code}
+	}
+	return &BrowserEnvironmentError{Code: browserEnvUnrecognized}
+}
+
 // RunNextBrowserJob claims one due browser job, runs the driver, and records
 // the result. It returns nil when no job is due. As with RunNextJob, when ctx
 // ends mid-run nothing is recorded: the lease expires and the job resumes.
 func (a *Archive) RunNextBrowserJob(ctx context.Context, d BrowserDriver, owner string, lease time.Duration) (*Job, error) {
+	if p, ok := d.(BrowserPreflight); ok {
+		if err := p.Preflight(ctx); err != nil {
+			if f := envFault(err); f != nil {
+				return nil, f // nothing is claimed, so no attempt is used
+			}
+			return nil, err
+		}
+	}
 	job, err := a.ClaimJob(ctx, ExecutorBrowser, owner, lease)
 	if err != nil || job == nil {
 		return nil, err
@@ -133,6 +187,18 @@ func (a *Archive) RunNextBrowserJob(ctx context.Context, d BrowserDriver, owner 
 		f, ferr := d.Fetch(ctx, normalized)
 		if ctx.Err() != nil {
 			return job, ctx.Err()
+		}
+		if env := envFault(ferr); env != nil {
+			// A fault of the host, found after the claim: record this one try
+			// with the fixed code, and return the fault so the worker logs it.
+			// The next pass fails the preflight and claims nothing, so the other
+			// jobs keep their attempts.
+			out = JobOutcome{State: JobRetry, Detail: "browser_environment (" + env.Code + "): the browser host needs an operator; no further job is claimed until its checks pass"}
+			done, cerr := a.CompleteJob(ctx, job.JobID, owner, job.AttemptsMade, out)
+			if cerr != nil {
+				return job, cerr
+			}
+			return &done, env
 		}
 		// The capture and the job's completion are one transaction behind the
 		// lease check: a try whose lease was reclaimed while the browser ran

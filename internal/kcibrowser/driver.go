@@ -29,6 +29,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"sort"
@@ -73,6 +74,15 @@ type Driver struct {
 	// flag reaches them.
 	allowPrivate bool
 	allowHTTP    bool
+	// startErr, when set, stands in for the error of starting the browser, so a
+	// test can simulate a host with no browser without removing one.
+	startErr error
+
+	mu sync.Mutex
+	// fault is the code of a browser-host fault seen by a fetch (the browser
+	// could not be started). Preflight cannot find a browser that chromedp would
+	// look up by itself, so it keeps this until a probe launch works again.
+	fault string
 }
 
 // New returns a Driver with defaults filled in.
@@ -225,12 +235,15 @@ func (d *Driver) Fetch(parent context.Context, detailURL string) (archive.Browse
 
 	work, err := os.MkdirTemp("", "cogvault-kci-*")
 	if err != nil {
-		return archive.BrowserFetch{}, err
+		return archive.BrowserFetch{}, &archive.BrowserEnvironmentError{Code: archive.BrowserEnvTempDir}
 	}
 	defer os.RemoveAll(work)
 	profile, dl := filepath.Join(work, "profile"), filepath.Join(work, "dl")
 	if err := os.Mkdir(dl, 0o700); err != nil {
-		return archive.BrowserFetch{}, err
+		return archive.BrowserFetch{}, &archive.BrowserEnvironmentError{Code: archive.BrowserEnvDownloadDir}
+	}
+	if d.startErr != nil {
+		return archive.BrowserFetch{}, d.setupError(d.startErr)
 	}
 
 	opts := append([]chromedp.ExecAllocatorOption(nil), chromedp.DefaultExecAllocatorOptions[:]...)
@@ -290,7 +303,7 @@ func (d *Driver) Fetch(parent context.Context, detailURL string) (archive.Browse
 			}()
 		}
 	}); err != nil {
-		return archive.BrowserFetch{}, fmt.Errorf("browser start: %w", err)
+		return archive.BrowserFetch{}, d.setupError(err)
 	}
 	if err := chromedp.ListenBrowser(cctx, func(ev any) {
 		switch e := ev.(type) {
@@ -320,12 +333,12 @@ func (d *Driver) Fetch(parent context.Context, detailURL string) (archive.Browse
 			s.signal()
 		}
 	}); err != nil {
-		return archive.BrowserFetch{}, fmt.Errorf("browser start: %w", err)
+		return archive.BrowserFetch{}, d.setupError(err)
 	}
 
 	yes := true
 	if _, err := chromedp.Call(cctx, page.Enable, page.EnableParams{}); err != nil {
-		return archive.BrowserFetch{}, fmt.Errorf("browser setup: %w", err)
+		return archive.BrowserFetch{}, d.setupError(err)
 	}
 	if _, err := chromedp.CallBrowser(cctx, browser.SetDownloadBehavior, browser.SetDownloadBehaviorParams{
 		Behavior: browser.SetDownloadBehaviorBehaviorAllowAndName, DownloadPath: dl, EventsEnabled: &yes,
@@ -464,7 +477,11 @@ func (d *Driver) guard(ctx context.Context, s *session, e *fetch.EventRequestPau
 		host = "(unparsable)"
 	}
 	s.blocked[host] = true
-	if s.clicked {
+	// Only a blocked navigation (a document: the page, a frame, the download
+	// iframe) counts as the click leading off the portal. A blocked image, XHR,
+	// script, or other subresource is recorded in blocked but is unrelated to
+	// the download, which must still be waited for.
+	if s.clicked && e.ResourceType == network.ResourceTypeDocument {
 		s.blockedAfter[host] = true
 	}
 	s.mu.Unlock()
@@ -579,4 +596,96 @@ func (d *Driver) noDownloadCode(ctx context.Context, s *session, detailURL strin
 		}
 	}
 	return archive.ReasonDownloadNotStarted
+}
+
+// setupError classifies a failure to start the browser. A missing or
+// unexecutable binary is a fault of the host that a retry cannot fix, and is
+// reported with a fixed code (never the path) and remembered, so the next
+// Preflight can refuse to claim; anything else is a browser fault that a retry
+// may fix.
+func (d *Driver) setupError(err error) error {
+	code := ""
+	switch {
+	case errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist):
+		code = archive.BrowserEnvChromeMissing
+	case errors.Is(err, os.ErrPermission):
+		code = archive.BrowserEnvChromeNotExec
+	}
+	if code == "" {
+		return fmt.Errorf("browser setup: %w", err)
+	}
+	d.mu.Lock()
+	d.fault = code
+	d.mu.Unlock()
+	return &archive.BrowserEnvironmentError{Code: code}
+}
+
+// Preflight checks, before any job is claimed, what a fetch needs from the
+// host: a temporary directory it can create and remove, and, when the browser
+// path is set, a regular executable file there. When no path is set, chromedp
+// looks for a browser by itself and that lookup cannot be repeated here, so a
+// fetch that found none leaves its fault remembered and Preflight then probes
+// by starting a browser (headless, no page, no network) until one starts. A
+// failure carries a fixed code. A healthy host pays only the directory check.
+func (d *Driver) Preflight(ctx context.Context) error {
+	dir, err := os.MkdirTemp("", "cogvault-kci-preflight-*")
+	if err != nil {
+		return &archive.BrowserEnvironmentError{Code: archive.BrowserEnvTempDir}
+	}
+	defer os.RemoveAll(dir)
+	if err := os.Mkdir(filepath.Join(dir, "dl"), 0o700); err != nil {
+		return &archive.BrowserEnvironmentError{Code: archive.BrowserEnvDownloadDir}
+	}
+	if p := d.o.ChromePath; p != "" {
+		info, err := os.Stat(p)
+		switch {
+		case err != nil:
+			return &archive.BrowserEnvironmentError{Code: archive.BrowserEnvChromeMissing}
+		case !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0:
+			return &archive.BrowserEnvironmentError{Code: archive.BrowserEnvChromeNotExec}
+		}
+	}
+	d.mu.Lock()
+	fault := d.fault
+	d.mu.Unlock()
+	if fault != "" {
+		if !d.probe(ctx, dir) {
+			return &archive.BrowserEnvironmentError{Code: fault}
+		}
+		d.mu.Lock()
+		d.fault = ""
+		d.mu.Unlock()
+	}
+	return nil
+}
+
+// probe starts a headless browser on an empty profile and closes it, and reports
+// whether it started. It opens no page and can reach no host.
+func (d *Driver) probe(ctx context.Context, dir string) bool {
+	if d.startErr != nil {
+		return false
+	}
+	pctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	opts := append([]chromedp.ExecAllocatorOption(nil), chromedp.DefaultExecAllocatorOptions[:]...)
+	opts = append(opts,
+		chromedp.Headless,
+		chromedp.UserDataDir(filepath.Join(dir, "profile")),
+		chromedp.Flag("host-resolver-rules", "MAP * ~NOTFOUND"),
+		chromedp.Flag("no-proxy-server", true),
+		chromedp.Flag("disable-background-networking", true),
+	)
+	if d.o.ChromePath != "" {
+		opts = append(opts, chromedp.ExecPath(d.o.ChromePath))
+	}
+	if d.o.NoSandbox {
+		opts = append(opts, chromedp.NoSandbox, chromedp.Flag("disable-dev-shm-usage", true))
+	}
+	actx, cancelAlloc := chromedp.NewExecAllocator(pctx, opts...)
+	defer cancelAlloc()
+	cctx, cancelCtx := chromedp.NewContext(actx)
+	defer cancelCtx()
+	// The first command starts the browser; it navigates nowhere.
+	_, err := chromedp.Call(cctx, page.Enable, page.EnableParams{})
+	return err == nil
 }
