@@ -1187,6 +1187,16 @@ cogvault archive --root <dir> purge <object-id> --confirm <object-id>
 cogvault archive --root <dir> backup --to <new dir>
 cogvault archive --root <dir> restore-test --backup <dir> --report <new file>
     [--deletion-log <path>]... [--scratch <dir>]
+# durable collection queue (archive host; public HTTP only, no credentials)
+cogvault archive --root <dir> job submit <public http(s) URL> --submitter <label>
+    [--edition <text>] [--report <capture-id>] [--claim <text>]
+    [--seen-sha256 sha256:<hex>] [--executor http|browser] [--key <k>]
+    [--max-attempts <n>] [--json]
+cogvault archive --root <dir> job status <job-id> [--json]
+cogvault archive --root <dir> job retry <job-id> [--json]
+cogvault archive --root <dir> --config <path> job run [--once] [--owner <name>] [--lease <d>] [--poll <d>]
+cogvault-kci --root <dir> --config <path> [--once] [--owner <n>] [--lease <d>] [--poll <d>] [--chrome <path>] [--no-sandbox]
+    # browser worker for executor=browser jobs (KCI article pages); same gate as `job run`
 # ingest host (reads --config; never opens the registry)
 cogvault archive --root <share> --config <path> pickup --dest <source dir> [--json]
 cogvault archive --root <share> --config <path> receipts --dest <source dir>
@@ -1196,10 +1206,11 @@ An implemented prototype of the archive proposed in ADR 0027. That ADR is
 **proposed, not accepted**, and nothing here is deployed: these commands and
 the archive MCP tools may change or be removed. The user approved policy
 defaults (ADR 0027) shape the behavior below; deployment settings are empty
-and production capture stays blocked (see *Activation*). There is no
-automatic or scheduled re-acquisition, robots or terms handling, charset
-decoding, release of held material without a verified judgment, backup
-scheduling, or backup expiry.
+and production capture stays blocked (see *Activation*). The only
+re-acquisition besides `acquire` is the queued collection job (see
+*Collection jobs*); nothing re-acquires on a schedule. There is no robots or
+terms handling, charset decoding, release of held material without a
+verified judgment, backup scheduling, or backup expiry.
 
 - `--root` is required. Layout: `objects/sha256/<hex>` (original bytes),
   `objects/tmp/` (staging), `registry.db` (SQLite), `outbox/` (hand-off
@@ -1210,8 +1221,8 @@ scheduling, or backup expiry.
   non-regular entries. Symlinks in the root's ancestors are trusted. The
   check runs at open only: another same-user process that swaps entries
   inside the root while a command runs is out of scope. Use a local disk;
-  the registry must not live on SMB. Registry schema 5; schema-1 through
-  -4 registries are migrated in place, and capture IDs are unchanged. One
+  the registry must not live on SMB. Registry schema 6; schema-1 through
+  -5 registries are migrated in place, and capture IDs are unchanged. One
   exception: a schema-2 to -4 registry that already holds two attempts
   linking the same (held, result) captures cannot take the schema-5 unique
   index; the upgrade rolls back, the registry is left as it was, and open
@@ -1350,7 +1361,8 @@ scheduling, or backup expiry.
   record of the requested and final URL, each hop's status, and selected
   response headers. Refused before any connection: non-`http(s)` URLs,
   userinfo, any query (including a bare `?`), and any fragment, on the first
-  URL and on every redirect (at most 5). Every DNS answer must be a public
+  URL and on every redirect (at most 5), except the audited source policy
+  below. Every DNS answer must be a public
   address (no loopback, private, link-local, shared, documentation,
   benchmark, multicast, reserved, NAT64, 6to4, Teredo, or cloud metadata
   ranges); the connection goes to the checked address, so a second lookup
@@ -1363,6 +1375,287 @@ scheduling, or backup expiry.
   capture's URL again and records an attempt (`acquired` with the new
   capture, `human_action_required` for access-restricted, `failed`
   otherwise); the earlier capture is not changed.
+- **Audited source policies** (`internal/archive/sourcepolicy.go`; applies to
+  `acquire`, `acquire --recover`, and HTTP jobs): the blanket refusal of every
+  query stays. A source policy is the one narrow exception: a URL shape known
+  to carry only public identifiers, and the exact signed redirect it is known
+  to produce. Adding a source is a code change that is reviewed there, never
+  a setting or a request field. The only policy is the Bank of Korea public
+  file download:
+  - **First URL**, matched on the raw query string, not by parsing parameters:
+    `https://www.bok.or.kr/portal/cmmn/file/fileDown.do?atchFileId=<32 lowercase
+    hex>&fileSn=<1 to 3 digits>`, exactly those two parameters in that order,
+    default port only, no userinfo, fragment, or encoded path. Any other spelling
+    is refused with the generic query refusal.
+  - **Signed redirect**, allowed only as the **first** redirect and only
+    **once**: `https://file-cdn.bok.or.kr/portal/<atchFileId>/<fileSn>/tempFile.pdf`
+    with exactly one query, `token=st=<digits>~exp=<digits>~acl=/portal/<atchFileId>/<fileSn>/tempFile.pdf*~hmac=<32 to 128 lowercase hex>`.
+    The host, the path, and the `acl` must name the same file as the first
+    URL. A signed URL on any other host, for another file, with another
+    parameter, on a later hop, or repeated is refused, and no later hop may
+    carry a query.
+  - **Unchanged for every hop,** this policy included: every DNS answer must be
+    public and the connection goes to the checked address (resolved once per
+    connection), no credentials, cookies, or proxy, at most 5 redirects, a
+    32 MiB body bound, the time bound, and `Content-Length` checking.
+  - **The token is never stored, logged, or sent on.** Recorded hop and final
+    URLs show `?token=redacted`; the capture's URL is the first URL; the
+    acquirer strips `Referer` on every redirect (Go sets it before the
+    redirect check, and it would carry the signed URL); error text never
+    repeats a URL. The capture is named `bok-<first 8 hex>-<fileSn>.pdf`.
+  - Stored bytes are held with completeness `unknown`, like every download.
+- **Collection jobs** (`job` CLI and the `archive_job_*` MCP tools; the
+  worker `job run` is archive host only): a durable queue
+  in the registry (schema 6: `jobs`, and `job_attempts`, which is
+  append-only) so a URL submitted by one client or chat is collected by a
+  separate worker and read back by job ID from any other process on the
+  archive host. A job holds a stable ID (`job_` plus 32 hex), the URL, the
+  submitter label (a label, not authenticated identity: host access is the
+  authority), an edition hint (recorded, never used to pick an edition), an
+  optional report capture ID (must be a `report` capture of an active
+  object), a free-text claim reference, and an optional `--seen-sha256`.
+  - **Submit** is idempotent. Without `--key`, the identity is the URL,
+    executor, edition hint, report, and claim, so the same request from any
+    client returns the same job and changes nothing (the first submitter
+    stays). A repeated `--key` for another URL is a conflict. The URL gets
+    the `acquire` checks (http(s); no userinfo, query, or fragment; the one
+    exception is an audited source policy, see *Audited source policies*),
+    so a refused URL is never queued. `--max-attempts` is 1 to 20, default 5.
+  - **States:** `queued`, `running`, `held` (bytes stored but not hand-off
+    eligible), `acquired` (bytes stored with `verified` completeness),
+    `failed`, `human_action_required`. The public HTTP worker ends a stored
+    job as `held`: it never judges completeness, so the capture is
+    `unknown` and is released only through `reassess` (ADR 0027 open
+    question 5). `acquired` is reserved for an executor that records
+    checkable completeness evidence; `CompleteJob` refuses it (`invalid
+    archive request`) unless the linked capture's completeness is
+    `verified`.
+  - **Lease and resume.** A claim leases one due job to a worker name for
+    `--lease` (default 5 min) and counts an attempt. When a lease ends
+    without a report (worker killed, host restarted), the next claim of
+    that executor records the attempt as `lease_expired` and requeues the
+    job after a backoff, or fails it when its attempts are used up. A worker
+    whose lease was reclaimed cannot record a result (`job is not leased to
+    this owner`), even if a new claim reuses its worker name: a claim is
+    identified by the owner and the attempt number it was given. A stopped worker (SIGINT/SIGTERM) records nothing for a
+    download in progress; the lease expiry resumes it. `status` shows a
+    `running` job with a past lease as `running` until a claim reclaims it.
+  - **A capture is stored under its lease.** Both executors store the
+    capture and record the job's completion in one registry transaction,
+    behind the same owner-and-attempt check as `CompleteJob`, and the lease
+    is also checked before the object file is written. A try whose lease was
+    reclaimed while it downloaded therefore stores no capture and records no
+    attempt (`job is not leased to this owner`). The result is reported only
+    after the commit. Limit: the object file is written before the
+    registry transaction (the archive's existing order), so an error after that
+    point and before the commit can leave an object file that no capture
+    refers to. It is content addressed, so storing the same bytes later
+    verifies and adopts it; there is no cleanup for such a file.
+  - **Storage failure.** A file that was downloaded but could not be stored
+    fails the job at once (a retry would download it again for the same
+    fault) with the detail `storage_failed (<code>)`, where the code is one
+    of `no_space`, `permission_denied`, `read_only`, `key_conflict`,
+    `registry_busy`, or `storage_error`. The detail carries no host path,
+    SQL, or error text, because job status is remote-readable; an operator
+    checks the archive host and runs `job retry`.
+  - **Retry.** Network errors, timeouts, a short or broken body, and HTTP
+    408, 425, 429, and 5xx are retried with a doubling backoff (1 min up to
+    1 h) until the attempts are used up, then the job is `failed`. A blocked
+    address, a refused URL (or a redirect to one), an oversize body (32 MiB, never
+    truncated), and other 4xx fail at once; a redirect loop past 5 hops is retried. 401, 403, 407, and 451 end the
+    job as `human_action_required` after one request; the worker has no
+    login, cookie, proxy, or credential option. `job retry` requeues a
+    `failed`, `human_action_required`, or `held` job with a fresh budget;
+    attempt numbers keep counting and history stays.
+  - **Attempts** record the worker name, start and end time, outcome, a
+    reason (never a refused URL), the acquisition record (requested and
+    final URL, each hop's status and checked address, selected headers),
+    and the capture, if one was stored.
+  - **Bytes seen versus recovered later.** Each stored attempt records a
+    provenance on its capture link: `seen_during_research` only when the
+    submitter gave `--seen-sha256` and the stored object ID equals it, else
+    `recovered_after_research`. A digest that does not match leaves the
+    provenance `recovered_after_research` and says so in the attempt
+    reason. `status` and `archive_status` list a capture's `collections`
+    (job, provenance, submitter, report, claim). This is the submitter's
+    statement checked against the bytes' hash, not proof of what the
+    research read.
+  - **Executors.** `--executor http` jobs are run by `job run`, which uses
+    the same `Acquirer` as `acquire`, so it has the same address, redirect,
+    size, and time defenses. `--executor browser` jobs are run only by the
+    separate `cogvault-kci` worker (`cogvault-kci --root <dir> --config <path>
+    [--once] [--owner <n>] [--lease <d>] [--poll <d>] [--chrome <path>]
+    [--no-sandbox]`); `job run` never claims them and `cogvault-kci` never
+    claims HTTP jobs. It is a separate binary so the browser dependency stays
+    out of `cogvault`, the MCP server image, and it has the same gate as `job
+    run`: an explicit `--config`, a matching `archive.root`,
+    `archive.capture_enabled: true`, the item 14 check, a pause (not an exit)
+    while closed, and no flag that skips it. It needs Chrome or Chromium.
+    - **What a browser job is.** One KCI article detail page: `https`, host
+      `www.kci.go.kr`, the fixed detail path, and exactly one query parameter,
+      `sereArticleSearchBean.artiId=ART<digits>`. That is the one place a
+      query is admitted, because the parameter is a public article ID on a
+      fixed host and path; the HTTP executor refuses this query too (its only
+      query exception is the audited BOK source, *Audited source policies*). The
+      URL is checked at submit and again when the job runs.
+    - **What the worker does.** In a fresh headless profile it opens the page,
+      finds the portal's own control by its visible label `KCI 원문 내려받기`,
+      clicks it, and takes the file the portal serves. It never logs in,
+      never accepts a dialog, never solves a challenge, never crawls, and
+      builds no download URL of its own. The browser can reach only
+      `www.kci.go.kr`, at the address this process checked is public
+      (`--host-resolver-rules`, every other name unresolvable), and every
+      request to another host is blocked.
+      The page must carry exactly the article the job asked for
+      (`sereArticleSearchBean.artiId`, read from the loaded page, again just
+      before the click); the same path with another id is `unexpected_page`
+      and nothing is clicked. Popups are not opened (`--block-new-web-contents`);
+      the attempt is recorded as a blocked host. A challenge or consent page
+      that stands in for the detail page, or that opens in the download
+      iframe (`orteDownFrame`), is classified by its own wording, as `login_required`,
+      `challenge`, or `consent_required`.
+    - **Which download counts.** A browser download event is not enough to
+      identify the official control. The driver pairs its frame and URL with
+      a document network request in arrival order. That request must have a
+      user gesture and an initiator stack containing `fncDown`; the authorization
+      follows the same network request ID through redirects. A download without
+      this evidence is canceled and counted as a stray (`stray_downloads`),
+      including one that the page starts between arming and dispatching the
+      click. A blocked document navigation after the click can end as
+      `external_site`; a blocked image, XHR, or script is unrelated and does
+      not end the download wait. A local Chrome test injects an automatic PDF
+      in the exact former gap. Current live KCI initiator behavior is not
+      verified; absent evidence fails closed.
+    - **Outcomes.** A PDF (header `%PDF-`, at most 32 MiB) is stored as a held
+      capture of unknown completeness (`held`, same provenance rule). Otherwise
+      the job ends with a fixed code and no bytes: `human_action_required` for
+      `fulltext_not_public` (no official control), `login_required`,
+      `consent_required`, `challenge`, `external_site`, `download_not_started`,
+      and `unexpected_page`; `failed` for `too_large`, `blocked_address`, and
+      `not_a_pdf`; a browser or network fault is retried within the attempt
+      budget. A fault of the **host** (no usable temporary directory, a missing
+      or non-executable browser) is different: before every claim the worker
+      checks the host (`Preflight`: a temporary directory, the browser path, and
+      after a fetch found no browser at all, a probe start of the browser), and a
+      failing host claims nothing, so no job's attempts are used; a fault found
+      after a claim records that one try as `browser_environment (<code>)` with
+      a fixed code (`temp_dir_unavailable`, `download_dir_unavailable`,
+      `chrome_not_found`, `chrome_not_executable`, never a path) and the
+      worker keeps polling (it does not exit, since a restart policy would only
+      restart it), logging the same error once. Codes and reasons carry no host
+      or address.
+    - **Policy.** Free full text exists only where the society consented,
+      through that button; nonpublic items offer only a preview or a lookup at
+      other sites (KCI FAQ, as cited in ADR 0027). A KCI job must never be
+      assumed open.
+    - **Evidence and gaps.** Verified against real headless Chrome on a local
+      copy of the portal markup and live on the fixture article (the
+      downloaded PDF was byte-identical to an earlier official browser copy).
+      Not verified: a real non-public article, real login or challenge pages,
+      Chromium running on native x86_64 (the `kci` image target builds for
+      amd64 and runs on arm64, but its browser did not launch under amd64
+      emulation), and a terms review. See ADR 0027, "KCI official-browser
+      executor" and `docs/deployment/collector.md`.
+    - **Contract for another executor.** `ClaimJob(executor, owner, lease)`
+      and `CompleteJob(id, owner, attempt, outcome)` under the attempt-number
+      fence are all a worker needs; `RunNextBrowserJob` is the browser
+      worker's runner and takes a `BrowserDriver`.
+  - **No-backup public-PDF trial** (`cogvault-trial`, `internal/trial`, ADR
+    0028). A separate binary and policy, **not** a way past the item 14
+    activation gate, which is unchanged: `cogvault archive job run`, `serve`,
+    and `cogvault-kci` still run only behind it, and the trial binary never calls
+    it. The trial exists because the operator accepted, in writing, that it has
+    no backup and that its originals and job history are lost if the NAS fails.
+    - **Policy, from the environment** (`COGVAULT_TRIAL_*`, read by the worker
+      and by a command run with `docker exec` in the same container; an unknown
+      `COGVAULT_TRIAL_*` name is refused): `ACK` must equal the acceptance
+      sentence exactly, `ACCEPTED_BY` is required, `ALLOWED_HOSTS` lists exact
+      lowercase DNS names (no address, wildcard, scheme, or port; at most 10),
+      and the limits have defaults and hard caps the program enforces: queued
+      jobs 10 (cap 50), submissions per day 20 (100), requests per hour 20 (60),
+      requests per day 60 (200), minimum interval 10 s (at least 2 s), attempts
+      3 (5), body 32 MiB (cap 32 MiB). A refused setting names the setting and the
+      class of the problem, never the value.
+    - **Own root and registry.** The root (default `/trial/data`) must be an
+      absolute clean path at least two levels deep, not a symbolic link, and must
+      not overlap, contain, or sit inside a protected path (built in:
+      `/volume1/docker/cogvault`, `/data`, `/config`, `/evidence`; extra ones in
+      `FORBIDDEN_PATHS`; compared by real path), and no parent directory may hold
+      a `registry.db`, `archive.lock`, `objects`, `.cogvault.db`, `config.yaml`,
+      `_wiki`, or `.obsidian`. A root that has content must carry the trial
+      marker `.cogvault-trial.json` (mode `no-backup-trial`); an empty or new root
+      gets one. Any other root is refused at start and by every command, before
+      anything is written. A Docker named volume is the default storage.
+    - **What it fetches.** Only `https` URLs on an allowlisted host, no userinfo
+      or non-default port, at most 2048 characters, checked at submit, again for
+      **every job the worker claims** (so a job queued by `archive job submit` on
+      the same root cannot widen the policy: it is ended as failed with "nothing
+      was sent"), and for every redirect (a redirect off the list is refused
+      before any request to it). Only a body starting `%PDF-` is stored, held
+      with completeness `unknown`; the stored attempt records the response
+      (final URL, status, headers, size, fetch time) and the object's SHA-256.
+      A changed upstream file is not an error: the digest and response are
+      recorded for comparison. The public-address rule, the checked-address dial,
+      the redirect limit, and the time bound of `acquire` are unchanged. Executor
+      `browser` jobs are never claimed; there is no login, KCI, or restricted
+      access path.
+    - **Request budget** is counted from the registry (so it survives a restart
+      and does not depend on how a job was queued) and checked **before** each
+      claim: requests in the last hour and in the last 24 hours, and the minimum
+      time since the last try. Submission also refuses a full queue or the daily
+      submission limit. A refused-by-policy job counts as a try.
+    - **Control.** `check` (validates; creates nothing), `submit URL`, `status
+      [JOB_ID]` (a job, or the budget in use), `run [--once]` (the worker),
+      `pause` and `resume` (create or remove a `PAUSE` file in the root; a paused
+      worker stays up and logs once), `version`. A stop signal abandons a
+      download in progress without a record and its lease expiry resumes the job
+      after a restart. There is **no delete or cleanup command**; removing a trial
+      root is a manual step (`docs/deployment/trial.md`). The binary links neither
+      the ingest pipeline, the MCP server, the wiki storage, the index, nor the
+      production gate (a test checks this), so a trial capture is never handed
+      to ingest. The trial opens no inbound port.
+  - **Transports.** Two, over one queue. The `job` CLI runs on the archive
+    host. The MCP tools `archive_job_submit`, `archive_job_status`, and
+    `archive_job_retry` let a chat client on another machine queue a URL and
+    read it back by job ID, so a job submitted from one client is visible
+    to every other client with access to the server. They are archive tools
+    (see *MCP tools*): registered only while capture is enabled, behind the
+    same gate and the server-wide `auth.mode` and scopes, with no per-tool
+    scope (ADR 0027 open question 3), so any client that may capture may
+    also submit and retry. Production enable stays blocked by *Activation*.
+    **Submitting makes the archive host's worker fetch a URL the client
+    chose**; ADR 0027 open question 9 (whether the host may make outbound
+    requests at all, and who may trigger them) is therefore a precondition
+    for enabling capture in production, not a settled point. The worker is
+    the same public-address-only acquirer as `acquire`, so a client cannot
+    point it at a private address, but it can make the host connect to any
+    public one. There is no MCP tool to run the worker, claim, complete, or
+    delete a job. `submit` takes only the URL, label, edition hint, report
+    capture ID, claim, `seen_sha256`, executor, and key (no host path, no
+    attempt budget; it is 5).
+  - **Remote view.** The MCP job view omits the worker name and each
+    attempt's acquisition record. Stored reasons name the failure class
+    only (for example `network error: timed out`, `destination is not a
+    public address`), never a resolver or socket address, because a remote
+    client must not learn the archive host's network. The CLI shows the
+    worker name and `--json` the acquisition record.
+  - **The worker is gated, with no bypass.** `job run` needs an explicit
+    `--config` and has no flag that skips the check. Before it opens the
+    archive and before every claim it requires `archive.root` to equal
+    `--root`, `archive.capture_enabled: true`, and the same item 14 activation
+    check `serve` uses. While any fails it stays up, logs `paused: <code>:
+    <keys>` once per change (never a value), claims nothing, and creates
+    nothing under the root; it logs `resumed` within `--poll` when the config
+    passes, with no restart. `--once` instead returns the refusal as an
+    error. A download in progress when capture is turned off finishes. The
+    `job submit`, `status`, and `retry` commands are not gated: they only
+    write the queue.
+  - Jobs are in the registry, so `backup` and `restore-test` carry them.
+    The queue is not live: nothing here deploys a worker (a post-gate review
+    template is in `deploy/nas/compose.collector.yaml`, with
+    `docs/deployment/collector.md`), and the *Activation* gate is
+    unchanged. Without a running `job run` worker a submitted job stays
+    `queued`.
 - **Extract** (`extract`): `html-text/1`, standard library only, runs no
   scripts and loads nothing. Input must be valid UTF-8, sniff as text,
   carry no content coding, and be HTML by media type, sniff, or extension.
@@ -1450,7 +1743,8 @@ scheduling, or backup expiry.
   rejected.
 - **MCP tools** (registered only while capture is enabled): `archive_capture_text`,
   `archive_capture_report`, `archive_capture_summary`, `archive_status`,
-  `archive_page_links`. Text
+  `archive_page_links`, `archive_job_submit`, `archive_job_status`,
+  `archive_job_retry` (see *Collection jobs*). Text
   up to 1 MiB (rejected, never truncated); `name` must be a base file name
   ending in `.md`, `.markdown`, or `.txt`; completeness `unknown` or
   `incomplete` only (only an operator records `verified`). Undeclared

@@ -16,6 +16,7 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -55,7 +56,75 @@ var (
 	// ErrAccessRestricted is a 401, 403, 407, or 451 response. Cogvault
 	// never retries with credentials; a person must act.
 	ErrAccessRestricted = errors.New("access restricted")
+	// ErrStore is a downloaded file that could not be stored (disk, registry,
+	// permissions): the download itself worked, so it is not a network fault.
+	ErrStore = errors.New("the downloaded file could not be stored")
+	// ErrHostNotAllowed is a request to a host the Acquirer's AllowHost refuses,
+	// on the first URL or on a redirect. Nothing is sent to that host.
+	ErrHostNotAllowed = errors.New("host is not on the allowed list")
+	// ErrURLNotAllowed is a URL refused by the Acquirer's URL policy before
+	// any request to that URL is sent.
+	ErrURLNotAllowed = errors.New("URL is outside the allowed policy")
+	// ErrNotPDF is a body that does not start with the PDF header, refused by an
+	// Acquirer with PDFOnly before anything is stored.
+	ErrNotPDF = errors.New("the response is not a PDF")
 )
+
+// scrubbedError is a transport or parser error reduced to a fixed message. The
+// text of such an error can repeat a URL in any form (absolute, relative, or
+// scheme-relative, as in a Location Go cannot parse), and a redirect URL can
+// carry a signed token, so no part of the original text is kept. It still
+// unwraps to its cause, so errors.Is and errors.As (a DNS error, a timeout, a
+// net.Error) keep classifying it.
+type scrubbedError struct{ err error }
+
+func (e *scrubbedError) Error() string {
+	var dns *net.DNSError
+	var ne net.Error
+	switch {
+	case errors.As(e.err, &dns):
+		return "the request failed: DNS lookup failed"
+	case errors.Is(e.err, context.DeadlineExceeded) || (errors.As(e.err, &ne) && ne.Timeout()):
+		return "the request failed: timed out"
+	case strings.Contains(e.err.Error(), "Location header"):
+		return "the request failed: a redirect Location could not be parsed"
+	}
+	return "the request failed: could not connect or the connection broke"
+}
+func (e *scrubbedError) Unwrap() error { return e.err }
+
+// storeFaultCode names a storage failure by a fixed code. The text of a
+// storage error can carry host paths, SQLite statements, or permission
+// details, so job status, which a remote client can read, gets only the code;
+// an operator finds the cause by checking the archive host (disk space,
+// permissions, the registry), not in the job record.
+func storeFaultCode(err error) string {
+	switch {
+	case errors.Is(err, syscall.ENOSPC):
+		return "no_space"
+	case errors.Is(err, syscall.EACCES), errors.Is(err, syscall.EPERM):
+		return "permission_denied"
+	case errors.Is(err, syscall.EROFS):
+		return "read_only"
+	case errors.Is(err, ErrConflict):
+		return "key_conflict"
+	}
+	if t := strings.ToLower(err.Error()); strings.Contains(t, "locked") || strings.Contains(t, "busy") {
+		return "registry_busy"
+	}
+	return "storage_error"
+}
+
+// RemoteStatusError is a refused HTTP status. It matches ErrRemote, so
+// callers that only test errors.Is(err, ErrRemote) are unaffected; the
+// collector reads Status to decide whether a later try can succeed.
+type RemoteStatusError struct{ Status int }
+
+func (e *RemoteStatusError) Error() string {
+	return fmt.Sprintf("%v: HTTP %d", ErrRemote, e.Status)
+}
+
+func (e *RemoteStatusError) Is(target error) bool { return target == ErrRemote }
 
 // blockedPrefixes are non-public ranges netip's predicates do not cover.
 var blockedPrefixes = func() []netip.Prefix {
@@ -106,6 +175,16 @@ type Acquirer struct {
 	Timeout  time.Duration
 	MaxBytes int64
 	Now      func() time.Time
+	// AllowHost, when set, is asked for the lowercase host of the first URL and
+	// of every redirect before any request to it; false refuses with
+	// ErrHostNotAllowed. It narrows the public-address rule, never widens it.
+	AllowHost func(host string) bool
+	// AllowURL, when set, checks the full first URL and each redirect before
+	// any request to it. It can require https and a default port in addition
+	// to the host rule; false refuses with ErrURLNotAllowed.
+	AllowURL func(u *url.URL) bool
+	// PDFOnly refuses a body that does not start with "%PDF-" (ErrNotPDF).
+	PDFOnly bool
 }
 
 // Hop is one request in an acquisition: its URL, the checked address the
@@ -124,6 +203,10 @@ type AcquisitionRecord struct {
 	Headers      map[string]string `json:"headers"`
 	FetchedAt    string            `json:"fetched_at"`
 	Size         int64             `json:"size"`
+	// SignedRedirect is true when the download went through the one signed
+	// redirect a source policy allows. The recorded URLs then carry no token
+	// (sourcepolicy.go).
+	SignedRedirect bool `json:"signed_redirect,omitempty"`
 }
 
 // recordedHeaders are the response headers kept as provenance.
@@ -215,10 +298,20 @@ func (q Acquirer) fetch(ctx context.Context, raw string) ([]byte, AcquisitionRec
 	if err != nil {
 		return nil, rec, fmt.Errorf("%w: unparsable URL", ErrInvalid)
 	}
-	if err := checkAcquireURL(u); err != nil {
+	pm, err := admitFirstURL(u)
+	if err != nil {
 		return nil, rec, err
 	}
+	if q.AllowHost != nil && !q.AllowHost(strings.ToLower(u.Hostname())) {
+		return nil, rec, fmt.Errorf("%w: the first URL", ErrHostNotAllowed)
+	}
+	if q.AllowURL != nil && !q.AllowURL(u) {
+		return nil, rec, fmt.Errorf("%w: the first URL", ErrURLNotAllowed)
+	}
 	rec.RequestedURL = u.String()
+	if pm != nil {
+		rec.RequestedURL = pm.first
+	}
 	timeout, limit := q.Timeout, q.MaxBytes
 	if timeout <= 0 {
 		timeout = AcquireTimeout
@@ -250,36 +343,55 @@ func (q Acquirer) fetch(ctx context.Context, raw string) ([]byte, AcquisitionRec
 		Transport: transport,
 		Timeout:   timeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			rec.Hops = append(rec.Hops, Hop{URL: via[len(via)-1].URL.String(), Address: lastAddr(), Status: req.Response.StatusCode})
+			rec.Hops = append(rec.Hops, Hop{URL: pm.redact(via[len(via)-1].URL), Address: lastAddr(), Status: req.Response.StatusCode})
 			if len(via) > acquireMaxRedirects {
 				return fmt.Errorf("%w: more than %d redirects", ErrRemote, acquireMaxRedirects)
 			}
-			if err := checkAcquireURL(req.URL); err != nil {
+			// The one redirect that may carry a query is the signed redirect the
+			// first URL's policy names. It is allowed only as the FIRST redirect
+			// (len(via) == 1) and only once (SignedRedirect not yet set); every
+			// other hop takes the generic checks, which refuse any query, so a
+			// token can be neither repeated nor passed on a further hop.
+			if q.AllowHost != nil && !q.AllowHost(strings.ToLower(req.URL.Hostname())) {
+				return fmt.Errorf("%w: a redirect", ErrHostNotAllowed)
+			}
+			if q.AllowURL != nil && !q.AllowURL(req.URL) {
+				return fmt.Errorf("%w: a redirect", ErrURLNotAllowed)
+			}
+			if len(via) == 1 && !rec.SignedRedirect && pm.matchRedirect(req.URL) {
+				rec.SignedRedirect = true
+			} else if err := checkAcquireURL(req.URL); err != nil {
 				return err
 			}
 			req.Header.Del("Authorization")
 			req.Header.Del("Cookie")
+			// Go sets Referer to the previous URL; never pass a signed URL on.
+			req.Header.Del("Referer")
 			return nil
 		},
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return nil, rec, fmt.Errorf("%w: %v", ErrInvalid, err)
+		return nil, rec, fmt.Errorf("%w: the request could not be built", ErrInvalid)
 	}
 	req.Header.Set("User-Agent", acquireUserAgent)
 	req.Header.Set("Accept-Encoding", "identity")
 	resp, err := client.Do(req)
 	if err != nil {
-		// *url.Error repeats the request URL, which for a refused redirect
-		// is the URL that was refused; keep only the cause.
+		// *url.Error repeats the request URL, which for a refused redirect is
+		// the URL that was refused, and the cause can repeat the Location it
+		// could not parse. Keep the cause and scrub every URL from its text.
 		var ue *url.Error
 		if errors.As(err, &ue) {
 			err = ue.Err
 		}
+		if !errors.Is(err, ErrBlockedAddress) && !errors.Is(err, ErrInvalid) && !errors.Is(err, ErrRemote) && !errors.Is(err, ErrAccessRestricted) && !errors.Is(err, ErrTooLarge) && !errors.Is(err, ErrHostNotAllowed) && !errors.Is(err, ErrURLNotAllowed) {
+			err = &scrubbedError{err}
+		}
 		return nil, rec, err
 	}
 	defer resp.Body.Close()
-	rec.FinalURL = resp.Request.URL.String()
+	rec.FinalURL = pm.redact(resp.Request.URL)
 	rec.Hops = append(rec.Hops, Hop{URL: rec.FinalURL, Address: lastAddr(), Status: resp.StatusCode})
 	for _, h := range recordedHeaders {
 		if v := resp.Header.Get(h); v != "" {
@@ -291,7 +403,7 @@ func (q Acquirer) fetch(ctx context.Context, raw string) ([]byte, AcquisitionRec
 	case http.StatusUnauthorized, http.StatusForbidden, http.StatusProxyAuthRequired, http.StatusUnavailableForLegalReasons:
 		return nil, rec, fmt.Errorf("%w: HTTP %d", ErrAccessRestricted, resp.StatusCode)
 	default:
-		return nil, rec, fmt.Errorf("%w: HTTP %d", ErrRemote, resp.StatusCode)
+		return nil, rec, &RemoteStatusError{Status: resp.StatusCode}
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
@@ -302,6 +414,9 @@ func (q Acquirer) fetch(ctx context.Context, raw string) ([]byte, AcquisitionRec
 	}
 	if resp.ContentLength >= 0 && resp.ContentLength != int64(len(body)) {
 		return nil, rec, fmt.Errorf("%w: got %d bytes, Content-Length says %d", ErrRemote, len(body), resp.ContentLength)
+	}
+	if q.PDFOnly && !bytes.HasPrefix(body, []byte("%PDF-")) {
+		return nil, rec, ErrNotPDF
 	}
 	rec.Size = int64(len(body))
 	return body, rec, nil
@@ -354,6 +469,12 @@ func acquiredName(final *url.URL, mediaType, contentEncoding string) string {
 // acquisition: the same bytes later share the object but get a new capture,
 // and different bytes are a separate edition. Nothing is replaced.
 func (a *Archive) Acquire(ctx context.Context, q Acquirer, rawURL string) (Result, AcquisitionRecord, error) {
+	return a.acquire(ctx, q, rawURL, SourceRequest{Supplier: AcquireSupplier})
+}
+
+// acquire is Acquire with the capture's key, supplier, and title taken
+// from base; the bytes, name, URL, and media type come from the download.
+func (a *Archive) acquire(ctx context.Context, q Acquirer, rawURL string, base SourceRequest) (Result, AcquisitionRecord, error) {
 	body, rec, err := q.fetch(ctx, rawURL)
 	if err != nil {
 		return Result{}, rec, err
@@ -373,12 +494,32 @@ func (a *Archive) Acquire(ctx context.Context, q Acquirer, rawURL string) (Resul
 	}
 	// The response record is written in the capture's transaction, so a
 	// capture never exists without it.
+	name := acquiredName(final, mediaType, rec.Headers["Content-Encoding"])
+	captureURL := rec.FinalURL
+	if rec.SignedRedirect {
+		// The final URL is the signed redirect with its token removed; the stable
+		// identity of the source is the URL that was asked for, and its policy
+		// names the file.
+		captureURL = rec.RequestedURL
+		if ru, perr := url.Parse(rec.RequestedURL); perr == nil {
+			if n := matchSource(ru).storedName(); n != "" && strings.HasSuffix(name, ".pdf") {
+				name = n
+			}
+		}
+	}
+	if base.bind != nil {
+		base.bind.rec = rec
+	}
 	res, err := a.captureSource(ctx, SourceRequest{
-		Content: bytes.NewReader(body), OriginalName: acquiredName(final, mediaType, rec.Headers["Content-Encoding"]),
-		URL: rec.FinalURL, Supplier: AcquireSupplier, MediaType: stored,
+		Key: base.Key, Content: bytes.NewReader(body), OriginalName: name,
+		URL: captureURL, Supplier: base.Supplier, Title: base.Title, MediaType: stored,
+		bind: base.bind,
 	}, rec.FetchedAt, string(download))
 	if err != nil {
-		return Result{}, rec, err
+		if errors.Is(err, ErrLeaseLost) || errors.Is(err, ErrJobNotFound) {
+			return Result{}, rec, err
+		}
+		return Result{}, rec, fmt.Errorf("%w: %w", ErrStore, err)
 	}
 	return res, rec, nil
 }

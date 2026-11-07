@@ -17,6 +17,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/mark3labs/mcp-go/util"
 	"github.com/spf13/cobra"
+	"github.com/teslamint/cogvault/internal/archivegate"
 	"github.com/teslamint/cogvault/internal/config"
 	"github.com/teslamint/cogvault/internal/httpauth"
 	cogmcp "github.com/teslamint/cogvault/internal/mcp"
@@ -78,7 +79,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 
 	mcpSrv := cogmcp.NewServer(cfg.WikiDir, cfg, store, idx, adpt)
-	archiveRT, err := newArchiveRuntime(cfg, configPath, mcpSrv, idx, store, productionActivation, slog.Default())
+	archiveRT, err := newArchiveRuntime(cfg, configPath, mcpSrv, idx, store, archivegate.ProductionActivation, slog.Default())
 	if err != nil {
 		return err
 	}

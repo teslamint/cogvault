@@ -1,0 +1,84 @@
+# cogvault source-collection worker (ADR 0027 addendum). REVIEW TEMPLATE: it
+# has not been deployed anywhere. Read docs/deployment/collector.md first.
+#
+# POST-GATE ONLY. Deploy it after ADR 0027 item 14 is proven and a human has
+# reviewed it. Pre-gate work happens off the NAS, on temporary roots, through
+# package tests; the `job run` command has no option that skips the gate.
+#
+# A SEPARATE stack from compose.yaml, so the MCP server stack is not touched
+# when the worker is added, stopped, or rolled back. Both stacks open the same
+# archive root on the NAS's local disk (never SMB): the registry is SQLite and
+# every operation is ordered by archive.lock (flock) on that one host.
+#
+# The worker is gated. `job run --config` claims nothing, and opens nothing,
+# unless config.yaml names this archive root, sets archive.capture_enabled:
+# true, and passes the same ADR 0027 item 14 activation check as `serve`.
+# While the gate is closed the process stays up and logs "paused: <code>"; it
+# resumes within --poll when the config changes, with no restart.
+#
+# Required .env (see env.collector.example): COGVAULT_VERSION (an image that
+# contains `archive job`), NAS_UID, NAS_GID, COGVAULT_DIR, ARCHIVE_DIR,
+# EVIDENCE_DIR.
+services:
+  cogvault-collector:
+    image: ghcr.io/teslamint/cogvault:${COGVAULT_VERSION:?set COGVAULT_VERSION in .env to a release that contains archive job}
+    # The NAS account that owns ARCHIVE_DIR (the same account the serve stack uses).
+    user: "${NAS_UID:?set NAS_UID in .env}:${NAS_GID:?set NAS_GID in .env}"
+    command:
+      - archive
+      - --root=/data/archive
+      - --config=/config/config.yaml
+      - job
+      - run
+      - --owner=nas-collector
+      - --poll=30s
+    environment:
+      HOME: /tmp
+    volumes:
+      # The wiki is deliberately not mounted: the worker reads only archive.*
+      # from the config and writes only the archive root.
+      - ${COGVAULT_DIR:?set COGVAULT_DIR in .env}/config.yaml:/config/config.yaml:ro
+      - ${ARCHIVE_DIR:?set ARCHIVE_DIR in .env to a dedicated, inventoried archive root on the NAS local disk}:/data/archive
+      # ADR 0027 item 14 evidence, READ-ONLY, at the SAME container paths as in
+      # the serve stack and in config.yaml (archive.deployment). The activation
+      # check reads the restore-test report and the deletion-log replica from
+      # these paths and compares the paths recorded in the report to the config,
+      # so a different path, or a missing mount, keeps the worker paused.
+      # backups/ is not mounted: backup_target is compared as a path only.
+      # Long syntax with create_host_path: false, so a missing reports/ or replica/
+      # directory fails the deploy instead of being created empty (the short syntax
+      # creates it, and the worker would pause with restore_test_not_passed). The
+      # Compose file reference documents this option; it was not run on Portainer.
+      - type: bind
+        source: ${EVIDENCE_DIR:?set EVIDENCE_DIR in .env to the directory holding reports/ and replica/}/reports
+        target: /evidence/reports
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${EVIDENCE_DIR}/replica
+        target: /evidence/replica
+        read_only: true
+        bind:
+          create_host_path: false
+    # No published ports and no inbound listener. The worker only dials out.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    pids_limit: 128
+    # A stop (docker stop, redeploy) abandons a download in progress without a
+    # record; the lease expires and the next claim resumes the job.
+    stop_grace_period: 15s
+    restart: unless-stopped
+    healthcheck:
+      # Process liveness only. A paused worker (gate closed) is healthy by
+      # design: read `docker logs` for "paused: <code>".
+      test: ["CMD-SHELL", "pidof cogvault > /dev/null"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

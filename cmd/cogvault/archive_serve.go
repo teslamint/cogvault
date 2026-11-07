@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"path/filepath"
 	"reflect"
 	"regexp"
 	"strings"
@@ -13,8 +12,8 @@ import (
 	"time"
 
 	"github.com/mark3labs/mcp-go/server"
-	"github.com/teslamint/cogvault/internal/adapter"
 	"github.com/teslamint/cogvault/internal/archive"
+	"github.com/teslamint/cogvault/internal/archivegate"
 	"github.com/teslamint/cogvault/internal/config"
 	"github.com/teslamint/cogvault/internal/index"
 	cogmcp "github.com/teslamint/cogvault/internal/mcp"
@@ -42,58 +41,6 @@ type archiveRuntime struct {
 	activation   func(*config.Config) error
 	drainTimeout time.Duration
 	log          *slog.Logger
-}
-
-// activationError explains a blocked activation with a fixed code and
-// config key names only. It never carries a config value: reload logs must
-// not show paths, issuers, or credentials.
-type activationError struct {
-	code string
-	keys []string
-}
-
-func (e *activationError) Error() string {
-	if len(e.keys) == 0 {
-		return "archive capture activation blocked: " + e.code
-	}
-	return fmt.Sprintf("archive capture activation blocked: %s: %s", e.code, strings.Join(e.keys, ", "))
-}
-
-// productionActivation is the only activation check serve uses (ADR 0027
-// item 14). It is a presence check on operator-supplied attestations, not a
-// verification of the deployment. It confirms that every deployment setting
-// is set, that the restore test report says it passed and tested a backup
-// under archive.deployment.backup_target, and that the deletion log replica
-// holds every record of the live log right now. It cannot see whether the
-// target or the replica is really off the NAS, whether backups run daily,
-// whether the replica stays current, whether permissions and mounts are
-// right, or how fresh the report is. Enabling capture in production still
-// needs a separate human review. Tests inject their own check instead; no
-// config key relaxes this one.
-func productionActivation(cfg *config.Config) error {
-	d := cfg.Archive.Deployment
-	if missing := d.MissingDeploymentSettings(); len(missing) > 0 {
-		return &activationError{code: "deployment_settings_missing", keys: missing}
-	}
-	rep, err := archive.ReadRestoreReport(d.RestoreTestReport)
-	if err != nil {
-		return &activationError{code: "restore_test_not_passed", keys: []string{"archive.deployment.restore_test_report"}}
-	}
-	target := filepath.Clean(d.BackupTarget)
-	if !filepath.IsAbs(target) || !adapter.HasPathPrefix(filepath.Clean(rep.Backup), target) || filepath.Clean(rep.Backup) == target {
-		return &activationError{code: "restore_report_not_for_backup_target", keys: []string{"archive.deployment.restore_test_report", "archive.deployment.backup_target"}}
-	}
-	if err := archive.ReplicaCovers(d.DeletionLogReplica, cfg.Archive.Root); err != nil {
-		return &activationError{code: "deletion_log_replica_not_current", keys: []string{"archive.deployment.deletion_log_replica"}}
-	}
-	usedReplica := false
-	for _, l := range rep.DeletionLogs {
-		usedReplica = usedReplica || l.Path == filepath.Clean(d.DeletionLogReplica)
-	}
-	if !usedReplica {
-		return &activationError{code: "restore_report_without_replica", keys: []string{"archive.deployment.restore_test_report", "archive.deployment.deletion_log_replica"}}
-	}
-	return nil
 }
 
 // newArchiveRuntime opens the configured archive (even with capture
@@ -221,9 +168,9 @@ func (r *archiveRuntime) Reload(ctx context.Context) error {
 		r.log.Info("archive reload: capture unchanged", "trigger", "SIGHUP", "capture_enabled", was)
 	case want:
 		if err := r.activation(cfg); err != nil {
-			var ae *activationError
+			var ae *archivegate.Error
 			if errors.As(err, &ae) {
-				return reject(ae.code, ae.keys)
+				return reject(ae.Code, ae.Keys)
 			}
 			return reject("activation_blocked", nil)
 		}

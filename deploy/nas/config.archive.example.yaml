@@ -1,0 +1,39 @@
+# Archive section to MERGE into the NAS config.yaml when (and only when) the
+# archive volume is mounted into the serve stack. Not applied anywhere; the
+# live deploy/nas/config.yaml has no archive block, so capture is off today.
+# Paths are CONTAINER paths. serve and the collector must mount the evidence at
+# the same container paths (see compose.collector.yaml and
+# docs/deployment/collector.md).
+#
+# Stage 1 (volumes mounted, capture OFF, no `deployment`): serve opens the
+# archive and keeps the archive_* MCP tools hidden; the collector stays paused
+# ("paused: capture_disabled").
+archive:
+  root: /data/archive
+  capture_enabled: false
+
+# Stage 2a: add the attestations, KEEP capture_enabled: false, and RESTART
+# serve. archive.deployment is restart-only: a SIGHUP reload that changes it is
+# rejected ("restart_only_changed"). The collector re-reads the config on its
+# own and needs no restart.
+#
+# Stage 2b: set capture_enabled: true and send serve SIGHUP. Only
+# capture_enabled changes in that step. A blocked activation is rejected and
+# logged with a code and key names; capture stays off.
+#
+# Every value is an operator statement the check cannot verify beyond file
+# presence and the path rules below.
+#
+#   deployment:
+#     backup_target: /evidence/backups              # a PATH the restore report must sit under; not read, not mounted
+#     backup_schedule: "daily 03:00 (scheduler name)"
+#     restore_test_report: /evidence/reports/restore-test.json   # mounted read-only in serve AND the collector
+#     permissions_owner: "<named person>"
+#     handoff_mount: "<SMB mount and paths for outbox/ and receipts/>"
+#     deletion_log_replica: /evidence/replica/deletions-log.jsonl   # mounted read-only in serve AND the collector; an OFF-NAS copy
+#
+# The restore-test report records the backup path and the replica path exactly
+# as the process that ran `archive restore-test` saw them, and the check
+# compares them to the values above. Run the restore test in a container that
+# has the evidence at these same container paths (collector.md, "The restore
+# test"), not on the host with host paths.

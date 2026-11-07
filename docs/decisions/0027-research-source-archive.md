@@ -331,6 +331,13 @@ are listed separately.
     wiki, NAS, configuration, or credentials) are allowed before these
     settings exist.
 
+    **A separate, explicitly approved no-backup trial exists (ADR 0028).** It runs
+    a different binary (`cogvault-trial`) on its own root and registry, collects
+    public https PDFs from an exact allowlist within fixed limits, and is not
+    connected to ingest, the wiki, or the production archive. It neither amends nor
+    satisfies this item: the gate above stays closed for production capture, and
+    nothing from the trial counts as evidence for it.
+
 ## Prototype status
 
 Implemented on branch `proto/research-archive` (PR #59), not deployed:
@@ -371,9 +378,27 @@ items 2–4, 6–12, and the mechanisms of 13 and 14 (`SPEC.md` §9.16,
   checked address, and URLs with credentials, a query, or a fragment are
   refused on every redirect. Completeness is always unknown.
 
+- A durable collection queue (`archive job`, MCP `archive_job_submit`,
+  `archive_job_status`, `archive_job_retry`; `SPEC.md` §9.16 "Collection
+  jobs"): jobs and append-only per-try attempts in the registry (schema 6),
+  a lease so a stopped worker's job resumes, bounded retry with backoff,
+  idempotent submit, and a provenance label on each stored capture link
+  (`seen_during_research` only when the submitter's digest matches the
+  stored bytes, else `recovered_after_research`). The worker reuses
+  `Acquire`, so it is public-address-only and never uses credentials; it
+  stores bytes held (completeness `unknown`). The MCP tools are archive
+  tools: off while capture is disabled, behind the server-wide auth, with no
+  per-tool scope. A KCI official-browser executor is implemented as a separate
+  binary (`cogvault-kci`, see "KCI official-browser executor"). The HTTP
+  worker (`archive job run`) is gated: it
+  needs an explicit `--config`, claims nothing unless `archive.root` matches,
+  `archive.capture_enabled` is true, and the item 14 check passes, and has no
+  option that skips this. Nothing deploys it; a post-gate review template is
+  `deploy/nas/compose.collector.yaml` (`docs/deployment/collector.md`).
+
 Not implemented: item 1's NAS volume, changes to `cogvault fetch` itself
 (item 5 candidate), release of `unknown`/`partial` bytes without a verified
-judgment (open question 5), automatic or scheduled re-acquisition, robots or
+judgment (open question 5), scheduled re-acquisition, robots or
 terms handling, charset decoding of non-UTF-8 HTML, backup scheduling and
 expiry, and keeping the deletion log replica current. The prototype limits
 that answer open questions only provisionally (1 MiB MCP text, 30 s drain,
@@ -387,7 +412,12 @@ refused, 32 MiB / 60 s acquisition bounds) remain open below.
    (item 13). Where the off-NAS deletion log replica lives, how it is kept
    current after each deletion action, and how a restore reads it when the
    NAS is lost. Until these are decided, item 14 keeps production capture
-   off.
+   off. **The cost of an off-NAS backup is also undecided,** so nothing may
+   assume that one will be bought: either it is funded and item 14 is met, or
+   a new ADR replaces item 14 with a cheaper durability policy and states the
+   loss it accepts. Until then no worker is deployed, and any prototype stays
+   on temporary roots with no live wiki, NAS, config, or credentials, which
+   rules out a temporary stack on the live NAS as well.
 2. **Deletion operation details.** The impact report format, the quarantine
    location, the per-case purge confirmation step, and what a purge removes
    besides the object (for example derived text and hand-off copies on the
@@ -421,6 +451,283 @@ refused, 32 MiB / 60 s acquisition bounds) remain open below.
 9. **Acquisition policy.** Which URL queries (if any) may be fetched,
    robots and terms handling, the size and time limits, whether the
    archive host may make outbound requests at all, and who may run it.
+   Queueing a URL through the MCP job tools makes the archive host's worker
+   connect to a public address the client chose, so this question also
+   decides whether those tools may be enabled; they stay behind the capture
+   gate and the *Activation* check until it is answered. A worker process on
+   the NAS (its image, service definition, and credentials-free network
+   path) is a further deployment setting; only a review template exists
+   (`deploy/nas/compose.collector.yaml`), and nothing is deployed.
+
+## Missing decisions for MCP fetch scope
+
+Open question 9 is too broad to answer in one line. The prototype's
+`archive_job_submit` and `archive_job_retry` make the archive host's worker
+connect to a URL a client chose. These are the exact decisions that are
+missing, what the code does today, and why each blocks enabling the tools in
+production. None is decided here; the worker deployment template
+(`docs/deployment/collector.md`) lists them as preconditions.
+
+1. **Outbound requests at all.** May the NAS archive host make outbound
+   HTTP requests? Today the worker does so for every queued job. If no, the
+   job tools and the worker are removed and `archive acquire` stays the only
+   path.
+2. **Who may trigger a fetch.** Today any client that passes the server-wide
+   `auth.mode` and `required_scopes` may submit and retry, the same scope as
+   capture. Options: keep that; add a dedicated scope for the job tools (needs
+   per-tool scope in `internal/httpauth`, which does not exist: question 3);
+   or make submission operator-only (CLI) and keep MCP read-only.
+3. **Destination policy.** Today any public address is allowed (the address
+   check is the only filter). Options: any public host; an allowlist of
+   hosts or suffixes with an owner who maintains it; a denylist. Also: may a
+   redirect leave the allowlist.
+4. **URL shape.** Today every query and fragment is refused, because a query
+   can carry a signed URL or token, with one audited exception (see "Audited
+   source policies"). Many scholarly landing pages identify the item by a
+   query parameter, so this refuses them. Decide whether more queries are
+   allowed, only on allowlisted hosts, and which parameters.
+5. **Volume and rate.** Today there is no cap on queued jobs, jobs per
+   submitter or per day, per-host spacing, or archive disk use; the worker is
+   one process and runs jobs one at a time, and `max_attempts` is the only
+   bound. A client can queue without limit. Decide the numbers, or an
+   operator-side quota.
+6. **robots.txt, terms, and identification.** Neither robots.txt nor terms
+   are read. The `User-Agent` text says the download is operator-requested,
+   which is no longer accurate for an MCP-submitted job. Decide the string,
+   a contact, and whether a per-host terms review is required before a host is
+   allowed.
+7. **Attribution.** `submitter` is a label the client writes. Decide whether
+   to bind it to the authenticated token subject for audit (needs the auth
+   layer to pass the verified claim to tool handlers; it does not today).
+8. **Limits, content, retry, retention.** Decide the size and time limits
+   (32 MiB, 60 s today), a media-type allowlist (PDF and HTML only?), whether
+   MCP may retry (a retry resets the attempt budget, so repeated retries
+   re-fetch), and how long job rows and attempt records are kept (they never
+   expire today).
+
+## Audited source policies
+
+The blanket query refusal stays. A **source policy**
+(`internal/archive/sourcepolicy.go`) is the one narrow exception: a URL shape
+that carries only public identifiers, plus the exact signed redirect it is known
+to produce. It is a code-reviewed table, not a setting or a request field. The
+only entry is the Bank of Korea public file download (the reference manifest's
+BOK source), whose exact shapes are in `SPEC.md` §9.16.
+
+**What it preserves.** Per-hop DNS with a public-address check and a connection
+to the checked address, no credentials or cookies or proxy, at most 5 redirects,
+the 32 MiB and time bounds, and `Content-Length` checking. **What it adds.** The
+first URL is matched on its raw query with a fixed-shape expression (two
+parameters, fixed order, hex and digit classes), so there is no ordering,
+duplication, or encoding slack. The signed redirect is accepted only as the
+**first** redirect and only **once**, only on `file-cdn.bok.or.kr`, only for the
+**same file** the first URL named (host, path, and the token's `acl` must agree),
+with one token of the observed shape and nothing else. Any later hop that
+carries a query is refused by the generic rule.
+
+**Token handling.** The token is a short-lived signature, so it is never stored,
+logged, or forwarded: recorded hop and final URLs show `?token=redacted`; the
+capture's URL is the first URL; `Referer` is removed on every redirect (Go sets it
+from the previous URL before the redirect check, so the signed URL would
+otherwise travel to a further hop); error text never repeats a request URL.
+
+**Evidence.**
+
+- *Tests* (`internal/archive/sourcepolicy_test.go`): the first-URL and redirect
+  shape tables (about 50 off-policy spellings refused), a local end-to-end job
+  over a plain-http copy of the policy, a scan of every stored table for the token,
+  one-signed-hop enforcement (a second signed hop and a signed hop after another
+  hop refused), other-file, extra-parameter, other-host, and first-host redirects
+  refused with the next host never contacted, the redirect limit, DNS refusals
+  for the CDN host (private, loopback, metadata, shared, mixed, and a first
+  private answer followed by a public one: one lookup per fetch), errors after
+  the signed hop (broken body, 500, timeout, length mismatch, oversize, 403) free
+  of the token, and a `Referer`-recording server. Mutation checks: allowing the
+  signed redirect on any hop, keeping `Referer`, and recording URLs unredacted
+  each make tests fail.
+- *Live, isolated local root* (2026-11-06; a container with the HTTP worker's
+  constraints; gate evidence generated locally on temporary roots; no NAS, no
+  credentials): the BOK URL was queued as an HTTP job, the worker passed the gate
+  and fetched it through the real signed redirect, and the job ended `held`: object
+  `sha256:a7e925e7…aaca1f`, 2,744,626 bytes, `application/pdf`, equal to the
+  expected copy; the recorded final URL is `…/tempFile.pdf?token=redacted`; the
+  registry contains neither `hmac` nor `token=st=`. The manual archive was not
+  read or written.
+
+**Test fixture provenance (secret-scanner findings).** The tests use made-up
+values, not credentials. The signature part of the signed token and the
+attachment id in `sourcepolicy_test.go` and `internal/mcp/archive_jobs_test.go`
+are hashes of fixed labels, computed at run time; they were written by the
+author, not copied from any BOK response, and were checked afterwards against
+the real signature seen during the live probes (they differ). The real token
+was short-lived, never entered the repository, and the stored registry holds no
+token. The URL and token grammar is kept, with the pieces joined in the test
+source (`tokenParam`, `sigField`, `fakeHex`), so no complete token-shaped or
+URL-shaped literal remains for a scanner to flag. The first version of the test
+(commit `a3a51f0`) did hold a literal made-up signature and the public
+fixture id; the earlier scanner findings on that commit are false positives
+for those reasons. The attachment id of the reference fixture is public (it is in
+the manifest and this document).
+
+**Unresolved policy (not decided here).**
+
+1. **Terms.** That the file is a public download does not mean BOK's terms or
+   robots rules allow automated collection. No review was done.
+2. **Scope of ids.** The policy admits any `atchFileId`/`fileSn` of that shape,
+   not only the fixture's. Whether to admit any public BOK attachment or a list
+   of approved ids is open; the site decides access, and no credentials are used.
+3. **Ownership.** Who approves the next source policy, and how often an existing
+   one is re-checked, is open. Today it is a code change.
+4. **Drift.** Only the shapes observed on 2026-11-06 are admitted. A change of
+   CDN host, path layout, token layout, or `fileSn` width fails closed (the job
+   ends `failed` with no bytes) until the table is updated.
+5. **Token expiry.** `exp` is not checked here; the CDN enforces it, and an expired
+   token fails as a refusal. Nothing stores a token that could be replayed.
+6. **Completeness.** The bytes equal the expected copy, but a download alone does
+   not show a document is complete or the intended edition, so the capture is
+   held with completeness `unknown`; release stays an operator `reassess`.
+7. **Exposure and rate.** A client that may submit may make the host fetch this
+   BOK file; decisions 1, 2, and 5 above still gate that. No rate limit exists.
+
+## KCI official-browser executor
+
+**Implemented as a separate binary; not deployed.** The contract, the URL
+policy, and the runner are in `internal/archive/browser.go`; the browser driver
+is `internal/kcibrowser` (chromedp); the worker is `cmd/cogvault-kci`. The
+browser dependency is linked only into that binary, never into `cogvault`
+(the MCP server image). Evidence and the remaining gaps are below.
+
+**Policy evidence.** The KCI FAQ (operator-supplied URL:
+`https://www.kci.go.kr/kciportal/ss-mng/bbs/bbsFAQView.kci?boardBean.boarSequ=000000000602&boardBean.bullScriSequ=000000029372`;
+the page could not be fetched from the review host, so this is the
+operator's reading of it, not an independent check) says that free full text
+is available only where the society consented, through the article detail
+page's "KCI 원문 내려받기" button, and that nonpublic items offer only a
+preview or a lookup at other sites. Therefore: **do not infer that a KCI PDF
+is open.** Availability is per article and can change. A KCI job whose
+article has no such button, or whose button leads away from KCI, ends as
+`human_action_required`, never as a failure to retry and never worked around.
+The HTTP worker cannot serve this case in any event: KCI detail URLs carry
+query parameters, which `archive acquire` and the HTTP worker refuse
+(decision 4 above).
+
+**What exists.** A browser job names one KCI article detail page, and only
+that: `https://www.kci.go.kr/kciportal/ci/sereArticleSearch/ciSereArtiView.kci`
+with exactly one query parameter, `sereArticleSearchBean.artiId=ART<digits>`.
+That is the one place a query is admitted (`archive.CheckBrowserURL`); the
+generic acquirer still refuses every query. `RunNextBrowserJob` claims with
+`ClaimJob("browser", …)`, runs the driver, stores a downloaded PDF through
+`CaptureSource` (held, completeness `unknown`), and ends the job with
+`CompleteJob(id, owner, attempt, outcome)` under the attempt-number fence.
+The driver found the control by its label, `KCI 원문 내려받기`, which is a
+`javascript:` link whose handler points a hidden iframe at the portal's own
+download endpoint, so a real click is used and no download URL is built.
+
+**Executor contract.** A browser executor MUST:
+
+- run with a fresh profile per job, no stored cookies or credentials, no
+  login, no CAPTCHA solving, and no reuse of a person's session;
+- open only the article detail page, and act only on the one official
+  download control (the "KCI 원문 내려받기" button). It must not crawl other
+  pages or submit other forms;
+- pin the browser to the checked public address of an allowlisted host
+  (`--host-resolver-rules`; every other name is unresolvable), pause and block
+  every request to any other host, and bound size (32 MiB) and time;
+- report `human_action_required`, with a reason code and no bytes, when the
+  control is absent (nonpublic: preview or other-site lookup only), or the
+  click leads to a login, payment, consent, challenge, or another site. Codes:
+  `fulltext_not_public`, `login_required`, `consent_required`, `challenge`,
+  `external_site`, `download_not_started`, `unexpected_page`;
+- on a download, check it is a PDF (`%PDF-` header), store it with
+  `CaptureSource` (supplier `cogvault collector browser job <id>`, completeness
+  `unknown`), then `CompleteJob` as `held` with that capture; provenance
+  follows the same `seen_sha256` rule as the HTTP worker;
+- keep attempt reasons and the stored response record free of resolver,
+  socket, and host details, as the HTTP worker does; use `retry` only for
+  browser or network faults, within the attempt budget.
+
+**Evidence (review host, 2026-11-06; headless Chrome 157, macOS).**
+
+- **Local portal copy** (markup copied from the saved official page, served
+  from a loopback test server): a real browser fetches the file byte for byte;
+  eight non-download cases classify as the contract says; a click that leads
+  off the allowed hosts is blocked without the other host being reached; and a
+  mutation that lets every request through is caught by the tests.
+- **Live portal** (`COGVAULT_BROWSER_TESTS=1 COGVAULT_LIVE_KCI=1 go test
+  ./internal/kcibrowser -run TestLiveKCI`): the fixture article `ART002605798` was opened, the official
+  control was clicked, and the portal served `KCI_FI002605798.pdf`, 606,425
+  bytes, SHA-256 `75989f52…c405143c4`, **identical** to the operator's earlier
+  browser original. The job ended `held`, the capture has completeness
+  `unknown`, and provenance is `seen_during_research` because the operator
+  supplied that digest. A nonexistent article (`ART000000001`) ended
+  `human_action_required` (`unexpected_page`) and stored nothing.
+- The reference bundle on the NAS was read only for its manifest, the saved
+  detail page (the control markup), and the PDF's hash. Nothing was written
+  there.
+
+**Not verified, and why.**
+
+1. **A real non-public article** (control absent). No such article was
+   identified, so `fulltext_not_public` is observed only on the local copy.
+2. **Real login, consent, or challenge pages.** The heuristics (a login path
+   or password field, dialog wording, challenge keywords) are checked on local
+   pages only; the portal's real wording may differ, and an unrecognized page
+   ends as `download_not_started`, which also needs a person.
+3. **The browser on the NAS architecture.** The Dockerfile target `kci`
+   (digest-pinned base, Chromium by exact version) builds for linux/arm64 and
+   linux/amd64, and on arm64 its container passed the driver tests, a live
+   download, and a rehearsal of the compose shape on temporary roots. On
+   amd64 the image builds and the worker's gate works, but Chromium did not
+   launch under QEMU emulation, which says nothing about a native host, so
+   **Chromium on x86_64 is unverified**, as are Docker 24.0.2 and Synology
+   behavior. Nothing ran on the NAS.
+4. **`--no-sandbox` is a risk that needs an operational approval.**
+   Chromium's own documentation
+   (`docs/security/apparmor-userns-restrictions.md`) says that `--no-sandbox`
+   disables critical security features and must not be used to browse the open
+   web. This executor visits only the fixed KCI host, but that page's scripts and
+   the downloaded file are third-party content, and the article ID comes from a
+   job a client may have submitted. The compensating controls are the container
+   limits, the pinned resolver and request guard, a fresh profile per fetch, no
+   credentials, and no ports. They reduce exposure; they do not replace the
+   sandbox. Whether to accept this is a decision for the permissions owner and
+   is **not made here**; the alternative is a runtime in which Chromium's sandbox
+   works.
+5. **Permission is not availability.** The KCI FAQ (as cited above) says free
+   full text is offered where the society consented. That describes what a reader
+   may be given. It does not say that automated collection, copying, or
+   redistribution is permitted, and no terms review was done. Whether the
+   portal's terms and the societies' licenses allow this executor, and what may
+   be stored or shared, is a human decision (decision 6 above) that gates enabling
+   it. A stored KCI file stays held and is not handed to ingest on its own.
+6. **Rate limits.** There are none beyond the per-job attempt budget
+   (decision 5 above).
+7. **Which download is the control's.** The browser's download event alone does
+   not name the control that caused it. The driver now enables Network events
+   and pairs a download's frame and URL with the corresponding document request
+   in arrival order. That request must carry a user gesture and a JavaScript
+   initiator stack containing the portal's `fncDown` handler; authorization
+   follows the network request ID across redirects. A missing or ambiguous
+   match is canceled, counted as a stray, and never stored. This closes the
+   previously known window between arming the click and dispatching it: a
+   page-started PDF in that window has no official-control initiator and a
+   deterministic local Chrome regression test rejects it. The page must still
+   carry the requested article ID just before the click; blocked navigation,
+   iframe login/challenge/consent, and popup handling are unchanged. The full
+   local Chrome suite passed. **No further live KCI request was made** because
+   the terms for automated use remain undecided. Whether the real portal's
+   current download request exposes the same CDP initiator evidence remains to
+   be verified under that separate gate; missing evidence fails closed rather
+   than attributing an unrelated PDF.
+
+**End-to-end case that remains to be run.** Three human-verified KCI detail
+pages, with the verification date recorded: one with the control (expect
+`held`, a PDF, completeness `unknown`), one the society has not made public
+(expect `human_action_required`, `fulltext_not_public`, no object stored), and
+one whose button leads elsewhere (expect `external_site`, no capture). The
+first is done live above; the other two need articles that a person has
+confirmed.
+
 
 ## Why
 

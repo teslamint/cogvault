@@ -730,11 +730,12 @@ performs no writes, network access, or LLM calls.
 `internal/archive` owns one root with content-addressed immutable objects and
 its own SQLite registry (`objects` with an active/quarantined/purged state,
 `captures`, `citations`, `attempts`, `handoffs`, `receipts`, `derivations`,
-`acquisitions`, `extractions`, `page_links`; `user_version=5` with an
-in-place v1 rebuild and `migrateLinks` for v2 to v4, which (re)links every
-collected receipt in one transaction, so v3 links recorded before the
-receipt-order rule get their lowest-numbered basis, and adds the partial
-unique index `attempts_link_once`; foreign keys on, one connection,
+`acquisitions`, `extractions`, `page_links`, `jobs`, `job_attempts`;
+`user_version=6` with an in-place v1 rebuild, `migrateLinks` for v2 to v4,
+which (re)links every collected receipt in one transaction, so v3 links
+recorded before the receipt-order rule get their lowest-numbered basis, adds
+the partial unique index `attempts_link_once`, and creates the job tables,
+and `migrateJobs` for v5, which only creates them; foreign keys on, one connection,
 `_txlock=immediate` so concurrent writers wait on `busy_timeout` instead of
 failing with `SQLITE_BUSY_SNAPSHOT`). The one connection means a query on
 `a.db` while a transaction is open deadlocks, so every non-transaction query
@@ -771,6 +772,143 @@ status check to the commit, so a deletion action or another extraction of
 the same bytes runs wholly before or after it. `ExtractHTMLText` uses
 `encoding/xml` in non-strict HTML mode after removing raw-text element
 bodies.
+
+The collection queue (jobs.go, collector.go) is a second consumer of
+`Acquire`, not a second acquirer. `acquire` takes the capture key, supplier,
+and title as a `SourceRequest`, so a job reuses the fetch, address checks,
+object store, and registry unchanged. `ClaimJob`, `CompleteJob`, and
+`SubmitJob` each run in one immediate transaction under the shared archive
+lock and never hold it across a download: the network call happens between
+claim and complete. A claim reclaims expired leases of its executor first
+(records `lease_expired`, requeues behind `jobBackoff`, or fails at the
+attempt ceiling), then leases the oldest due queued job. `CompleteJob`
+checks that the job is `running` under the caller's owner name and attempt
+number (every claim increments `attempts_made`, so the number is the lease
+token and a reused owner name cannot let a stale run finish a newer try), so a worker
+whose lease was reclaimed cannot write; it inserts the `job_attempts` row
+and updates the job in the same transaction, and a retry outcome becomes
+`failed` when `attempts_made` reaches `max_attempts`. `RetryJob` raises
+`max_attempts` by the per-run budget instead of resetting the counter, so
+attempt numbers stay unique per job. Timestamps use a fixed-width layout so
+`lease_until` and `not_before` compare correctly as text. Provenance is
+decided in `CompleteJob` by comparing the stored object ID with the
+submitter's `seen_sha256`, and is kept on the attempt row, so a later retry
+that stores different bytes does not relabel an earlier capture;
+`Capture.Collections` reads it from `job_attempts`. `classifyAcquire` maps
+sentinel errors (`ErrBlockedAddress`, `ErrInvalid`, `ErrTooLarge`,
+`ErrAccessRestricted`, `RemoteStatusError`, `ErrStore`) to retry or terminal
+outcomes; anything it does not recognize is retried, never stored. `ErrStore`
+wraps an error from storing a file that was already downloaded: it fails the
+job at once with a fixed `storage_failed (<code>)` detail from `storeFaultCode`
+(`no_space`, `permission_denied`, `read_only`, `key_conflict`, `registry_busy`,
+`storage_error`), because retrying would download the file again for the same
+fault and the error text can name host paths or SQL while job status is
+remote-readable. The completeness of an HTTP download stays `unknown`, so jobs
+end `held`; `CompleteJob` accepts `acquired` only for a capture whose
+completeness is `verified`.
+
+A capture a job stores is bound to the job's lease. `SourceRequest.bind` (an
+unexported `jobBinding`) makes `store` check the owner and attempt in its own
+transaction before the object file is written, and finish the job
+(`completeJobTx`, the body of `CompleteJob`) in the same transaction before
+the commit. The finished job is published (`jobBinding.done`) only after the
+commit returns, so a failed commit never reads as success. Limit: `store`
+publishes the object file before it opens the writes of the transaction (the
+archive's existing order), so an error between the publish and the commit can
+leave an object file with no capture. The file is content addressed; storing
+the same bytes later verifies and adopts it. No cleanup exists, and none was
+added: deleting an object the registry does not know would touch data this
+change does not own.
+
+The browser executor is implemented: `RunNextBrowserJob` claims
+`executor=browser` jobs and stores the driver's PDF through the same bound
+capture path, and the driver and its dependency live in `internal/kcibrowser`
+and the separate `cmd/cogvault-kci` binary (see below).
+
+Remote clients reach the queue through `internal/mcp/archive_job_tools.go`:
+`archive_job_submit`, `archive_job_status`, and `archive_job_retry` are
+built by `ArchiveTools` next to the capture tools, so they share the
+`ArchiveGate` (closed gate: refused before anything is queued), the
+declared-parameter and string-type check, `archiveError` (request errors
+keep their text, everything else becomes a fixed message), and removal by
+`ArchiveToolNames` on a disable reload. They call `SubmitJob`, `GetJob`, and
+`RetryJob` only: the claim, complete, and worker paths are not exposed.
+`jobView` is a projection, not the `archive.Job`: it drops `lease_owner` and
+each attempt's `owner` and `response`, and `classifyAcquire` writes reasons
+that name the failure class without the Go network error text, so neither
+the worker's host name nor resolver or socket addresses reach a client.
+Submit does not fetch; the fetch happens in the worker, which is a separate
+process the MCP server does not start.
+
+The gate and the worker loop are `internal/archivegate`, shared by every
+process that captures: `ProductionActivation` (the item 14 check, moved out of
+`cmd/cogvault`), `WorkerAllowed`, and `RunLoop`. `RunLoop` takes its gate, its
+archive opener, and a `RunOne` step as arguments. `cmd/cogvault` passes
+`WorkerAllowed(configPath, root, ProductionActivation)` and a closure over
+`RunNextJob`; `cmd/cogvault-kci` passes the same gate and a closure over
+`RunNextBrowserJob`. `WorkerAllowed` re-loads the config on every cycle and
+requires the matching `archive.root`, `archive.capture_enabled`, and the same
+`ProductionActivation` that `serve` uses, so one config switch pauses the MCP
+tools (on reload) and both workers (on their next poll). `RunLoop` calls the
+gate before it opens the archive and before each claim, and opens the archive
+only after the gate first passes, so a gated worker creates nothing under its
+root. There is no flag, setting, or environment variable that replaces the
+gate; tests drive the loop on temporary roots by passing their own gate to
+`RunLoop`, which a command cannot do. A closed gate pauses a long-running
+worker instead of exiting, because a restart policy would turn an exit into a
+crash loop; `--once` returns the refusal.
+
+Source policies (`internal/archive/sourcepolicy.go`) are the one narrow exception
+to the acquirer's blanket query refusal. `fetch` calls `admitFirstURL` instead
+of `checkAcquireURL`: a URL with no query takes the generic checks, and a URL
+with a query is admitted only when `matchSource` matches it against the
+`sourcePolicies` table; a non-match returns the unchanged generic refusal. The
+match is on the raw query string with a fixed-shape regular expression (not
+parsed parameters), so a different spelling of the same parameters does not match.
+`CheckRedirect` allows a query only when `len(via) == 1 && !rec.SignedRedirect
+&& pm.matchRedirect(req.URL)`: the signed redirect is the first redirect, once,
+on the policy's host, for the file the first URL named (host, path, and the
+token's `acl` are all derived from the identifiers the first URL captured);
+every other hop takes `checkAcquireURL`, which refuses any query, so a token
+cannot be repeated or passed on. The DNS check, the checked dial, the redirect
+limit, and the size and time bounds are the same code for every hop. The token
+is redacted at the boundary: hop and final URLs go through `policyMatch.redact`
+before they are recorded, the capture's URL is the first URL, `Referer` is
+deleted in `CheckRedirect` (Go sets it from the previous URL before it calls
+the check, so without that the signed URL would reach a further hop), and the
+client's `*url.Error`, which repeats the request URL, is unwrapped to its cause,
+and that cause is wrapped in a `scrubbedError` whose text is one of a few fixed
+messages (a `Location` Go cannot parse is repeated by the client's own error in
+whatever form it was sent, token included, so no part of the original text is
+kept; the wrapper still unwraps, so DNS and timeout classification survive).
+`sourcePolicies` is a variable only so a test in this package can swap in a
+plain-http copy for a local server; nothing else writes it. `SubmitJob` stores
+the policy's normalized first URL, so a repeated submission is the same job.
+
+The browser executor splits along the dependency line. `internal/archive`
+(browser.go) has no browser code: it owns the URL policy `CheckBrowserURL`
+(the one place a query is admitted), the outcome codes, the `BrowserDriver`
+interface, and `RunNextBrowserJob`, which claims, calls the driver, maps its
+result to a stored held capture or a fixed reason, and completes under the
+attempt fence. `SubmitJob` applies `CheckBrowserURL` instead of the generic
+URL check when the executor is `browser`. `internal/kcibrowser` is the only
+package that imports chromedp, and only `cmd/cogvault-kci` imports it, so the
+`cogvault` binary (the MCP server image) does not link the browser library.
+The driver resolves each allowed host itself, refuses any non-public answer,
+and starts Chrome with `--host-resolver-rules` that pin each host to the
+checked address and map every other name to `NOTFOUND` (an IP literal gets an
+`EXCLUDE` rule, since the wildcard would refuse it). It enables the Fetch
+domain so every request pauses until a goroutine allows it (allowed host) or
+fails it and records the host; handlers never issue commands inline because
+the target's event loop would deadlock. Dialogs are always dismissed, never
+accepted. It clicks the control found by its label with a real mouse event,
+pairs each browser download event with a Network document request by frame
+and URL, accepts it only when the request carries a user gesture and an
+initiator stack containing `fncDown` (following the request ID across redirects),
+and cancels every unproven download. The downloaded file is named by its GUID
+(`allowAndName`); it cancels a download that passes the size bound, and classifies
+the no-file cases from what the page shows. A fresh profile and download
+directory are created per fetch and removed after.
 
 The capture map (capturemap.go) is written by `Pickup` and read by
 `internal/ingest` through `CapturesForSource`; `PageRecordsCapture` is the
@@ -812,10 +950,46 @@ exposes `OpenLedgerReader` (immutable read-only open under an existing
 `internal/mcp` adds `ArchiveTools` and `ArchiveGate`; every archive handler
 enters the gate first. `cmd/cogvault` owns `archiveRuntime`: it opens the
 archive when `archive.root` is set, injects the activation check
-(`productionActivation` in serve, a stub only in tests), and implements the
+(`archivegate.ProductionActivation` in serve, a stub only in tests), and implements the
 SIGHUP reload. `serveListener` runs reloads on one worker, cancels its
 context on shutdown, and waits for it before returning, so `runServe` closes
 the archive only after the last reload ends.
+
+### 2.14a trial (no-backup public-PDF collector, ADR 0028)
+
+`internal/trial` and `cmd/cogvault-trial` are a second, narrower runner of the HTTP
+collector, built so that it cannot be mistaken for production capture. It is a
+separate binary (Dockerfile target `trial`) that links `internal/archive` and
+`internal/version` and nothing else of the application: not `ingest`, `mcp`,
+`storage`, `index`, `adapter`, `config`, or `archivegate`, which is where the
+item 14 activation check lives. A package test lists the dependencies and fails if
+any of them appears. Its worker loop is its own (`Service.Loop`), not
+`archivegate.RunLoop`, so the production gate code is not in the binary at all.
+
+`config.go` builds a `Config` from `COGVAULT_TRIAL_*` environment variables, so the
+worker and a `docker exec` command in one container read one policy. Validation is
+strict: an unknown `COGVAULT_TRIAL_*` name, a wrong acceptance sentence, a host that
+is not a lowercase DNS name, or a value over a hard cap is refused, and the error
+names the setting and the class of problem, never the value. `root.go` is the root
+guard: it resolves real paths, refuses a symbolic-link root, any overlap (equal,
+inside, or containing) with the built-in or configured protected paths, any parent
+directory that holds production artifacts (`registry.db`, `archive.lock`, `objects`,
+`.cogvault.db`, `config.yaml`, `_wiki`, `.obsidian`), and a root that has content but
+no trial marker; an empty or new root gets the marker (`O_EXCL`). `check` runs it
+without creating anything.
+
+`service.go` enforces the policy where it cannot be bypassed. The `archive.Acquirer`
+gained two hooks, `AllowHost` (asked for the first URL and for every redirect before
+a request to it, refusal is `ErrHostNotAllowed`) and `PDFOnly` (`ErrNotPDF`, before
+anything is stored); production callers leave both unset, so their behavior is
+unchanged. `RunOnce` checks the request budget (`Archive.JobActivity`, counted from
+the registry, so it survives a restart), claims one http job, checks the claimed job
+against the policy (`refuse`), and only then calls `Archive.RunClaimedJob`, the second
+half of `RunNextJob`, with the policy-bound Acquirer. A job that fails the policy is
+completed as failed with a fixed reason and nothing is sent. There is no delete path:
+`Loop` and the commands only create the marker and the `PAUSE` file and write through
+the archive's own capture and job code. The loop logs a pause, a wait, and a worker
+error once per change, keeps polling, and never exits for them.
 
 ---
 

@@ -41,10 +41,14 @@ var managedDirs = []string{
 }
 
 const (
-	schemaVersion = 5
-	maxFieldRunes = 1000
-	maxKeyRunes   = 200
-	autoKeyPrefix = "digest:"
+	schemaVersion = 6
+	// setSchemaVersionSQL is a literal, not built from schemaVersion, so no
+	// value is formatted into SQL; TestSetSchemaVersionSQLMatchesSchemaVersion
+	// keeps the two equal.
+	setSchemaVersionSQL = `PRAGMA user_version = 6`
+	maxFieldRunes       = 1000
+	maxKeyRunes         = 200
+	autoKeyPrefix       = "digest:"
 )
 
 var (
@@ -145,7 +149,7 @@ CREATE TABLE IF NOT EXISTS citations (
  PRIMARY KEY (report_id, position),
  CHECK ((cited_capture_id IS NULL) <> (cited_url = '')));
 CREATE INDEX IF NOT EXISTS citations_cited ON citations(cited_capture_id);
-` + v2Tables + v3Tables + linkOnceIndex
+` + v2Tables + v3Tables + linkOnceIndex + v6Tables
 
 // linkOnceIndex (schema version 5) allows one linking attempt per (held
 // capture, result capture) pair, so concurrent reassessments of the same
@@ -176,6 +180,11 @@ type SourceRequest struct {
 	// requires Basis: the checkable evidence for the judgment.
 	Completeness string
 	Basis        string
+	// bind ties the capture to the lease of one collection job: the capture and
+	// the job's completion are written in one transaction, behind the lease
+	// check, so a try whose lease was reclaimed stores nothing. Unexported, so
+	// only this package's executors set it.
+	bind *jobBinding
 }
 
 // ReportRequest records a research report and the sources it cites, in
@@ -229,6 +238,10 @@ type Capture struct {
 	Extractions []Extraction `json:"extractions"`
 	// PageLinks are the archive's capture-to-page associations (pagelinks.go).
 	PageLinks []PageLink `json:"page_links"`
+	// Collections are the collection jobs that stored this capture, each
+	// with whether its bytes match what the research read or were recovered
+	// later (jobs.go).
+	Collections []Collection `json:"collections,omitempty"`
 }
 
 // Citation is one report citation. Exactly one of CaptureID and URL is set;
@@ -390,12 +403,14 @@ func migrate(db *sql.DB) error {
 		if _, err := db.Exec(ddl); err != nil {
 			return err
 		}
-		_, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion))
+		_, err := db.Exec(setSchemaVersionSQL)
 		return err
 	case 1:
 		return migrateV1(db)
 	case 2, 3, 4:
 		return migrateLinks(db, v)
+	case 5:
+		return migrateJobs(db)
 	default:
 		return fmt.Errorf("unsupported registry schema version %d", v)
 	}
@@ -425,7 +440,28 @@ func migrateLinks(db *sql.DB, from int) error {
 	if _, err := tx.ExecContext(ctx, linkOnceIndex); err != nil {
 		return fmt.Errorf("migrate registry v%d: %w", from, err)
 	}
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
+	if _, err := tx.ExecContext(ctx, v6Tables); err != nil {
+		return fmt.Errorf("migrate registry v%d: %w", from, err)
+	}
+	if _, err := tx.ExecContext(ctx, setSchemaVersionSQL); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// migrateJobs upgrades a version 5 registry: schema 6 only adds the
+// collection job tables, so the upgrade creates them and records the version.
+func migrateJobs(db *sql.DB) error {
+	ctx := context.Background()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, v6Tables); err != nil {
+		return fmt.Errorf("migrate registry v5: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, setSchemaVersionSQL); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -461,6 +497,7 @@ func migrateV1(db *sql.DB) error {
 		v2Tables,
 		v3Tables,
 		linkOnceIndex,
+		v6Tables,
 	}
 	for _, s := range steps {
 		if _, err := tx.ExecContext(ctx, s); err != nil {
@@ -474,7 +511,7 @@ func migrateV1(db *sql.DB) error {
 	if bad != 0 {
 		return fmt.Errorf("migrate registry v1: %d foreign key violations", bad)
 	}
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
+	if _, err := tx.ExecContext(ctx, setSchemaVersionSQL); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -522,6 +559,7 @@ func (a *Archive) captureSource(ctx context.Context, req SourceRequest, acquired
 		Title: req.Title, MediaType: req.MediaType, Acquisition: acquisition,
 		Completeness: completeness, Basis: req.Basis, AcquiredAt: acquiredAt, download: download,
 	}
+	rec.bind = req.bind
 	return a.store(ctx, req.Key, req.Content, rec)
 }
 
@@ -608,6 +646,8 @@ type record struct {
 	// download is the acquisition response record (JSON) written in the
 	// capture's transaction; unexported, so it is not part of the digest.
 	download string
+	// bind is the job lease the capture is stored under; see SourceRequest.
+	bind *jobBinding
 }
 
 func (a *Archive) store(ctx context.Context, key string, content io.Reader, rec record) (Result, error) {
@@ -648,6 +688,11 @@ func (a *Archive) store(ctx context.Context, key string, content io.Reader, rec 
 		return Result{}, err
 	}
 	defer tx.Rollback()
+	if rec.bind != nil {
+		if err := checkLease(ctx, tx, rec.bind.id, rec.bind.owner, rec.bind.attempt); err != nil {
+			return Result{}, err
+		}
+	}
 	var state string
 	err = tx.QueryRowContext(ctx, `SELECT state FROM objects WHERE object_id = ?`, staged.objectID).Scan(&state)
 	if err == nil && state != "active" {
@@ -671,8 +716,18 @@ func (a *Archive) store(ctx context.Context, key string, content io.Reader, rec 
 			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO acquisitions (capture_id, record) VALUES (?, ?)`, existingID, rec.download); err != nil {
 				return Result{}, err
 			}
+		}
+		if rec.bind != nil {
+			if err := a.finishBinding(ctx, tx, rec.bind, Result{CaptureID: existingID, ObjectID: existingObject, Existing: true}); err != nil {
+				return Result{}, err
+			}
+		}
+		if rec.download != "" || rec.bind != nil {
 			if err := tx.Commit(); err != nil {
 				return Result{}, err
+			}
+			if rec.bind != nil {
+				rec.bind.committed()
 			}
 		}
 		return Result{CaptureID: existingID, ObjectID: existingObject, Existing: true}, nil
@@ -721,10 +776,19 @@ func (a *Archive) store(ctx context.Context, key string, content io.Reader, rec 
 			return Result{}, err
 		}
 	}
+	res := Result{CaptureID: captureID, ObjectID: staged.objectID}
+	if rec.bind != nil {
+		if err := a.finishBinding(ctx, tx, rec.bind, res); err != nil {
+			return Result{}, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return Result{}, err
 	}
-	return Result{CaptureID: captureID, ObjectID: staged.objectID}, nil
+	if rec.bind != nil {
+		rec.bind.committed()
+	}
+	return res, nil
 }
 
 // activeSource checks that id names a source capture whose object is active.
@@ -949,6 +1013,9 @@ func (a *Archive) status(ctx context.Context, captureID string) (Capture, error)
 		return Capture{}, err
 	}
 	if c.PageLinks, err = a.pageLinks(ctx, pageLinksByCapture, c.CaptureID); err != nil {
+		return Capture{}, err
+	}
+	if c.Collections, err = a.collections(ctx, c.CaptureID); err != nil {
 		return Capture{}, err
 	}
 	rows, err := a.db.QueryContext(ctx, `SELECT t.position, COALESCE(t.cited_capture_id, ''), t.cited_url, COALESCE(CASE WHEN o.state = 'active' THEN s.completeness END, '') FROM citations t LEFT JOIN captures s ON s.capture_id = t.cited_capture_id LEFT JOIN objects o ON o.object_id = s.object_id WHERE t.report_id = ? ORDER BY t.position`, c.CaptureID)
