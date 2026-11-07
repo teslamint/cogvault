@@ -7,6 +7,11 @@ CLI, or your phone.
 **Status:** v2 Phase 1 complete — all four success criteria met (2026-07-29).
 See [ROADMAP.md](ROADMAP.md) for what comes next.
 
+The separate no-backup archive trial supports bounded selected-source manifests,
+per-source preservation status and operator-only import of selected PDF/HTML
+files. It does not connect to the production wiki or ingest. See
+[the trial workflow](docs/deployment/trial.md#selected-source-report-trial-software).
+
 ## How it works
 
 Three stages — Phase 1 builds the middle one:

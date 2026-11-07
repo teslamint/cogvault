@@ -85,6 +85,8 @@ func classifyAcquire(res Result, rec AcquisitionRecord, err error) JobOutcome {
 	}
 	var status *RemoteStatusError
 	switch {
+	case errors.Is(err, ErrRateLimited):
+		out.State, out.Detail = JobHuman, "rate_limited: HTTP 429; automatic retry stopped, a person must review before another request"
 	case errors.Is(err, ErrAccessRestricted):
 		out.State = JobHuman
 		out.Detail = fmt.Sprintf("access restricted (HTTP %d or similar); a person must obtain an authorized copy, the collector never uses credentials", accessStatus(rec))
@@ -96,6 +98,8 @@ func classifyAcquire(res Result, rec AcquisitionRecord, err error) JobOutcome {
 		out.State, out.Detail = JobFailed, "a URL is outside the allowed policy (the first URL or a redirect); nothing was sent to it"
 	case errors.Is(err, ErrNotPDF):
 		out.State, out.Detail = JobFailed, "the response is not a PDF"
+	case errors.Is(err, ErrMediaNotAllowed):
+		out.State, out.Detail = JobFailed, "media_not_allowed: the response body, declared type, or encoding is outside the allowed policy"
 	case errors.Is(err, ErrInvalid):
 		out.State, out.Detail = JobFailed, "the URL or a redirect was refused (scheme, credentials, query, or fragment)"
 	case errors.Is(err, ErrTooLarge):

@@ -97,14 +97,27 @@ func (s *Service) checkURL(raw string) error {
 // submission while the queue is full or the daily submission limit is reached
 // (a repeated URL counts too, which is the cautious side). It does not fetch.
 func (s *Service) Submit(ctx context.Context, rawURL, label string) (archive.Job, bool, error) {
-	if err := s.checkURL(rawURL); err != nil {
+	return s.submitRequest(ctx, archive.JobRequest{URL: rawURL, Submitter: label})
+}
+
+func (s *Service) submitRequest(ctx context.Context, req archive.JobRequest) (archive.Job, bool, error) {
+	if err := s.checkURL(req.URL); err != nil {
 		return archive.Job{}, false, err
+	}
+	if len(s.Cfg.AllowedURLs) > 0 && !containsURL(s.Cfg.AllowedURLs, req.URL) {
+		return archive.Job{}, false, ErrPolicy
 	}
 	unlock, err := s.claimLock(ctx)
 	if err != nil {
 		return archive.Job{}, false, err
 	}
 	defer unlock()
+	return s.submitRequestLocked(ctx, req)
+}
+
+// submitRequestLocked is shared with report submission, which must keep its
+// duplicate lookup and new admission under the same cross-process lock.
+func (s *Service) submitRequestLocked(ctx context.Context, req archive.JobRequest) (archive.Job, bool, error) {
 	now := s.Now()
 	day, err := s.A.JobActivity(ctx, now.Add(-24*time.Hour))
 	if err != nil {
@@ -116,21 +129,37 @@ func (s *Service) Submit(ctx context.Context, rawURL, label string) (archive.Job
 	if day.Created >= s.Cfg.MaxSubmitsPerDay {
 		return archive.Job{}, false, fmt.Errorf("%w: %d submissions in the last 24 hours", ErrLimit, day.Created)
 	}
-	if label == "" {
-		label = "trial"
+	if req.Submitter == "" {
+		req.Submitter = "trial"
 	}
-	return s.A.SubmitJob(ctx, archive.JobRequest{
-		URL: rawURL, Submitter: label, Executor: archive.ExecutorHTTP, MaxAttempts: s.Cfg.MaxAttempts,
-	})
+	req.Executor = archive.ExecutorHTTP
+	req.MaxAttempts = s.Cfg.MaxAttempts
+	return s.A.SubmitJob(ctx, req)
 }
 
 // acquirer is the base Acquirer with the trial policy applied.
 func (s *Service) acquirer() archive.Acquirer {
 	q := s.Acquirer
 	q.AllowHost = s.Cfg.HostAllowed
-	q.AllowURL = func(u *url.URL) bool { return s.checkURL(u.String()) == nil }
-	q.PDFOnly = true
+	q.AllowURL = s.fetchURLAllowed
+	q.PDFOnly = !s.Cfg.AllowHTML
+	if s.Cfg.AllowHTML {
+		q.AllowedMediaTypes = []string{"application/pdf", "text/html", "application/xhtml+xml"}
+	}
+	q.StopOnRateLimit = true
+	limit := s.Cfg.MaxRedirects
+	q.MaxRedirects = &limit
 	q.MaxBytes = s.Cfg.MaxBytes
+	return q
+}
+
+func (s *Service) reportAcquirer() archive.Acquirer {
+	q := s.acquirer()
+	if !s.Cfg.AllowHTML {
+		// Report status needs the actual validated media, not an arbitrary or
+		// missing server declaration. Keep legacy URL-only PDFOnly unchanged.
+		q.AllowedMediaTypes = []string{"application/pdf"}
+	}
 	return q
 }
 
@@ -182,7 +211,20 @@ func (s *Service) RunOnce(ctx context.Context) (*archive.Job, string, error) {
 		}
 		return &done, "", nil
 	}
-	done, err := s.A.RunClaimedJob(ctx, s.acquirer(), job, s.Owner)
+	if job.ReportCaptureID != "" {
+		if err := s.validateReportJob(ctx, job); err != nil {
+			done, cerr := s.A.CompleteJob(ctx, job.JobID, s.Owner, job.AttemptsMade, archive.JobOutcome{State: archive.JobFailed, Detail: "trial policy: report source association refused; nothing was sent"})
+			if cerr != nil {
+				return job, "", cerr
+			}
+			return &done, "", nil
+		}
+	}
+	q := s.acquirer()
+	if job.ReportCaptureID != "" {
+		q = s.reportAcquirer()
+	}
+	done, err := s.A.RunClaimedJob(ctx, q, job, s.Owner)
 	return done, "", err
 }
 
@@ -211,6 +253,8 @@ func (s *Service) refuse(job *archive.Job) string {
 		return "only the http executor is run"
 	case s.checkURL(job.URL) != nil:
 		return "the URL is outside the allowed hosts or scheme"
+	case len(s.Cfg.AllowedURLs) > 0 && !containsURL(s.Cfg.AllowedURLs, job.URL):
+		return "the URL is outside the exact initial URL policy"
 	case job.AttemptsMade > s.Cfg.MaxAttempts:
 		return "the trial attempt limit is used up"
 	}
@@ -231,7 +275,7 @@ func (s *Service) Allowed() error {
 
 // Summary is a short, secret-free description of the policy in force.
 func (s *Service) Summary() string {
-	return fmt.Sprintf("trial %s: hosts=%s max_queued=%d submits/day=%d requests/hour=%d requests/day=%d interval=%s attempts=%d max_bytes=%d",
+	return fmt.Sprintf("trial %s: hosts=%s max_queued=%d submits/day=%d attempts/hour=%d attempts/day=%d interval=%s attempts/job=%d max_bytes=%d media=%s max_http_requests/attempt=%d",
 		s.Marker.ID, strings.Join(s.Cfg.AllowedHosts, ","), s.Cfg.MaxQueued, s.Cfg.MaxSubmitsPerDay,
-		s.Cfg.MaxFetchesHour, s.Cfg.MaxFetchesDay, s.Cfg.MinInterval, s.Cfg.MaxAttempts, s.Cfg.MaxBytes)
+		s.Cfg.MaxFetchesHour, s.Cfg.MaxFetchesDay, s.Cfg.MinInterval, s.Cfg.MaxAttempts, s.Cfg.MaxBytes, s.Cfg.mediaDescription(), s.Cfg.MaxRedirects+1)
 }

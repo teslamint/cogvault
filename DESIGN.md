@@ -955,12 +955,13 @@ SIGHUP reload. `serveListener` runs reloads on one worker, cancels its
 context on shutdown, and waits for it before returning, so `runServe` closes
 the archive only after the last reload ends.
 
-### 2.14a trial (no-backup public-PDF collector, ADR 0028)
+### 2.14a trial (no-backup selected-source archive, ADR 0028)
 
 `internal/trial` and `cmd/cogvault-trial` are a second, narrower runner of the HTTP
 collector, built so that it cannot be mistaken for production capture. It is a
 separate binary (Dockerfile target `trial`) that links `internal/archive` and
-`internal/version` and nothing else of the application: not `ingest`, `mcp`,
+`internal/version`, plus the narrow `internal/trialmcp` and reusable
+`internal/httpauth` transport boundary: not `ingest`, production `mcp`,
 `storage`, `index`, `adapter`, `config`, or `archivegate`, which is where the
 item 14 activation check lives. A package test lists the dependencies and fails if
 any of them appears. Its worker loop is its own (`Service.Loop`), not
@@ -978,18 +979,78 @@ directory that holds production artifacts (`registry.db`, `archive.lock`, `objec
 no trial marker; an empty or new root gets the marker (`O_EXCL`). `check` runs it
 without creating anything.
 
-`service.go` enforces the policy where it cannot be bypassed. The `archive.Acquirer`
-gained two hooks, `AllowHost` (asked for the first URL and for every redirect before
-a request to it, refusal is `ErrHostNotAllowed`) and `PDFOnly` (`ErrNotPDF`, before
-anything is stored); production callers leave both unset, so their behavior is
-unchanged. `RunOnce` checks the request budget (`Archive.JobActivity`, counted from
+`service.go` enforces the policy where it cannot be bypassed. `archive.Acquirer`
+has narrowing hooks for host and URL policy, media, redirect count and trial 429
+handling. Production leaves them unset, retaining its behavior. `RunOnce` checks
+the attempt budget (`Archive.JobActivity`, counted from
 the registry, so it survives a restart), claims one http job, checks the claimed job
-against the policy (`refuse`), and only then calls `Archive.RunClaimedJob`, the second
+against the policy (`refuse`) and any report association (`validateReportJob`),
+and only then calls `Archive.RunClaimedJob`, the second
 half of `RunNextJob`, with the policy-bound Acquirer. A job that fails the policy is
 completed as failed with a fixed reason and nothing is sent. There is no delete path:
 `Loop` and the commands only create the marker and the `PAUSE` file and write through
 the archive's own capture and job code. The loop logs a pause, a wait, and a worker
 error once per change, keeps polling, and never exits for them.
+
+`internal/trialmcp` is a separate adapter, not an extension of `internal/mcp`.
+It registers exactly `trial_submit`, `trial_status`, `trial_import_manifest` and
+`trial_report_status`, with strict bounded schemas and server-side validation.
+Submission delegates to `Service.Submit` or `SubmitSource` for paired report/source IDs;
+status projects an explicit safe DTO rather than serializing archive jobs or
+captures. Raw errors, attempt details, owner/hostname/PID, paths, headers and
+archive internals never cross this boundary. Legacy job status omits stored URLs.
+Report status permits only revalidated manifest URLs. Job DTOs contain only
+`job_id`, `state`, `attempts_made`, `max_attempts`;
+capture DTOs contain `sha256`, `size`, and allowlisted `completeness`. Aggregate
+status retains `paused`, `waiting_or_running`, `requests_last_hour`,
+`requests_last_day`, and `submissions_last_day`, and adds explicit attempt counters,
+limits and `max_http_requests_per_attempt`. The legacy request keys are aliases
+for attempts; stored history and enforcement are unchanged. With a redirect cap
+of N, each charged attempt sends at most N+1 requests (0..5 redirects, default 5).
+No per-hop spacing or accurate historical HTTP request counter is claimed.
+It imports neither production
+configuration nor wiki/ingest packages; the dependency fence covers the binary.
+
+`trial/report.go` stores canonical, bounded selected-source manifests using
+`Archive.ImportReport`. The object is labeled as a manifest, not a complete
+research report. `archive/reportread.go` supplies narrowly bounded, hash-verified
+report reads and metadata-only association queries. It exposes no remote file
+read operation and requires no registry schema migration. A fixed supplier and
+stable key bind each manifest and operator-imported capture. Limits are ten
+manifests, five sources per manifest and five imported captures per source;
+check-and-store operations share the trial claim lock across processes. Imports
+do not consume network budgets because they never request a source URL.
+
+The local CLI opens only explicitly selected bounded regular files, refusing
+final symlinks and replacements between lstat/open. `Service.ImportOriginal`
+accepts a reader rather than a path, verifies complete bytes/size/hash/media,
+then uses `CaptureSource`. Independent files for one source retain independent
+completeness. Imported copies cannot be upgraded to verified and never imply
+research-time identity. Source references outside the trial remain external
+claims until matching bytes are actually imported. No production directory is
+mounted, scanned or read by the trial service.
+
+`report_policy.go` parses operator exact-URL policy separately from untrusted
+manifest metadata. Empty lists preserve host-only behavior for legacy submits
+but refuse report-linked fetches. Nonempty initial/destination lists narrow all
+trial HTTP requests. A destination match never replaces the archive's independent
+signed-redirect query validation. Media defaults to PDF-only; optional HTML
+supports matching MIME, sniffed HTML and UTF-8/ASCII identity bytes, not rendering.
+Recognizable access pages and trial 429 stop without automated retry. There is
+no automatic robots/terms checker, link discovery, login or browser executor.
+
+The opt-in `cogvault-trial serve` command uses mcp-go stdio by default, or its
+Streamable HTTP server behind `httpauth`. HTTP has no unauthenticated mode,
+including on loopback. A validated exact endpoint path defaults to `/mcp`, with a
+pathless public HTTPS URL, bounded bodies and Origin checks. OAuth discovery composes `httpauth.Middleware` with explicit
+`httpauth.MetadataHandler` routing and a challenge wrapper targeting the
+endpoint-suffixed protected-resource metadata path; OAuth requires the distinct
+trial resource audience and scopes. Transport
+configuration does not alter trial policy or relax unknown policy-variable
+rejection. Serving never starts a worker or adds worker-control tools. Existing
+`run` and container defaults remain unchanged. This is software support only;
+new network routes, authentication grants and deployment require separate
+approval, and do not open the production gate.
 
 ---
 
