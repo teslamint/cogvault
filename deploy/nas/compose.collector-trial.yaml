@@ -48,11 +48,8 @@ services:
     volumes:
       # A dedicated named volume: its data lives under the Docker root directory,
       # physically apart from the production install directory
-      # (/volume1/docker/cogvault). To use a host directory instead, replace this
-      # line with ${COGVAULT_TRIAL_DIR}:/trial where COGVAULT_TRIAL_DIR is a NEW,
-      # EMPTY directory outside /volume1/docker/cogvault owned by uid 1000. The
-      # worker refuses a root that overlaps a protected path or is not an empty or
-      # marked trial root.
+      # (/volume1/docker/cogvault). This trial uses only this named volume;
+      # a host bind mount would hide the host path from the in-container guard.
       - cogvault-trial-data:/trial
     # No published ports and no inbound listener. The worker only dials out.
     read_only: true

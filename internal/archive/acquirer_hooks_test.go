@@ -3,6 +3,7 @@ package archive
 import (
 	"errors"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -102,5 +103,33 @@ func TestJobActivityCountsWaitingCreatedAndStartedTries(t *testing.T) {
 	}
 	if act, _ = a.JobActivity(ctx, start.Add(-time.Hour)); act.Fetches != 1 || act.Created != 2 {
 		t.Fatalf("a wider window = %+v", act)
+	}
+}
+
+// TestAcquirerAllowURLStopsRedirectBeforeNetwork tests the full URL policy on
+// redirects, including scheme and port even when the host is unchanged.
+func TestAcquirerAllowURLStopsRedirectBeforeNetwork(t *testing.T) {
+	hits := 0
+	var next string
+	f, q := newFakeNet(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		http.Redirect(w, r, next, http.StatusFound)
+	}))
+	allowedPort := port(t, f)
+	q.AllowHost = func(h string) bool { return h == "public.test" }
+	q.AllowURL = func(u *url.URL) bool { return u.Scheme == "http" && u.Port() == allowedPort }
+	first := "http://public.test:" + allowedPort + "/redir"
+	for _, target := range []string{
+		"https://public.test:" + allowedPort + "/after",
+		"http://public.test:8443/after",
+	} {
+		next = target
+		before := hits
+		if _, _, err := q.fetch(ctx, first); !errors.Is(err, ErrURLNotAllowed) {
+			t.Fatalf("redirect to %s: %v, want ErrURLNotAllowed", target, err)
+		}
+		if hits != before+1 {
+			t.Fatalf("redirect target was contacted: %d new hits", hits-before)
+		}
 	}
 }

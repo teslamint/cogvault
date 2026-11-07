@@ -62,6 +62,9 @@ var (
 	// ErrHostNotAllowed is a request to a host the Acquirer's AllowHost refuses,
 	// on the first URL or on a redirect. Nothing is sent to that host.
 	ErrHostNotAllowed = errors.New("host is not on the allowed list")
+	// ErrURLNotAllowed is a URL refused by the Acquirer's URL policy before
+	// any request to that URL is sent.
+	ErrURLNotAllowed = errors.New("URL is outside the allowed policy")
 	// ErrNotPDF is a body that does not start with the PDF header, refused by an
 	// Acquirer with PDFOnly before anything is stored.
 	ErrNotPDF = errors.New("the response is not a PDF")
@@ -176,6 +179,10 @@ type Acquirer struct {
 	// of every redirect before any request to it; false refuses with
 	// ErrHostNotAllowed. It narrows the public-address rule, never widens it.
 	AllowHost func(host string) bool
+	// AllowURL, when set, checks the full first URL and each redirect before
+	// any request to it. It can require https and a default port in addition
+	// to the host rule; false refuses with ErrURLNotAllowed.
+	AllowURL func(u *url.URL) bool
 	// PDFOnly refuses a body that does not start with "%PDF-" (ErrNotPDF).
 	PDFOnly bool
 }
@@ -298,6 +305,9 @@ func (q Acquirer) fetch(ctx context.Context, raw string) ([]byte, AcquisitionRec
 	if q.AllowHost != nil && !q.AllowHost(strings.ToLower(u.Hostname())) {
 		return nil, rec, fmt.Errorf("%w: the first URL", ErrHostNotAllowed)
 	}
+	if q.AllowURL != nil && !q.AllowURL(u) {
+		return nil, rec, fmt.Errorf("%w: the first URL", ErrURLNotAllowed)
+	}
 	rec.RequestedURL = u.String()
 	if pm != nil {
 		rec.RequestedURL = pm.first
@@ -344,6 +354,9 @@ func (q Acquirer) fetch(ctx context.Context, raw string) ([]byte, AcquisitionRec
 			// token can be neither repeated nor passed on a further hop.
 			if q.AllowHost != nil && !q.AllowHost(strings.ToLower(req.URL.Hostname())) {
 				return fmt.Errorf("%w: a redirect", ErrHostNotAllowed)
+			}
+			if q.AllowURL != nil && !q.AllowURL(req.URL) {
+				return fmt.Errorf("%w: a redirect", ErrURLNotAllowed)
 			}
 			if len(via) == 1 && !rec.SignedRedirect && pm.matchRedirect(req.URL) {
 				rec.SignedRedirect = true

@@ -92,6 +92,8 @@ func classifyAcquire(res Result, rec AcquisitionRecord, err error) JobOutcome {
 		out.State, out.Detail = JobFailed, "destination is not a public address"
 	case errors.Is(err, ErrHostNotAllowed):
 		out.State, out.Detail = JobFailed, "a host is not on the allowed list (the first URL or a redirect); nothing was sent to it"
+	case errors.Is(err, ErrURLNotAllowed):
+		out.State, out.Detail = JobFailed, "a URL is outside the allowed policy (the first URL or a redirect); nothing was sent to it"
 	case errors.Is(err, ErrNotPDF):
 		out.State, out.Detail = JobFailed, "the response is not a PDF"
 	case errors.Is(err, ErrInvalid):

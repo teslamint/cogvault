@@ -53,14 +53,15 @@ Add a separate, narrower way to run the HTTP collector, and keep item 14 as it i
    distribution of RFCs (<https://www.rfc-editor.org/series/rfc-use/>). KCI and BOK
    terms remain undecided, so neither is allowed by default.
 5. **Bounded volume.** Defaults and hard caps (the program refuses a setting above a cap):
-   queued jobs 10 (cap 50); submissions per day 20 (100); requests per hour 20 (60);
-   requests per day 60 (200); minimum 10 s between requests (floor 2 s); attempts 3
+   queued jobs 10 (cap 50); submissions per day 20 (100); job attempts per hour 20 (60);
+   job attempts per day 60 (200); minimum 10 s between requests (floor 2 s); attempts 3
    (5); body 32 MiB (cap 32 MiB).
 6. **The worker, not the submitter, enforces.** Jobs can also be queued by the generic
    `archive job submit` on the same root. So the worker checks the request budget before
    each claim, and checks every claimed job (scheme, host, executor, attempt cap)
    before it sends a byte; a job outside the policy ends as failed with "nothing was
-   sent". Budgets are counted from the registry, so they survive a restart. A root-local cross-process lock serializes each budget check with the claim that records an attempt, including a second `run --once` process.
+   sent". Budgets count job attempts, not each HTTP redirect hop, and are counted
+   from the registry so they survive a restart. A root-local cross-process lock serializes each budget check with the claim that records an attempt, including a second `run --once` process.
 7. **Stop, restart, no automatic deletion.** The container may be stopped and restarted
    (a restart policy is allowed); the same job is read back from the same root. A
    `PAUSE` file pauses the worker without stopping it. There is **no delete or cleanup
@@ -95,8 +96,13 @@ Add a separate, narrower way to run the HTTP collector, and keep item 14 as it i
   amd64 image can be built (`docker build --platform linux/amd64 --target trial .`),
   imported with Portainer's Images import, or published later through the release flow
   of ADR 0025 with its own approval.
-- Every setting that widens the trial (another host, higher limits, a browser or login
-  path, a connection to ingest) needs a new decision, not an environment variable.
+- The environment can change allowlisted hosts (up to ten) and numeric limits within
+  hard caps; this is a technical facility, not approval to widen this deployment.
+  The 2026-11-07 approval and deployed stack cover only `www.rfc-editor.org` and
+  the recorded limits. Widening the host set or limits requires a separate
+  recorded operator decision before changing Portainer environment values.
+  Browser, login, or ingest connections need a new design and decision; no trial
+  environment variable enables them.
 
 ## Rejected
 

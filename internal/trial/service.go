@@ -128,6 +128,7 @@ func (s *Service) Submit(ctx context.Context, rawURL, label string) (archive.Job
 func (s *Service) acquirer() archive.Acquirer {
 	q := s.Acquirer
 	q.AllowHost = s.Cfg.HostAllowed
+	q.AllowURL = func(u *url.URL) bool { return s.checkURL(u.String()) == nil }
 	q.PDFOnly = true
 	q.MaxBytes = s.Cfg.MaxBytes
 	return q

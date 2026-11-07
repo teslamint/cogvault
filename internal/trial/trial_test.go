@@ -486,11 +486,11 @@ func mustCount(t *testing.T, s *Service) int {
 // can hand a trial capture to ingest or reach the wiki.
 func TestTrialPackageDoesNotLinkIngestOrTheProductionGate(t *testing.T) {
 	if _, err := exec.LookPath("go"); err != nil {
-		t.Skip("no go tool")
+		t.Fatal("go tool is required for the dependency gate")
 	}
-	out, err := exec.Command("go", "list", "-deps", "-f", "{{.ImportPath}}", "github.com/teslamint/cogvault/internal/trial").CombinedOutput()
+	out, err := exec.Command("go", "list", "-deps", "-f", "{{.ImportPath}}", "github.com/teslamint/cogvault/internal/trial", "github.com/teslamint/cogvault/cmd/cogvault-trial").CombinedOutput()
 	if err != nil {
-		t.Skipf("go list failed: %v", err)
+		t.Fatalf("go list failed: %v: %s", err, out)
 	}
 	for _, banned := range []string{"internal/ingest", "internal/mcp", "internal/storage", "internal/index", "internal/archivegate", "internal/adapter", "internal/config"} {
 		for _, dep := range strings.Fields(string(out)) {
@@ -625,5 +625,25 @@ func TestConcurrentWorkersShareTheRequestBudget(t *testing.T) {
 	}
 	if activity.Fetches != 1 || activity.Active != 1 {
 		t.Fatalf("activity = %+v, want 1 fetch and 1 waiting", activity)
+	}
+}
+
+// TestTrialAcquirerAppliesURLPolicyToRedirects checks the policy callback
+// installed on the Acquirer that sees every redirect.
+func TestTrialAcquirerAppliesURLPolicyToRedirects(t *testing.T) {
+	site := newSite(t)
+	svc := site.open(t, mustConfig(t, newRoot(t), nil))
+	svc.relaxed = false
+	check := svc.acquirer().AllowURL
+	for raw, want := range map[string]bool{
+		"https://pdf.test/a.pdf":      true,
+		"http://pdf.test/a.pdf":       false,
+		"https://pdf.test:8443/a.pdf": false,
+		"https://other.test/a.pdf":    false,
+	} {
+		u, _ := url.Parse(raw)
+		if got := check(u); got != want {
+			t.Errorf("%s: allowed=%v, want %v", raw, got, want)
+		}
 	}
 }
