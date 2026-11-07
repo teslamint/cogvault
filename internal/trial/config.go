@@ -163,31 +163,49 @@ func FromEnviron(environ []string) (Config, error) {
 		return Config{}, err
 	}
 	c.AllowedHosts = hosts
-	if raw := strings.TrimSpace(env[EnvForbiddenPaths]); raw != "" {
-		for _, p := range strings.Split(raw, ",") {
-			p = strings.TrimSpace(p)
-			if err := checkAbsClean(EnvForbiddenPaths, p); err != nil {
-				return Config{}, err
-			}
-			c.ForbiddenPaths = append(c.ForbiddenPaths, p)
-		}
+	paths, err := parseForbidden(env[EnvForbiddenPaths])
+	if err != nil {
+		return Config{}, err
 	}
+	c.ForbiddenPaths = paths
+	if err := parseLimits(env, &c); err != nil {
+		return Config{}, err
+	}
+	return c, nil
+}
+
+func parseForbidden(raw string) ([]string, error) {
+	var out []string
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	for _, p := range strings.Split(raw, ",") {
+		p = strings.TrimSpace(p)
+		if err := checkAbsClean(EnvForbiddenPaths, p); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+// parseLimits fills the numeric limits from env, each within its hard cap.
+func parseLimits(env map[string]string, c *Config) error {
 	for _, f := range []struct {
-		key  string
-		dst  *int
-		def  int
-		max  int
-		name string
+		key string
+		dst *int
+		def int
+		max int
 	}{
-		{EnvMaxQueued, &c.MaxQueued, DefaultMaxQueued, CapMaxQueued, "queued jobs"},
-		{EnvMaxSubmitsPerDay, &c.MaxSubmitsPerDay, DefaultSubmitsDay, CapMaxSubmitsPerDay, "submissions per day"},
-		{EnvMaxFetchesHour, &c.MaxFetchesHour, DefaultFetchesHour, CapMaxFetchesHour, "requests per hour"},
-		{EnvMaxFetchesDay, &c.MaxFetchesDay, DefaultFetchesDay, CapMaxFetchesDay, "requests per day"},
-		{EnvMaxAttempts, &c.MaxAttempts, DefaultMaxAttempts, CapMaxAttempts, "attempts"},
+		{EnvMaxQueued, &c.MaxQueued, DefaultMaxQueued, CapMaxQueued},
+		{EnvMaxSubmitsPerDay, &c.MaxSubmitsPerDay, DefaultSubmitsDay, CapMaxSubmitsPerDay},
+		{EnvMaxFetchesHour, &c.MaxFetchesHour, DefaultFetchesHour, CapMaxFetchesHour},
+		{EnvMaxFetchesDay, &c.MaxFetchesDay, DefaultFetchesDay, CapMaxFetchesDay},
+		{EnvMaxAttempts, &c.MaxAttempts, DefaultMaxAttempts, CapMaxAttempts},
 	} {
 		n, err := parseInt(env, f.key, f.def, 1, f.max)
 		if err != nil {
-			return Config{}, err
+			return err
 		}
 		*f.dst = n
 	}
@@ -195,7 +213,7 @@ func FromEnviron(environ []string) (Config, error) {
 	if v := env[EnvMinInterval]; v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil || d < CapMinIntervalFloor || d > 24*time.Hour {
-			return Config{}, configErr(EnvMinInterval, "a duration from 2s to 24h")
+			return configErr(EnvMinInterval, "a duration from 2s to 24h")
 		}
 		c.MinInterval = d
 	}
@@ -203,14 +221,14 @@ func FromEnviron(environ []string) (Config, error) {
 	if v := env[EnvMaxBytes]; v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)
 		if err != nil || n < 1024 || n > CapMaxBytes {
-			return Config{}, configErr(EnvMaxBytes, "a byte count from 1024 to 33554432")
+			return configErr(EnvMaxBytes, "a byte count from 1024 to 33554432")
 		}
 		c.MaxBytes = n
 	}
 	if c.MaxFetchesHour > c.MaxFetchesDay {
-		return Config{}, configErr(EnvMaxFetchesHour, "must not exceed the daily request limit")
+		return configErr(EnvMaxFetchesHour, "must not exceed the daily request limit")
 	}
-	return c, nil
+	return nil
 }
 
 func checkAbsClean(key, p string) error {

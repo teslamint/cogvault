@@ -53,7 +53,7 @@ func (c Config) CheckRoot() error {
 	case err != nil && !errors.Is(err, fs.ErrNotExist):
 		return rootErr("the root cannot be inspected")
 	}
-	real, err := resolve(c.Root)
+	resolved, err := resolve(c.Root)
 	if err != nil {
 		return rootErr("the root's parent does not exist or cannot be resolved")
 	}
@@ -62,11 +62,11 @@ func (c Config) CheckRoot() error {
 		if err != nil {
 			rp = filepath.Clean(p)
 		}
-		if overlaps(real, rp) {
+		if overlaps(resolved, rp) {
 			return rootErr("the root overlaps a protected path")
 		}
 	}
-	for dir := filepath.Dir(real); ; dir = filepath.Dir(dir) {
+	for dir := filepath.Dir(resolved); ; dir = filepath.Dir(dir) {
 		for _, n := range productionArtifacts {
 			if _, err := os.Lstat(filepath.Join(dir, n)); err == nil {
 				return rootErr("the root is inside a directory that holds an archive, a wiki, or a config")

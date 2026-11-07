@@ -12,10 +12,11 @@ import (
 // about every redirect, and a refusal means nothing is sent to that host.
 func TestAcquirerAllowHostCoversTheFirstURLAndEveryRedirect(t *testing.T) {
 	var hits []string
+	var elsewhere string // set once the server's port is known; the redirect target is not derived from the request
 	f, q := newFakeNet(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits = append(hits, r.Host)
 		if r.URL.Path == "/redir" {
-			http.Redirect(w, r, "http://elsewhere.test:"+strings.Split(r.Host, ":")[1]+"/doc", http.StatusFound)
+			http.Redirect(w, r, elsewhere, http.StatusFound)
 			return
 		}
 		w.Header().Set("Content-Type", "application/pdf")
@@ -23,6 +24,7 @@ func TestAcquirerAllowHostCoversTheFirstURLAndEveryRedirect(t *testing.T) {
 	}))
 	f.hosts["elsewhere.test"] = []string{"93.184.216.35"}
 	port := port(t, f)
+	elsewhere = "http://elsewhere.test:" + port + "/doc"
 	q.AllowHost = func(h string) bool { return h == "public.test" }
 
 	if _, rec, err := q.fetch(ctx, "http://public.test:"+port+"/doc"); err != nil || rec.Size == 0 {
