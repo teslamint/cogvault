@@ -100,8 +100,8 @@ Still unverified: backup and restore after NAS failure, long-running behavior, a
 ## NAS run record (2026-11-07 UTC)
 
 Portainer endpoint 1, separate stack ID 11 `cogvault-trial`, status active. The final
-imported image is `cogvault-trial:sha-8b72bee` (linux/amd64, image ID
-`sha256:f322810380265aa7a51227a0f1aebfa435b0a16e37affbd5d0b11ed3868596fd`).
+imported image is `cogvault-trial:sha-9e0b006` (linux/amd64, image ID
+`sha256:4c4bec467024392b2a60df987902b9db4d6c73c8dfb3247a7cef1d357ff20a70`).
 The stack uses named volume `cogvault-trial-data`, mounted at `/trial`, with Docker
 mountpoint `/volume1/@docker/volumes/cogvault-trial-data/_data`. There is no
 production path mount and no port binding. Docker inspect showed a read-only root,
