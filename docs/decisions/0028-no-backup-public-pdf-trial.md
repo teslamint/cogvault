@@ -60,7 +60,7 @@ Add a separate, narrower way to run the HTTP collector, and keep item 14 as it i
    `archive job submit` on the same root. So the worker checks the request budget before
    each claim, and checks every claimed job (scheme, host, executor, attempt cap)
    before it sends a byte; a job outside the policy ends as failed with "nothing was
-   sent". Budgets are counted from the registry, so they survive a restart.
+   sent". Budgets are counted from the registry, so they survive a restart. A root-local cross-process lock serializes each budget check with the claim that records an attempt, including a second `run --once` process.
 7. **Stop, restart, no automatic deletion.** The container may be stopped and restarted
    (a restart policy is allowed); the same job is read back from the same root. A
    `PAUSE` file pauses the worker without stopping it. There is **no delete or cleanup
@@ -125,8 +125,18 @@ submission returned the same job with no second download, and a production-looki
 refused. A linux/amd64 image built, ran under emulation (`uname -m` x86_64), applied the
 policy, and refused an overlapping root; it did not fetch.
 
-Not verified: the NAS itself (Portainer 2.45.2, Docker 24.0.2 behavior, Synology paths and
-permissions, the outbound path, the named volume's ownership on first use), the compose
-file as a Portainer stack, native x86_64 execution, a published image, and long-running
-behavior. RFC documents can change; a later fetch that gives a different digest is
+At the time of the local test, the NAS was not verified. The NAS addendum below
+records the later deployment. A published image, long-running behavior, backup,
+and restore remain unverified. RFC documents can change; a later fetch that gives a different digest is
 recorded with its response and time, never treated as an error.
+
+## NAS trial addendum (2026-11-07 UTC)
+
+The user approved this isolated, no-backup trial. Portainer stack 11 now runs on
+the NAS from a locally imported linux/amd64 image, with a named volume under
+`/volume1/@docker/volumes/cogvault-trial-data/_data`. The initial Compose
+`cpus: 0.5` failed because this Synology Docker kernel lacks the CPU CFS quota
+feature; removing that one setting allowed the stack to start. The RFC 9110 PDF
+was fetched once and held with a verified SHA-256 and one attempt, and the same
+record survived a stack stop/start and image redeployment. The complete run record
+is in `docs/deployment/trial.md`. The production gate remains closed.

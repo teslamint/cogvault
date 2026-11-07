@@ -100,6 +100,11 @@ func (s *Service) Submit(ctx context.Context, rawURL, label string) (archive.Job
 	if err := s.checkURL(rawURL); err != nil {
 		return archive.Job{}, false, err
 	}
+	unlock, err := s.claimLock(ctx)
+	if err != nil {
+		return archive.Job{}, false, err
+	}
+	defer unlock()
 	now := s.Now()
 	day, err := s.A.JobActivity(ctx, now.Add(-24*time.Hour))
 	if err != nil {
@@ -163,12 +168,9 @@ func (s *Service) RunOnce(ctx context.Context) (*archive.Job, string, error) {
 	if s.Cfg.Paused() {
 		return nil, "paused", nil
 	}
-	if why, err := s.budget(ctx); err != nil || why != "" {
-		return nil, why, err
-	}
-	job, err := s.A.ClaimJob(ctx, archive.ExecutorHTTP, s.Owner, s.Lease)
+	job, why, err := s.claimWithinBudget(ctx)
 	if err != nil || job == nil {
-		return nil, "", err
+		return nil, why, err
 	}
 	if why := s.refuse(job); why != "" {
 		done, cerr := s.A.CompleteJob(ctx, job.JobID, s.Owner, job.AttemptsMade, archive.JobOutcome{
@@ -181,6 +183,24 @@ func (s *Service) RunOnce(ctx context.Context) (*archive.Job, string, error) {
 	}
 	done, err := s.A.RunClaimedJob(ctx, s.acquirer(), job, s.Owner)
 	return done, "", err
+}
+
+// claimWithinBudget holds the cross-process lock until ClaimJob records its
+// attempt, so a second worker sees that attempt in its budget query.
+func (s *Service) claimWithinBudget(ctx context.Context) (*archive.Job, string, error) {
+	unlock, err := s.claimLock(ctx)
+	if err != nil {
+		return nil, "", err
+	}
+	defer unlock()
+	if s.Cfg.Paused() {
+		return nil, "paused", nil
+	}
+	if why, err := s.budget(ctx); err != nil || why != "" {
+		return nil, why, err
+	}
+	job, err := s.A.ClaimJob(ctx, archive.ExecutorHTTP, s.Owner, s.Lease)
+	return job, "", err
 }
 
 // refuse returns why a claimed job may not be fetched, or "".

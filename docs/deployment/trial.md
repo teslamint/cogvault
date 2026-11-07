@@ -1,6 +1,6 @@
 # No-backup public-PDF trial: NAS deployment design
 
-**Status: review draft. Nothing here has been deployed, no command below was run against the NAS, no image is published, and no Portainer stack was created.** Policy: `docs/decisions/0028-no-backup-public-pdf-trial.md`. The ADR 0027 item 14 production gate is unchanged and still closed; this trial does not satisfy it.
+**Status: isolated NAS trial running (2026-11-07). The production gate remains closed.** Policy: `docs/decisions/0028-no-backup-public-pdf-trial.md`. The ADR 0027 item 14 production gate is unchanged and still closed; this trial does not satisfy it.
 
 ## What this is, and is not
 
@@ -20,7 +20,7 @@ The existing stack (Portainer stack id 10, mounts under `/volume1/docker/cogvaul
 | File | Purpose |
 |---|---|
 | `Dockerfile` target `trial` | The 21 MB image: `cogvault-trial` on Alpine, non-root uid 1000, `/trial/data` pre-created. The default target is unchanged. |
-| `deploy/nas/compose.collector-trial.yaml` | The stack template. Read-only root, `tmpfs /tmp`, all capabilities dropped, `no-new-privileges`, 256 MB, 0.5 CPU, 64 pids, no ports, a restart policy. |
+| `deploy/nas/compose.collector-trial.yaml` | The stack template. Read-only root, `tmpfs /tmp`, all capabilities dropped, `no-new-privileges`, 256 MB, 64 pids, no ports, a restart policy. |
 | `deploy/nas/env.trial.example` | The stack's environment variables, including the acceptance sentence. |
 | `cmd/cogvault-trial`, `internal/trial` | The program and its policy code. |
 
@@ -52,7 +52,7 @@ The worker and every command refuse, before writing anything, a root that: is a 
 ## What the worker does
 
 - **Submit** (`cogvault-trial submit URL`): https only, an allowlisted host, no userinfo or non-default port, at most 2048 characters; refuses a full queue or the daily submission limit.
-- **Before every claim** the worker checks the budget (requests in the last hour and day, and the minimum interval since the last try), counted from the registry, so it survives a restart.
+- **Before every claim** the worker checks the budget (requests in the last hour and day, and the minimum interval since the last try), counted from the registry, so it survives a restart. A cross-process claim lock serializes the budget check with the attempt record, so a second worker cannot use the same remaining request slot.
 - **After every claim, before any request,** it checks the job again (https, host, executor, attempt cap). A job queued by another route, such as `cogvault archive job submit` on the same root, cannot widen the policy: it ends as failed with "nothing was sent". `browser` jobs are never claimed.
 - **Per request:** the public-address rule, the checked-address connection, the redirect limit, and the size and time bounds of the production `acquire`; a redirect to a host that is not allowed is refused before any request to it; only a body that starts `%PDF-` is stored.
 - **Result:** a held capture of unknown completeness. The attempt records the response (final URL, status, headers, size, fetch time) and the object's SHA-256. If a public document later changes, the new digest is recorded beside the old response; it is not an error.
@@ -72,7 +72,7 @@ cogvault-trial version
 
 There is **no delete or cleanup command**.
 
-## Smoke test to run on the NAS (once, after approval)
+## NAS smoke test
 
 1. Create a new stack (new name) from `compose.collector-trial.yaml` with the variables from `env.trial.example`. Do not change the existing stack.
 2. In the console: `cogvault-trial check`, then `cogvault-trial submit https://www.rfc-editor.org/rfc/rfc9110.pdf`, then `cogvault-trial status JOB_ID` until it is `held`.
@@ -85,7 +85,7 @@ Fetch the file **once**. Do not repeat it for timing.
 
 ## Getting the image onto the NAS
 
-No image is published. Options, each needing its own approval: build the amd64 image on a development machine (`docker build --platform linux/amd64 --target trial -t cogvault-trial:amd64 .`), `docker save` it, and use Portainer's **Images, Import**; or publish it through the release flow of ADR 0025 and pin the digest in `COGVAULT_TRIAL_IMAGE`. The Dockerfile pins the Alpine base by digest.
+No image is published. The approved trial used the local image import option: build the amd64 image on a development machine (`docker build --platform linux/amd64 --target trial -t cogvault-trial:amd64 .`), `docker save` it, and use Portainer's **Images, Import**; or publish it through the release flow of ADR 0025 and pin the digest in `COGVAULT_TRIAL_IMAGE`. The Dockerfile pins the Alpine base by digest.
 
 ## Manual cleanup (documented, never automatic)
 
@@ -95,4 +95,43 @@ When the trial ends and its data is no longer wanted: stop the stack, then, as a
 
 Verified on a development Mac (isolated containers, a named volume, no NAS): the package and command tests; a linux/arm64 container with the stack's constraints doing one real download of the RFC 9110 PDF (2,858,365 bytes, SHA-256 as above, held, `completeness unknown`), the same job read after a stop and start, pause and resume, a repeated submission returning the same job, and a production-looking root refused; a linux/amd64 image built, run under emulation (`uname -m` is x86_64), applying the policy and refusing an overlapping root, without fetching.
 
-Not verified: the NAS (Portainer 2.45.2, Docker 24.0.2, Synology paths, the outbound path, first-use ownership of the named volume), the compose file as a Portainer stack (it was parsed as YAML only and uses only common Compose keys), native x86_64 execution, a published image, and long-running behavior.
+Still unverified: backup and restore after NAS failure, long-running behavior, a published release image, and production ingest. The NAS run below verified native x86_64 execution, Portainer deployment, volume ownership, the outbound path, and stack restart persistence.
+
+## NAS run record (2026-11-07 UTC)
+
+Portainer endpoint 1, separate stack ID 11 `cogvault-trial`, status active. The final
+imported image is `cogvault-trial:sha-e3e6880` (linux/amd64, image ID
+`sha256:f4e08fbd7a65f999c59cb13e507b124355dc1cdee3599a78180bac637085c9f1`).
+The stack uses named volume `cogvault-trial-data`, mounted at `/trial`, with Docker
+mountpoint `/volume1/@docker/volumes/cogvault-trial-data/_data`. There is no
+production path mount and no port binding. Docker inspect showed a read-only root,
+all capabilities dropped, `no-new-privileges`, and a 256 MiB memory limit. The
+Synology kernel rejected Compose `cpus: 0.5` (CPU CFS quota unsupported), so that
+setting was removed before the successful deployment. Docker inspect returned
+`PidsLimit: null` despite the Compose setting; a process limit is therefore not
+claimed as verified on this host.
+
+The only allowed host was `www.rfc-editor.org`, with two queued jobs, two submissions
+per day, one fetch per hour, two per day, 30 seconds between attempts, and two
+attempts maximum. `check` passed. Submitting RFC 9110 PDF created job
+`job_881ca154ea435c7fb0840ff92d969689`. One attempt ended `held`, capture
+`cap_ca5af47bebd8fe960208f9c5ff55708a`, 2,858,365 bytes, object
+`sha256:60b30efa1048900833d1758440247fe8ac85a3134f2327388dcb24e07d814c89`.
+A `sha256sum` of the actual file on the mounted volume matched that object ID and
+the direct download made at the same time. The response recorded HTTP 200,
+`application/pdf`, final URL, resolved address, response time and ETag. This is a
+**post-research recovery**, not the original viewed during research, and its
+completeness is unknown; ingest stayed held.
+
+A request to `example.com` was refused before submission. Submitting the same RFC
+URL again returned the same job, with one attempt. `pause`, status, and `resume`
+worked. The Portainer stack was stopped and started; the named volume remained,
+and the same trial ID, job ID, attempt count, capture, and object ID were readable
+again. Redeployment to the corrected image kept them too. The existing production
+`cogvault` container remained healthy. This proves persistence across container
+and stack restarts on this NAS, not survival of a NAS failure or a restore from
+backup.
+
+The trial is still running. To stop collection without deleting data, stop stack
+11 in Portainer. Do not remove the named volume unless the trial history is no
+longer wanted.

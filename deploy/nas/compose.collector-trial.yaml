@@ -19,7 +19,7 @@
 # as the worker; the worker re-checks every job before it sends anything).
 #
 # Compose features used: services, environment, volumes (named), read_only,
-# tmpfs, cap_drop, security_opt, mem_limit, cpus, pids_limit, restart,
+# tmpfs, cap_drop, security_opt, mem_limit, pids_limit, restart,
 # stop_grace_period. No build, no ports, no networks, no secrets, no configs.
 
 services:
@@ -62,7 +62,6 @@ services:
     security_opt:
       - no-new-privileges:true
     mem_limit: 256m
-    cpus: "0.5"
     pids_limit: 64
     # A stop abandons a download in progress without a record; its lease expires
     # and the next start resumes the job. Nothing is deleted.

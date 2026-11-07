@@ -576,3 +576,54 @@ func TestLoopOnceReturnsARootError(t *testing.T) {
 		t.Fatal("a paused --once run returned no error")
 	}
 }
+
+// TestConcurrentWorkersShareTheRequestBudget checks the last permitted fetch
+// cannot be claimed twice by two processes sharing one trial root.
+func TestConcurrentWorkersShareTheRequestBudget(t *testing.T) {
+	site := newSite(t)
+	cfg := mustConfig(t, newRoot(t), map[string]string{EnvMaxFetchesHour: "1", EnvMaxFetchesDay: "1"})
+	first := site.open(t, cfg)
+	second := site.open(t, cfg)
+	second.Owner = "trial-second-worker"
+	for _, name := range []string{"one", "two"} {
+		if _, _, err := first.Submit(ctx, "http://pdf.test/"+name+".pdf", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	unlock, err := first.claimLock(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lockCtx, cancel := context.WithTimeout(ctx, 40*time.Millisecond)
+	_, _, err = second.RunOnce(lockCtx)
+	cancel()
+	unlock()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("second worker ignored claim lock: %v", err)
+	}
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, svc := range []*Service{first, second} {
+		go func(s *Service) {
+			<-start
+			_, _, err := s.RunOnce(ctx)
+			results <- err
+		}(svc)
+	}
+	close(start)
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := site.count("pdf.test"); got != 1 {
+		t.Fatalf("requests with budget 1: %d", got)
+	}
+	activity, err := first.A.JobActivity(ctx, time.Now().Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if activity.Fetches != 1 || activity.Active != 1 {
+		t.Fatalf("activity = %+v, want 1 fetch and 1 waiting", activity)
+	}
+}
