@@ -14,7 +14,6 @@ import (
 	"net/netip"
 	"net/url"
 	"path"
-	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -62,18 +61,27 @@ var (
 	ErrStore = errors.New("the downloaded file could not be stored")
 )
 
-// urlInText finds a URL inside an error text.
-var urlInText = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*://[^\s"']*`)
-
-// scrubURLs removes every URL from an error text. A client or parser error can
-// repeat a URL it was given, and a redirect URL can carry a signed token.
-func scrubURLs(s string) string { return urlInText.ReplaceAllString(s, "<url>") }
-
-// scrubbedError is an error whose text never repeats a URL. It still unwraps to
-// its cause, so errors.Is and errors.As (a DNS error, a timeout) keep working.
+// scrubbedError is a transport or parser error reduced to a fixed message. The
+// text of such an error can repeat a URL in any form (absolute, relative, or
+// scheme-relative, as in a Location Go cannot parse), and a redirect URL can
+// carry a signed token, so no part of the original text is kept. It still
+// unwraps to its cause, so errors.Is and errors.As (a DNS error, a timeout, a
+// net.Error) keep classifying it.
 type scrubbedError struct{ err error }
 
-func (e *scrubbedError) Error() string { return scrubURLs(e.err.Error()) }
+func (e *scrubbedError) Error() string {
+	var dns *net.DNSError
+	var ne net.Error
+	switch {
+	case errors.As(e.err, &dns):
+		return "the request failed: DNS lookup failed"
+	case errors.Is(e.err, context.DeadlineExceeded) || (errors.As(e.err, &ne) && ne.Timeout()):
+		return "the request failed: timed out"
+	case strings.Contains(e.err.Error(), "Location header"):
+		return "the request failed: a redirect Location could not be parsed"
+	}
+	return "the request failed: could not connect or the connection broke"
+}
 func (e *scrubbedError) Unwrap() error { return e.err }
 
 // storeFaultCode names a storage failure by a fixed code. The text of a
@@ -333,7 +341,7 @@ func (q Acquirer) fetch(ctx context.Context, raw string) ([]byte, AcquisitionRec
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return nil, rec, fmt.Errorf("%w: %s", ErrInvalid, scrubURLs(err.Error()))
+		return nil, rec, fmt.Errorf("%w: the request could not be built", ErrInvalid)
 	}
 	req.Header.Set("User-Agent", acquireUserAgent)
 	req.Header.Set("Accept-Encoding", "identity")

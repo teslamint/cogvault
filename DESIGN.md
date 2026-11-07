@@ -877,8 +877,10 @@ before they are recorded, the capture's URL is the first URL, `Referer` is
 deleted in `CheckRedirect` (Go sets it from the previous URL before it calls
 the check, so without that the signed URL would reach a further hop), and the
 client's `*url.Error`, which repeats the request URL, is unwrapped to its cause,
-and every URL is then scrubbed from the remaining text (a `Location` that Go
-cannot parse is repeated by the client's own error, token included).
+and that cause is wrapped in a `scrubbedError` whose text is one of a few fixed
+messages (a `Location` Go cannot parse is repeated by the client's own error in
+whatever form it was sent, token included, so no part of the original text is
+kept; the wrapper still unwraps, so DNS and timeout classification survive).
 `sourcePolicies` is a variable only so a test in this package can swap in a
 plain-http copy for a local server; nothing else writes it. `SubmitJob` stores
 the policy's normalized first URL, so a repeated submission is the same job.

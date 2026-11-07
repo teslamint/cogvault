@@ -1,11 +1,13 @@
 package archive
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -231,9 +233,17 @@ func (s *bokSite) serve(w http.ResponseWriter, r *http.Request) {
 		beh := s.first[id]
 		s.mu.Unlock()
 		switch beh {
-		case "bad-escape":
-			// A Location that Go cannot parse: the client's error repeats it.
-			w.Header().Set("Location", "http://file-cdn.bok.or.kr/portal/"+id+"/2/tempFile%zz.pdf?"+signedQuery(id, "2", secretHMAC))
+		case "bad-escape", "bad-escape-relative", "bad-escape-scheme":
+			// A Location that Go cannot parse: the client's error repeats it, in
+			// the absolute, path-relative, or scheme-relative form it was sent.
+			loc := "/portal/" + id + "/2/tempFile%zz.pdf?" + signedQuery(id, "2", secretHMAC)
+			switch beh {
+			case "bad-escape":
+				loc = "http://file-cdn.bok.or.kr" + loc
+			case "bad-escape-scheme":
+				loc = "//file-cdn.bok.or.kr" + loc
+			}
+			w.Header().Set("Location", loc)
 			w.WriteHeader(http.StatusFound)
 		case "other-id":
 			http.Redirect(w, r, signed(strings.Repeat("b", 32)), http.StatusFound)
@@ -593,45 +603,76 @@ func TestSubmitJobAdmitsTheAuditedSourceAndRefusesVariants(t *testing.T) {
 }
 
 // A signed Location that Go cannot parse (a bad percent escape) makes the HTTP
-// client's error repeat the whole URL, token included. Nothing may carry it: not
-// the returned error, not the job status, not the recovery attempt that
+// client's error repeat the Location as it was sent, token included, whether it
+// was absolute, path-relative, or scheme-relative. Nothing may carry any part of
+// it: not the returned error, not the job status, not the recovery attempt that
 // Reacquire writes, and not a table.
 func TestMalformedSignedLocationLeaksNoToken(t *testing.T) {
-	a, _ := openTest(t)
-	s, _, q := newBOKSite(t)
-	id := s.id("bad-escape", "")
-	hasToken := func(label, text string) {
-		t.Helper()
-		if strings.Contains(text, secretHMAC[:12]) || strings.Contains(text, sigField) || strings.Contains(text, tokenParam+"=") {
-			t.Fatalf("%s carries the token: %q", label, text)
+	for _, beh := range []string{"bad-escape", "bad-escape-relative", "bad-escape-scheme"} {
+		t.Run(beh, func(t *testing.T) {
+			a, _ := openTest(t)
+			s, _, q := newBOKSite(t)
+			id := s.id(beh, "")
+			clean := func(label, text string) {
+				t.Helper()
+				for _, bad := range []string{secretHMAC[:12], sigField, tokenParam + "=", "tempFile", "%zz", "file-cdn"} {
+					if strings.Contains(text, bad) {
+						t.Fatalf("%s carries %q of the Location: %q", label, bad, text)
+					}
+				}
+			}
+			_, _, err := q.fetch(ctx, s.url(id))
+			if err == nil {
+				t.Fatal("a malformed Location was followed")
+			}
+			clean("fetch error", err.Error())
+			if _, _, aerr := a.Acquire(ctx, q, s.url(id)); aerr == nil {
+				t.Fatal("Acquire followed a malformed Location")
+			} else {
+				clean("Acquire error", aerr.Error())
+			}
+
+			submit(t, a, JobRequest{URL: s.url(id)})
+			got, jerr := a.RunNextJob(ctx, q, "w", DefaultJobLease)
+			if jerr != nil || got == nil || len(got.Attempts) != 1 {
+				t.Fatalf("job = %+v, %v", got, jerr)
+			}
+			clean("job detail", got.Attempts[0].Detail)
+			clean("job response", got.Attempts[0].Response)
+
+			old := mustCapture(t, a, SourceRequest{Content: strings.NewReader("old"), OriginalName: "old.pdf", URL: s.url(id)})
+			if _, _, rerr := a.Reacquire(ctx, q, old.CaptureID, "truncated"); rerr == nil {
+				t.Fatal("Reacquire followed a malformed Location")
+			} else {
+				clean("Reacquire error", rerr.Error())
+			}
+			if bad := leaked(t, a); len(bad) != 0 {
+				t.Fatalf("the signed token was stored: %q", bad)
+			}
+		})
+	}
+}
+
+// The scrubbed error keeps its classification (a DNS error, a timeout) while its
+// text is fixed, whatever the original text said.
+func TestScrubbedErrorHasFixedTextAndKeepsItsClass(t *testing.T) {
+	dns := &net.DNSError{Err: "no such host", Name: "secret-host.example", IsNotFound: true}
+	for _, tc := range []struct {
+		err  error
+		want string
+		is   func(error) bool
+	}{
+		{dns, "the request failed: DNS lookup failed", func(e error) bool { var d *net.DNSError; return errors.As(e, &d) }},
+		{context.DeadlineExceeded, "the request failed: timed out", func(e error) bool { return errors.Is(e, context.DeadlineExceeded) }},
+		{errors.New(`failed to parse Location header "/x%zz?` + tokenParam + `=st=1"`), "the request failed: a redirect Location could not be parsed", nil},
+		{errors.New(`dial tcp 10.1.2.3:443: connect: refused`), "the request failed: could not connect or the connection broke", nil},
+	} {
+		got := &scrubbedError{tc.err}
+		if got.Error() != tc.want {
+			t.Errorf("Error() = %q, want %q", got.Error(), tc.want)
 		}
-	}
-	_, _, err := q.fetch(ctx, s.url(id))
-	if err == nil {
-		t.Fatal("a malformed Location was followed")
-	}
-	hasToken("fetch error", err.Error())
-	if _, _, aerr := a.Acquire(ctx, q, s.url(id)); aerr == nil {
-		t.Fatal("Acquire followed a malformed Location")
-	} else {
-		hasToken("Acquire error", aerr.Error())
-	}
-
-	submit(t, a, JobRequest{URL: s.url(id)})
-	got, jerr := a.RunNextJob(ctx, q, "w", DefaultJobLease)
-	if jerr != nil || got == nil || len(got.Attempts) != 1 {
-		t.Fatalf("job = %+v, %v", got, jerr)
-	}
-	hasToken("job detail", got.Attempts[0].Detail)
-	hasToken("job response", got.Attempts[0].Response)
-
-	old := mustCapture(t, a, SourceRequest{Content: strings.NewReader("old"), OriginalName: "old.pdf", URL: s.url(id)})
-	if _, _, rerr := a.Reacquire(ctx, q, old.CaptureID, "truncated"); rerr == nil {
-		t.Fatal("Reacquire followed a malformed Location")
-	} else {
-		hasToken("Reacquire error", rerr.Error())
-	}
-	if bad := leaked(t, a); len(bad) != 0 {
-		t.Fatalf("the signed token was stored: %q", bad)
+		if tc.is != nil && !tc.is(got) {
+			t.Errorf("%v lost its class through the scrub", tc.err)
+		}
 	}
 }
