@@ -702,20 +702,23 @@ download endpoint, so a real click is used and no download URL is built.
    it. A stored KCI file stays held and is not handed to ingest on its own.
 6. **Rate limits.** There are none beyond the per-job attempt budget
    (decision 5 above).
-7. **Which download is the control's.** The browser's download event does not
-   name the control that caused it. The driver takes only a download that
-   begins after the click mark, cancels and counts earlier ones, requires the
-   loaded page to carry the requested article id (also read again just before
-   the click), counts only blocks after the click as a failed download, reads
-   the download iframe for login, challenge, and consent pages, and opens no
-   popup. All of this was exercised against fake pages in a real local Chrome
-   (stable over repeated runs), and **no further live KCI request was made**
-   for it: the terms for automated use are undecided. Not covered: a download
-   the page starts in the milliseconds between the click mark and the click
-   (cannot be tested deterministically), and the real portal's frame behavior,
-   so the download's frame is not used as a gate. The real fixture download
-   recorded earlier was made with the previous version of the driver; it was
-   not repeated.
+7. **Which download is the control's.** The browser's download event alone does
+   not name the control that caused it. The driver now enables Network events
+   and pairs a download's frame and URL with the corresponding document request
+   in arrival order. That request must carry a user gesture and a JavaScript
+   initiator stack containing the portal's `fncDown` handler; authorization
+   follows the network request ID across redirects. A missing or ambiguous
+   match is canceled, counted as a stray, and never stored. This closes the
+   previously known window between arming the click and dispatching it: a
+   page-started PDF in that window has no official-control initiator and a
+   deterministic local Chrome regression test rejects it. The page must still
+   carry the requested article ID just before the click; blocked navigation,
+   iframe login/challenge/consent, and popup handling are unchanged. The full
+   local Chrome suite passed. **No further live KCI request was made** because
+   the terms for automated use remain undecided. Whether the real portal's
+   current download request exposes the same CDP initiator evidence remains to
+   be verified under that separate gate; missing evidence fails closed rather
+   than attributing an unrelated PDF.
 
 **End-to-end case that remains to be run.** Three human-verified KCI detail
 pages, with the verification date recorded: one with the control (expect

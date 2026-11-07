@@ -17,6 +17,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chromedp/cdproto/browser"
+	"github.com/chromedp/cdproto/cdp"
+	"github.com/chromedp/cdproto/network"
+	"github.com/chromedp/cdproto/runtime"
+	"github.com/chromedp/chromedp"
+
 	"github.com/teslamint/cogvault/internal/archive"
 )
 
@@ -342,6 +348,69 @@ func TestFetchIgnoresADownloadTheOfficialControlDidNotStart(t *testing.T) {
 	f, err = testDriver().Fetch(context.Background(), u("/stray-only"))
 	if err != nil || f.Code != archive.ReasonDownloadNotStarted || len(f.Body) != 0 {
 		t.Fatalf("stray only = code %q, body %q, %v; want download_not_started and no bytes", f.Code, f.Body, err)
+	}
+}
+
+// A PDF started by the page in the precise gap after the click window is
+// armed, but before the official control is clicked, has no fncDown user-
+// gesture initiator. It must be canceled even though it begins in that window.
+func TestFetchRejectsPageDownloadBetweenArmAndOfficialClick(t *testing.T) {
+	haveChrome(t)
+	_, u := portal(t)
+	d := testDriver()
+	d.beforeClick = func(ctx context.Context, s *session) error {
+		s.mu.Lock()
+		before := s.stray
+		s.mu.Unlock()
+		if _, err := chromedp.Run(ctx, chromedp.Evaluate[any](`document.querySelector('iframe[src="/stray.pdf"]').src='/stray.pdf?late=1'`)); err != nil {
+			return err
+		}
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			s.mu.Lock()
+			seen := s.stray > before
+			s.mu.Unlock()
+			if seen {
+				return nil
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		return errors.New("the page's gap download was not observed")
+	}
+	f, err := d.Fetch(context.Background(), u("/stray-only"))
+	if err != nil || f.Code != archive.ReasonDownloadNotStarted || len(f.Body) != 0 {
+		t.Fatalf("page download in click gap = code %q, %d bytes, %v", f.Code, len(f.Body), err)
+	}
+	var ev evidence
+	if err := json.Unmarshal([]byte(f.Evidence), &ev); err != nil || ev.StrayDownloads < 2 {
+		t.Fatalf("stray evidence = %+v, %v", ev, err)
+	}
+}
+
+// CDP does not identify which of two same-frame, same-URL requests produced
+// a download GUID. Mixed stray and clicked requests therefore fail closed.
+func TestDownloadAttributionRejectsAmbiguousSameURL(t *testing.T) {
+	s := &session{}
+	frame := cdp.FrameID("frame")
+	raw := "https://www.kci.go.kr/download?id=KCI_FI001"
+	request := func(id network.RequestID, gesture bool) *network.EventRequestWillBeSent {
+		e := &network.EventRequestWillBeSent{RequestID: id, FrameID: frame, Type: network.ResourceTypeDocument,
+			Request: &network.Request{URL: raw}, HasUserGesture: gesture}
+		if gesture {
+			e.Initiator = &network.Initiator{Stack: &runtime.StackTrace{CallFrames: []*runtime.CallFrame{{FunctionName: "fncDown"}}}}
+		}
+		return e
+	}
+	s.noteRequest(request("stray", false))
+	s.markClicked()
+	s.noteRequest(request("official", true))
+	for _, guid := range []string{"first", "second"} {
+		if s.authorizeDownload(&browser.EventDownloadWillBegin{FrameID: frame, URL: raw, GUID: guid}) {
+			t.Fatalf("ambiguous download %s was attributed to the official control", guid)
+		}
+	}
+	if s.stray != 2 || s.begin != nil {
+		t.Fatalf("ambiguous results: stray=%d begin=%v", s.stray, s.begin)
 	}
 }
 

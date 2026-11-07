@@ -1514,20 +1514,18 @@ verified judgment, backup scheduling, or backup expiry.
       that stands in for the detail page, or that opens in the download
       iframe (`orteDownFrame`), is classified by its own wording, as `login_required`,
       `challenge`, or `consent_required`.
-    - **Which download counts.** Only a download that begins after the click
-      is taken. One the page starts earlier is cancelled, counted
-      (`stray_downloads` in the evidence), and never stored. A blocked request
-      is recorded in the evidence, but only a blocked **navigation** (a document
-      or frame request) after the click ends the job as `external_site`; a blocked
-      image, XHR, or script, before or after the click, is unrelated to the
-      download, which is still waited for.
-      **Limit:** the browser's download event carries no link to the control
-      that was clicked, so the click is marked just before it is dispatched, and
-      a download the page started by itself in those few milliseconds would be
-      taken as the control's. This was not tested (it cannot be made
-      deterministic), and the frame the download comes from is not checked,
-      because the real portal's frame behavior could not be tested without a
-      live request.
+    - **Which download counts.** A browser download event is not enough to
+      identify the official control. The driver pairs its frame and URL with
+      a document network request in arrival order. That request must have a
+      user gesture and an initiator stack containing `fncDown`; the authorization
+      follows the same network request ID through redirects. A download without
+      this evidence is canceled and counted as a stray (`stray_downloads`),
+      including one that the page starts between arming and dispatching the
+      click. A blocked document navigation after the click can end as
+      `external_site`; a blocked image, XHR, or script is unrelated and does
+      not end the download wait. A local Chrome test injects an automatic PDF
+      in the exact former gap. Current live KCI initiator behavior is not
+      verified; absent evidence fails closed.
     - **Outcomes.** A PDF (header `%PDF-`, at most 32 MiB) is stored as a held
       capture of unknown completeness (`held`, same provenance rule). Otherwise
       the job ends with a fixed code and no bytes: `human_action_required` for

@@ -902,8 +902,11 @@ domain so every request pauses until a goroutine allows it (allowed host) or
 fails it and records the host; handlers never issue commands inline because
 the target's event loop would deadlock. Dialogs are always dismissed, never
 accepted. It clicks the control found by its label with a real mouse event,
-waits for the browser's download events (`allowAndName`, so the file is named
-by its GUID), cancels a download that passes the size bound, and classifies
+pairs each browser download event with a Network document request by frame
+and URL, accepts it only when the request carries a user gesture and an
+initiator stack containing `fncDown` (following the request ID across redirects),
+and cancels every unproven download. The downloaded file is named by its GUID
+(`allowAndName`); it cancels a download that passes the size bound, and classifies
 the no-file cases from what the page shows. A fresh profile and download
 directory are created per fetch and removed after.
 

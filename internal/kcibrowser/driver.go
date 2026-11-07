@@ -38,9 +38,11 @@ import (
 	"time"
 
 	"github.com/chromedp/cdproto/browser"
+	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/fetch"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/page"
+	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
 
 	"github.com/teslamint/cogvault/internal/archive"
@@ -77,6 +79,9 @@ type Driver struct {
 	// startErr, when set, stands in for the error of starting the browser, so a
 	// test can simulate a host with no browser without removing one.
 	startErr error
+	// beforeClick is a test-only hook for a download started after arming but
+	// before the control click. No Options field or command flag reaches it.
+	beforeClick func(context.Context, *session) error
 
 	mu sync.Mutex
 	// fault is the code of a browser-host fault seen by a fetch (the browser
@@ -113,21 +118,104 @@ type session struct {
 	begin    *browser.EventDownloadWillBegin
 	progress *browser.EventDownloadProgress
 	wake     chan struct{}
-	// clicked is set just before the official control is clicked. A download
-	// that begins earlier is a stray (the page started it by itself): it is
-	// cancelled, counted, and never returned. blockedAfter holds the hosts
-	// blocked after the click; a block before it (an unrelated subresource) is
-	// not a failed download.
-	clicked      bool
-	blockedAfter map[string]bool
-	stray        int
+	// clicked is armed immediately before the official control is clicked.
+	// A download also needs a matching document request with a user gesture
+	// whose JavaScript stack contains the portal's fncDown handler. The event
+	// alone does not prove that the control started the file.
+	clicked bool
+	// requestAuth carries the click attribution across HTTP redirects using
+	// Chrome's stable network request ID. A FIFO per frame and URL pairs each
+	// document request with its download event, including stray requests to
+	// the same URL. Missing or ambiguous evidence fails closed.
+	requestAuth  map[network.RequestID]bool
+	downloadAuth map[string][]bool
+	// Multiple document requests for the same frame and URL cannot be tied
+	// to individual browser download GUIDs. Reject all of them.
+	ambiguousDownloads map[string]bool
+	blockedAfter       map[string]bool
+	stray              int
 }
 
-// markClicked starts the window in which a download counts as the control's.
+// markClicked arms the official-control window; it does not itself authorize
+// any download. The network initiator still has to prove the click path.
 func (s *session) markClicked() {
 	s.mu.Lock()
 	s.clicked = true
 	s.mu.Unlock()
+}
+
+func downloadKey(frame cdp.FrameID, rawURL string) string {
+	return string(frame) + "\x00" + rawURL
+}
+
+// startedByOfficialControl follows synchronous and async call stacks only as
+// far as Chrome reports them. A missing stack fails closed.
+func startedByOfficialControl(stack *runtime.StackTrace) bool {
+	for stack != nil {
+		for _, frame := range stack.CallFrames {
+			if frame != nil && frame.FunctionName == "fncDown" {
+				return true
+			}
+		}
+		stack = stack.Parent
+	}
+	return false
+}
+
+// noteRequest records only document navigations; a file download from the
+// hidden iframe is one. It keeps a bounded FIFO and carries authorization
+// through redirects. A page resource cannot authorize a download.
+func (s *session) noteRequest(e *network.EventRequestWillBeSent) {
+	if e.Request == nil || e.Type != network.ResourceTypeDocument {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.requestAuth == nil {
+		s.requestAuth = make(map[network.RequestID]bool)
+		s.downloadAuth = make(map[string][]bool)
+		s.ambiguousDownloads = make(map[string]bool)
+	}
+	authorized := s.requestAuth[e.RequestID]
+	if !authorized && s.clicked && e.HasUserGesture && e.Initiator != nil {
+		authorized = startedByOfficialControl(e.Initiator.Stack)
+	}
+	if authorized && len(s.requestAuth) < 512 {
+		s.requestAuth[e.RequestID] = true
+	}
+	key := downloadKey(e.FrameID, e.Request.URL)
+	if len(s.downloadAuth) < 512 || s.downloadAuth[key] != nil {
+		if len(s.downloadAuth[key]) < 8 {
+			if len(s.downloadAuth[key]) > 0 {
+				s.ambiguousDownloads[key] = true
+			}
+			s.downloadAuth[key] = append(s.downloadAuth[key], authorized)
+		}
+	}
+}
+
+// authorizeDownload consumes the matching request in arrival order. A browser
+// event with no observed request, or a request without click attribution, is
+// canceled rather than stored as the article's PDF.
+func (s *session) authorizeDownload(e *browser.EventDownloadWillBegin) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := downloadKey(e.FrameID, e.URL)
+	queue := s.downloadAuth[key]
+	authorized := s.clicked && len(queue) > 0 && queue[0] && !s.ambiguousDownloads[key]
+	if len(queue) > 0 {
+		if len(queue) == 1 {
+			delete(s.downloadAuth, key)
+		} else {
+			s.downloadAuth[key] = queue[1:]
+		}
+	}
+	if authorized && s.begin == nil {
+		s.begin = e
+		return true
+	}
+	s.stray++
+	return false
 }
 
 func (s *session) signal() {
@@ -277,6 +365,8 @@ func (d *Driver) Fetch(parent context.Context, detailURL string) (archive.Browse
 		case *fetch.EventRequestPaused:
 			// Handlers must not run commands inline, so each decision runs in its own goroutine.
 			go d.guard(cctx, s, e)
+		case *network.EventRequestWillBeSent:
+			s.noteRequest(e)
 		case *page.EventWindowOpen:
 			// The popup itself is blocked by the browser flag; record where it
 			// meant to go so a click that opens another site reads as one.
@@ -308,17 +398,7 @@ func (d *Driver) Fetch(parent context.Context, detailURL string) (archive.Browse
 	if err := chromedp.ListenBrowser(cctx, func(ev any) {
 		switch e := ev.(type) {
 		case *browser.EventDownloadWillBegin:
-			s.mu.Lock()
-			official := s.clicked
-			if official {
-				s.begin = e
-			} else {
-				s.stray++
-			}
-			s.mu.Unlock()
-			if !official {
-				// Started before the click: not the control's. Cancel it; it is
-				// never read.
+			if !s.authorizeDownload(e) {
 				go func() {
 					_, _ = chromedp.CallBrowser(cctx, browser.CancelDownload, browser.CancelDownloadParams{GUID: e.GUID})
 				}()
@@ -338,6 +418,9 @@ func (d *Driver) Fetch(parent context.Context, detailURL string) (archive.Browse
 
 	yes := true
 	if _, err := chromedp.Call(cctx, page.Enable, page.EnableParams{}); err != nil {
+		return archive.BrowserFetch{}, d.setupError(err)
+	}
+	if _, err := chromedp.Call(cctx, network.Enable, network.EnableParams{}); err != nil {
 		return archive.BrowserFetch{}, d.setupError(err)
 	}
 	if _, err := chromedp.CallBrowser(cctx, browser.SetDownloadBehavior, browser.SetDownloadBehaviorParams{
@@ -386,11 +469,14 @@ func (d *Driver) Fetch(parent context.Context, detailURL string) (archive.Browse
 	if code := d.pageCode(cctx, s, detailURL); code != "" {
 		return finish(archive.BrowserFetch{Code: code})
 	}
-	// Residual window: the mark is set before the click is dispatched, so a
-	// download the page starts by itself in those few milliseconds would count
-	// as the control's. Earlier ones are strays. The download event carries no
-	// link to the control, so this cannot be closed from here.
+	// Arming does not authorize a download. The matching network request must
+	// carry a user gesture and the portal's fncDown initiator stack.
 	s.markClicked()
+	if d.beforeClick != nil {
+		if err := d.beforeClick(cctx, s); err != nil {
+			return archive.BrowserFetch{}, err
+		}
+	}
 	if err := chromedp.Do(cctx, chromedp.Click(controlXPath)); err != nil {
 		return archive.BrowserFetch{}, fmt.Errorf("click control: %w", err)
 	}
