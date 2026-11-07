@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +19,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 )
 
 // Acquisition fetches a public http(s) URL as a new original. It is the
@@ -68,6 +70,12 @@ var (
 	// ErrNotPDF is a body that does not start with the PDF header, refused by an
 	// Acquirer with PDFOnly before anything is stored.
 	ErrNotPDF = errors.New("the response is not a PDF")
+	// ErrMediaNotAllowed is a body or declared format refused by an explicit
+	// AllowedMediaTypes policy. The response is never stored.
+	ErrMediaNotAllowed = errors.New("the response does not match the allowed media types")
+	// ErrRateLimited is HTTP 429 when StopOnRateLimit is enabled. Unlike the
+	// generic RemoteStatusError, it ends a collection job without a retry.
+	ErrRateLimited = errors.New("rate limited")
 )
 
 // scrubbedError is a transport or parser error reduced to a fixed message. The
@@ -185,6 +193,20 @@ type Acquirer struct {
 	AllowURL func(u *url.URL) bool
 	// PDFOnly refuses a body that does not start with "%PDF-" (ErrNotPDF).
 	PDFOnly bool
+	// AllowedMediaTypes, when non-nil, restricts bodies to an explicit subset
+	// of application/pdf, text/html, and application/xhtml+xml. Both the
+	// declared media and body must match (a PDF header also admits an absent
+	// or application/octet-stream declaration). Encoded responses are refused.
+	// Empty or unsupported policies are invalid. Nil retains legacy behavior,
+	// including PDFOnly; setting both applies both restrictions.
+	AllowedMediaTypes []string
+	// MaxRedirects narrows the default of five redirects to 0..5. Zero sends
+	// only the first request; nil retains the default. Invalid values fail
+	// before any request. One attempt sends at most 1 + MaxRedirects requests.
+	MaxRedirects *int
+	// StopOnRateLimit makes HTTP 429 require human action instead of allowing
+	// the collection queue's legacy automatic retry.
+	StopOnRateLimit bool
 }
 
 // Hop is one request in an acquisition: its URL, the checked address the
@@ -294,6 +316,16 @@ func (q Acquirer) fetch(ctx context.Context, raw string) ([]byte, AcquisitionRec
 		now = q.Now
 	}
 	rec := AcquisitionRecord{Headers: map[string]string{}, FetchedAt: now().UTC().Format(time.RFC3339Nano)}
+	redirectLimit := acquireMaxRedirects
+	if q.MaxRedirects != nil {
+		redirectLimit = *q.MaxRedirects
+		if redirectLimit < 0 || redirectLimit > acquireMaxRedirects {
+			return nil, rec, fmt.Errorf("%w: redirect limit must be between 0 and 5", ErrInvalid)
+		}
+	}
+	if err := q.validateMediaPolicy(); err != nil {
+		return nil, rec, err
+	}
 	u, err := url.Parse(raw)
 	if err != nil {
 		return nil, rec, fmt.Errorf("%w: unparsable URL", ErrInvalid)
@@ -344,8 +376,8 @@ func (q Acquirer) fetch(ctx context.Context, raw string) ([]byte, AcquisitionRec
 		Timeout:   timeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			rec.Hops = append(rec.Hops, Hop{URL: pm.redact(via[len(via)-1].URL), Address: lastAddr(), Status: req.Response.StatusCode})
-			if len(via) > acquireMaxRedirects {
-				return fmt.Errorf("%w: more than %d redirects", ErrRemote, acquireMaxRedirects)
+			if len(via) > redirectLimit {
+				return fmt.Errorf("%w: more than %d redirects", ErrRemote, redirectLimit)
 			}
 			// The one redirect that may carry a query is the signed redirect the
 			// first URL's policy names. It is allowed only as the FIRST redirect
@@ -402,6 +434,11 @@ func (q Acquirer) fetch(ctx context.Context, raw string) ([]byte, AcquisitionRec
 	case http.StatusOK:
 	case http.StatusUnauthorized, http.StatusForbidden, http.StatusProxyAuthRequired, http.StatusUnavailableForLegalReasons:
 		return nil, rec, fmt.Errorf("%w: HTTP %d", ErrAccessRestricted, resp.StatusCode)
+	case http.StatusTooManyRequests:
+		if q.StopOnRateLimit {
+			return nil, rec, ErrRateLimited
+		}
+		return nil, rec, &RemoteStatusError{Status: resp.StatusCode}
 	default:
 		return nil, rec, &RemoteStatusError{Status: resp.StatusCode}
 	}
@@ -418,8 +455,148 @@ func (q Acquirer) fetch(ctx context.Context, raw string) ([]byte, AcquisitionRec
 	if q.PDFOnly && !bytes.HasPrefix(body, []byte("%PDF-")) {
 		return nil, rec, ErrNotPDF
 	}
+	if q.AllowedMediaTypes != nil {
+		if err := q.checkMediaBody(body, resp.Header); err != nil {
+			return nil, rec, err
+		}
+	}
 	rec.Size = int64(len(body))
 	return body, rec, nil
+}
+
+func (q Acquirer) validateMediaPolicy() error {
+	if q.AllowedMediaTypes == nil {
+		return nil
+	}
+	if len(q.AllowedMediaTypes) == 0 {
+		return fmt.Errorf("%w: the allowed media types must not be empty", ErrInvalid)
+	}
+	for _, media := range q.AllowedMediaTypes {
+		switch media {
+		case "application/pdf", "text/html", "application/xhtml+xml":
+		default:
+			return fmt.Errorf("%w: unsupported allowed media type", ErrInvalid)
+		}
+	}
+	return nil
+}
+
+// checkMediaBody is an opt-in format gate, not a completeness validator. A
+// PDF header or recognizable HTML cannot establish that the original is whole.
+// Nothing here renders HTML, runs scripts, or fetches any linked resource.
+func (q Acquirer) checkMediaBody(body []byte, headers http.Header) error {
+	if enc := strings.ToLower(strings.TrimSpace(strings.Join(headers.Values("Content-Encoding"), ","))); enc != "" && enc != "identity" {
+		return ErrMediaNotAllowed
+	}
+	if len(headers.Values("Content-Type")) > 1 {
+		return ErrMediaNotAllowed
+	}
+	media, params := "", map[string]string{}
+	if declared := headers.Get("Content-Type"); declared != "" {
+		var err error
+		media, params, err = mime.ParseMediaType(declared)
+		if err != nil {
+			return ErrMediaNotAllowed
+		}
+	}
+	if bytes.HasPrefix(body, []byte("%PDF-")) {
+		if oneOf("application/pdf", q.AllowedMediaTypes) && (media == "application/pdf" || media == "application/octet-stream" || media == "") {
+			return nil
+		}
+		return ErrMediaNotAllowed
+	}
+	if !oneOf(media, q.AllowedMediaTypes) || (media != "text/html" && media != "application/xhtml+xml") {
+		return ErrMediaNotAllowed
+	}
+	charset := strings.ToLower(params["charset"])
+	if charset != "" && charset != "utf-8" && charset != "us-ascii" {
+		return ErrMediaNotAllowed
+	}
+	if !utf8.Valid(body) {
+		return ErrMediaNotAllowed
+	}
+	for _, b := range body {
+		if (b < 0x20 && b != '\t' && b != '\n' && b != '\r' && b != '\f') || b == 0x7f || (charset == "us-ascii" && b >= 0x80) {
+			return ErrMediaNotAllowed
+		}
+	}
+	sniff := bytes.TrimSpace(bytes.TrimPrefix(body, []byte("\xef\xbb\xbf")))
+	// XHTML commonly begins with an XML declaration, which DetectContentType
+	// labels text/xml. Validate that declaration, then sniff the HTML after it.
+	if media == "application/xhtml+xml" && bytes.HasPrefix(sniff, []byte("<?xml")) {
+		dec := xml.NewDecoder(bytes.NewReader(sniff))
+		if _, err := dec.Token(); err != nil {
+			return ErrMediaNotAllowed
+		}
+		sniff = bytes.TrimSpace(sniff[dec.InputOffset():])
+	}
+	if http.DetectContentType(sniff) != "text/html; charset=utf-8" {
+		return ErrMediaNotAllowed
+	}
+	if obviousHTMLAccessPage(body) {
+		return fmt.Errorf("%w: the HTML response appears to require access or a challenge", ErrAccessRestricted)
+	}
+	return nil
+}
+
+// obviousHTMLAccessPage only recognizes common, explicit access-page signals.
+// It is deliberately conservative: neither a match nor its absence judges
+// completeness, and some legitimate pages with login forms can be held back.
+func obviousHTMLAccessPage(body []byte) bool {
+	dec := xml.NewDecoder(bytes.NewReader(stripRawText(body)))
+	dec.Strict, dec.AutoClose, dec.Entity = false, xml.HTMLAutoClose, xml.HTMLEntity
+	var heading strings.Builder
+	inHeading := false
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return inHeading && accessHeading(heading.String())
+		}
+		switch token := tok.(type) {
+		case xml.StartElement:
+			name := strings.ToLower(token.Name.Local)
+			if name == "title" || name == "h1" {
+				inHeading = true
+				heading.Reset()
+			}
+			for _, attr := range token.Attr {
+				key, value := strings.ToLower(attr.Name.Local), strings.ToLower(attr.Value)
+				if name == "input" && key == "type" && value == "password" {
+					return true
+				}
+				if key == "id" || key == "class" {
+					for _, field := range strings.Fields(value) {
+						if field == "challenge-form" || field == "g-recaptcha" || field == "h-captcha" {
+							return true
+						}
+					}
+				}
+			}
+		case xml.CharData:
+			if inHeading {
+				heading.Write(token)
+			}
+		case xml.EndElement:
+			name := strings.ToLower(token.Name.Local)
+			if inHeading && (name == "title" || name == "h1") {
+				if accessHeading(heading.String()) {
+					return true
+				}
+				inHeading = false
+			}
+		}
+	}
+}
+
+func accessHeading(s string) bool {
+	s = strings.Join(strings.Fields(strings.ToLower(s)), " ")
+	s = strings.Trim(s, " .!?:")
+	for _, phrase := range []string{"access denied", "access restricted", "forbidden", "unauthorized", "authentication required", "login required", "sign in", "log in", "login", "captcha", "just a moment", "verify you are human", "verify that you are human", "checking your browser", "security check", "attention required"} {
+		if s == phrase || strings.HasPrefix(s, phrase+" - ") || strings.HasPrefix(s, phrase+" | ") {
+			return true
+		}
+	}
+	return false
 }
 
 // extForMedia maps a declared media type to a file extension. Unknown
@@ -483,6 +660,12 @@ func (a *Archive) acquire(ctx context.Context, q Acquirer, rawURL string, base S
 	mediaType := ""
 	if mt, _, err := mime.ParseMediaType(rec.Headers["Content-Type"]); err == nil {
 		mediaType = strings.ToLower(mt)
+	}
+	// The explicit policy admits an actual PDF served without a specific
+	// declaration. Keep the response headers intact as provenance, but name
+	// and label the stored object by the format the policy checked.
+	if q.AllowedMediaTypes != nil && bytes.HasPrefix(body, []byte("%PDF-")) {
+		mediaType = "application/pdf"
 	}
 	stored := mediaType
 	if stored == "" {
