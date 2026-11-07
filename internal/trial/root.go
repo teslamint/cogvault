@@ -53,6 +53,10 @@ func (c Config) CheckRoot() error {
 	case err != nil && !errors.Is(err, fs.ErrNotExist):
 		return rootErr("the root cannot be inspected")
 	}
+	parent, parentErr := os.Stat(filepath.Dir(c.Root))
+	if parentErr != nil || !parent.IsDir() {
+		return rootErr("the root's parent does not exist or cannot be resolved")
+	}
 	resolved, err := resolve(c.Root)
 	if err != nil {
 		return rootErr("the root's parent does not exist or cannot be resolved")
@@ -60,7 +64,7 @@ func (c Config) CheckRoot() error {
 	for _, p := range append(append([]string(nil), BuiltinForbidden...), c.ForbiddenPaths...) {
 		rp, err := resolve(p)
 		if err != nil {
-			rp = filepath.Clean(p)
+			return rootErr("a protected path cannot be resolved")
 		}
 		if overlaps(resolved, rp) {
 			return rootErr("the root overlaps a protected path")
@@ -134,18 +138,31 @@ func readMarker(root string) (Marker, error) {
 	return m, nil
 }
 
-// resolve returns the real path of p, following symbolic links. A path that does
-// not exist yet is resolved through its nearest existing parent.
+// resolve returns p's real path through its nearest existing ancestor,
+// following symbolic links there and appending every missing path component.
+// Missing directories are expected for a new trial root and protected paths;
+// other filesystem errors are not silently treated as lexical paths.
 func resolve(p string) (string, error) {
 	p = filepath.Clean(p)
-	if r, err := filepath.EvalSymlinks(p); err == nil {
-		return r, nil
+	var missing []string
+	for {
+		real, err := filepath.EvalSymlinks(p)
+		if err == nil {
+			for i := len(missing) - 1; i >= 0; i-- {
+				real = filepath.Join(real, missing[i])
+			}
+			return real, nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", err
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return "", err
+		}
+		missing = append(missing, filepath.Base(p))
+		p = parent
 	}
-	parent, err := filepath.EvalSymlinks(filepath.Dir(p))
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(parent, filepath.Base(p)), nil
 }
 
 // overlaps reports whether a and b are the same path or one contains the other.

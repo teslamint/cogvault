@@ -121,12 +121,14 @@ func TestAcquirerAllowURLStopsRedirectBeforeNetwork(t *testing.T) {
 	first := "http://public.test:" + allowedPort + "/redir"
 	for _, target := range []string{
 		"https://public.test:" + allowedPort + "/after",
-		"http://public.test:8443/after",
+		"http://public.test:8443/after?token=PRIVATE-REDIRECT-TOKEN",
 	} {
 		next = target
 		before := hits
 		if _, _, err := q.fetch(ctx, first); !errors.Is(err, ErrURLNotAllowed) {
 			t.Fatalf("redirect to %s: %v, want ErrURLNotAllowed", target, err)
+		} else if !strings.Contains(err.Error(), "URL is outside the allowed policy") || strings.Contains(err.Error(), "could not connect") || strings.Contains(err.Error(), "PRIVATE-REDIRECT-TOKEN") {
+			t.Fatalf("redirect policy refusal was mislabeled: %v", err)
 		}
 		if hits != before+1 {
 			t.Fatalf("redirect target was contacted: %d new hits", hits-before)

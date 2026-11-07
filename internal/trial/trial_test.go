@@ -628,9 +628,9 @@ func TestConcurrentWorkersShareTheRequestBudget(t *testing.T) {
 	}
 }
 
-// TestTrialAcquirerAppliesURLPolicyToRedirects checks the policy callback
+// TestTrialAcquirerAllowURLPredicate checks the policy callback
 // installed on the Acquirer that sees every redirect.
-func TestTrialAcquirerAppliesURLPolicyToRedirects(t *testing.T) {
+func TestTrialAcquirerAllowURLPredicate(t *testing.T) {
 	site := newSite(t)
 	svc := site.open(t, mustConfig(t, newRoot(t), nil))
 	svc.relaxed = false
@@ -645,5 +645,32 @@ func TestTrialAcquirerAppliesURLPolicyToRedirects(t *testing.T) {
 		if got := check(u); got != want {
 			t.Errorf("%s: allowed=%v, want %v", raw, got, want)
 		}
+	}
+}
+
+// An absent protected path can still overlap the new root through a symlink
+// in its nearest existing ancestor. The missing suffix must not hide that.
+func TestRootGuardResolvesMissingProtectedPathThroughSymlink(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	parent := filepath.Join(real, "trial")
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(base, "alias")
+	if err := os.Symlink(real, alias); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(parent, "data")
+	protected := filepath.Join(alias, "trial", "data", "missing", "child")
+	cfg := mustConfig(t, root, map[string]string{EnvForbiddenPaths: protected})
+	if err := cfg.CheckRoot(); !errors.Is(err, ErrRoot) {
+		t.Fatalf("CheckRoot = %v, want overlap refusal", err)
+	}
+	if _, err := Open(cfg); !errors.Is(err, ErrRoot) {
+		t.Fatalf("Open = %v, want overlap refusal", err)
+	}
+	if _, err := os.Lstat(root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a refused root was created: %v", err)
 	}
 }

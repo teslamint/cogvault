@@ -385,7 +385,7 @@ func (q Acquirer) fetch(ctx context.Context, raw string) ([]byte, AcquisitionRec
 		if errors.As(err, &ue) {
 			err = ue.Err
 		}
-		if !errors.Is(err, ErrBlockedAddress) && !errors.Is(err, ErrInvalid) && !errors.Is(err, ErrRemote) && !errors.Is(err, ErrAccessRestricted) && !errors.Is(err, ErrTooLarge) && !errors.Is(err, ErrHostNotAllowed) {
+		if !errors.Is(err, ErrBlockedAddress) && !errors.Is(err, ErrInvalid) && !errors.Is(err, ErrRemote) && !errors.Is(err, ErrAccessRestricted) && !errors.Is(err, ErrTooLarge) && !errors.Is(err, ErrHostNotAllowed) && !errors.Is(err, ErrURLNotAllowed) {
 			err = &scrubbedError{err}
 		}
 		return nil, rec, err
