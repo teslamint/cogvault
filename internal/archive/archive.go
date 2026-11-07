@@ -180,6 +180,11 @@ type SourceRequest struct {
 	// requires Basis: the checkable evidence for the judgment.
 	Completeness string
 	Basis        string
+	// bind ties the capture to the lease of one collection job: the capture and
+	// the job's completion are written in one transaction, behind the lease
+	// check, so a try whose lease was reclaimed stores nothing. Unexported, so
+	// only this package's executors set it.
+	bind *jobBinding
 }
 
 // ReportRequest records a research report and the sources it cites, in
@@ -554,6 +559,7 @@ func (a *Archive) captureSource(ctx context.Context, req SourceRequest, acquired
 		Title: req.Title, MediaType: req.MediaType, Acquisition: acquisition,
 		Completeness: completeness, Basis: req.Basis, AcquiredAt: acquiredAt, download: download,
 	}
+	rec.bind = req.bind
 	return a.store(ctx, req.Key, req.Content, rec)
 }
 
@@ -640,6 +646,8 @@ type record struct {
 	// download is the acquisition response record (JSON) written in the
 	// capture's transaction; unexported, so it is not part of the digest.
 	download string
+	// bind is the job lease the capture is stored under; see SourceRequest.
+	bind *jobBinding
 }
 
 func (a *Archive) store(ctx context.Context, key string, content io.Reader, rec record) (Result, error) {
@@ -680,6 +688,11 @@ func (a *Archive) store(ctx context.Context, key string, content io.Reader, rec 
 		return Result{}, err
 	}
 	defer tx.Rollback()
+	if rec.bind != nil {
+		if err := checkLease(ctx, tx, rec.bind.id, rec.bind.owner, rec.bind.attempt); err != nil {
+			return Result{}, err
+		}
+	}
 	var state string
 	err = tx.QueryRowContext(ctx, `SELECT state FROM objects WHERE object_id = ?`, staged.objectID).Scan(&state)
 	if err == nil && state != "active" {
@@ -703,8 +716,18 @@ func (a *Archive) store(ctx context.Context, key string, content io.Reader, rec 
 			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO acquisitions (capture_id, record) VALUES (?, ?)`, existingID, rec.download); err != nil {
 				return Result{}, err
 			}
+		}
+		if rec.bind != nil {
+			if err := a.finishBinding(ctx, tx, rec.bind, Result{CaptureID: existingID, ObjectID: existingObject, Existing: true}); err != nil {
+				return Result{}, err
+			}
+		}
+		if rec.download != "" || rec.bind != nil {
 			if err := tx.Commit(); err != nil {
 				return Result{}, err
+			}
+			if rec.bind != nil {
+				rec.bind.committed()
 			}
 		}
 		return Result{CaptureID: existingID, ObjectID: existingObject, Existing: true}, nil
@@ -753,10 +776,19 @@ func (a *Archive) store(ctx context.Context, key string, content io.Reader, rec 
 			return Result{}, err
 		}
 	}
+	res := Result{CaptureID: captureID, ObjectID: staged.objectID}
+	if rec.bind != nil {
+		if err := a.finishBinding(ctx, tx, rec.bind, res); err != nil {
+			return Result{}, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return Result{}, err
 	}
-	return Result{CaptureID: captureID, ObjectID: staged.objectID}, nil
+	if rec.bind != nil {
+		rec.bind.committed()
+	}
+	return res, nil
 }
 
 // activeSource checks that id names a source capture whose object is active.

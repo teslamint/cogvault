@@ -1427,7 +1427,9 @@ verified judgment, backup scheduling, or backup expiry.
     job as `held`: it never judges completeness, so the capture is
     `unknown` and is released only through `reassess` (ADR 0027 open
     question 5). `acquired` is reserved for an executor that records
-    checkable completeness evidence.
+    checkable completeness evidence; `CompleteJob` refuses it (`invalid
+    archive request`) unless the linked capture's completeness is
+    `verified`.
   - **Lease and resume.** A claim leases one due job to a worker name for
     `--lease` (default 5 min) and counts an attempt. When a lease ends
     without a report (worker killed, host restarted), the next claim of
@@ -1438,6 +1440,24 @@ verified judgment, backup scheduling, or backup expiry.
     identified by the owner and the attempt number it was given. A stopped worker (SIGINT/SIGTERM) records nothing for a
     download in progress; the lease expiry resumes it. `status` shows a
     `running` job with a past lease as `running` until a claim reclaims it.
+  - **A capture is stored under its lease.** Both executors store the
+    capture and record the job's completion in one registry transaction,
+    behind the same owner-and-attempt check as `CompleteJob`, and the lease
+    is also checked before the object file is written. A try whose lease was
+    reclaimed while it downloaded therefore stores no capture and records no
+    attempt (`job is not leased to this owner`). The result is reported only
+    after the commit. Limit: the object file is written before the
+    registry transaction (the archive's existing order), so an error after that
+    point and before the commit can leave an object file that no capture
+    refers to. It is content addressed, so storing the same bytes later
+    verifies and adopts it; there is no cleanup for such a file.
+  - **Storage failure.** A file that was downloaded but could not be stored
+    fails the job at once (a retry would download it again for the same
+    fault) with the detail `storage_failed (<code>)`, where the code is one
+    of `no_space`, `permission_denied`, `read_only`, `key_conflict`,
+    `registry_busy`, or `storage_error`. The detail carries no host path,
+    SQL, or error text, because job status is remote-readable; an operator
+    checks the archive host and runs `job retry`.
   - **Retry.** Network errors, timeouts, a short or broken body, and HTTP
     408, 425, 429, and 5xx are retried with a doubling backoff (1 min up to
     1 h) until the attempts are used up, then the job is `failed`. A blocked
@@ -1475,7 +1495,8 @@ verified judgment, backup scheduling, or backup expiry.
       `www.kci.go.kr`, the fixed detail path, and exactly one query parameter,
       `sereArticleSearchBean.artiId=ART<digits>`. That is the one place a
       query is admitted, because the parameter is a public article ID on a
-      fixed host and path; the HTTP executor still refuses every query. The
+      fixed host and path; the HTTP executor refuses this query too (its only
+      query exception is the audited BOK source, *Audited source policies*). The
       URL is checked at submit and again when the job runs.
     - **What the worker does.** In a fresh headless profile it opens the page,
       finds the portal's own control by its visible label `KCI 원문 내려받기`,
@@ -1485,6 +1506,26 @@ verified judgment, backup scheduling, or backup expiry.
       `www.kci.go.kr`, at the address this process checked is public
       (`--host-resolver-rules`, every other name unresolvable), and every
       request to another host is blocked.
+      The page must carry exactly the article the job asked for
+      (`sereArticleSearchBean.artiId`, read from the loaded page, again just
+      before the click); the same path with another id is `unexpected_page`
+      and nothing is clicked. Popups are not opened (`--block-new-web-contents`);
+      the attempt is recorded as a blocked host. A challenge or consent page
+      that stands in for the detail page, or that opens in the download
+      iframe (`orteDownFrame`), is classified by its own wording, as `login_required`,
+      `challenge`, or `consent_required`.
+    - **Which download counts.** Only a download that begins after the click
+      is taken. One the page starts earlier is cancelled, counted
+      (`stray_downloads` in the evidence), and never stored. A request blocked
+      before the click (an unrelated subresource) is recorded but is not a
+      failed download; only a block after it ends the job as `external_site`.
+      **Limit:** the browser's download event carries no link to the control
+      that was clicked, so the click is marked just before it is dispatched, and
+      a download the page started by itself in those few milliseconds would be
+      taken as the control's. This was not tested (it cannot be made
+      deterministic), and the frame the download comes from is not checked,
+      because the real portal's frame behavior could not be tested without a
+      live request.
     - **Outcomes.** A PDF (header `%PDF-`, at most 32 MiB) is stored as a held
       capture of unknown completeness (`held`, same provenance rule). Otherwise
       the job ends with a fixed code and no bytes: `human_action_required` for

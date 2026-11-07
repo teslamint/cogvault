@@ -405,7 +405,12 @@ refused, 32 MiB / 60 s acquisition bounds) remain open below.
    (item 13). Where the off-NAS deletion log replica lives, how it is kept
    current after each deletion action, and how a restore reads it when the
    NAS is lost. Until these are decided, item 14 keeps production capture
-   off.
+   off. **The cost of an off-NAS backup is also undecided,** so nothing may
+   assume that one will be bought: either it is funded and item 14 is met, or
+   a new ADR replaces item 14 with a cheaper durability policy and states the
+   loss it accepts. Until then no worker is deployed, and any prototype stays
+   on temporary roots with no live wiki, NAS, config, or credentials, which
+   rules out a temporary stack on the live NAS as well.
 2. **Deletion operation details.** The impact report format, the quarantine
    location, the per-case purge confirmation step, and what a purge removes
    besides the object (for example derived text and hand-off copies on the
@@ -690,6 +695,20 @@ download endpoint, so a real click is used and no download URL is built.
    it. A stored KCI file stays held and is not handed to ingest on its own.
 6. **Rate limits.** There are none beyond the per-job attempt budget
    (decision 5 above).
+7. **Which download is the control's.** The browser's download event does not
+   name the control that caused it. The driver takes only a download that
+   begins after the click mark, cancels and counts earlier ones, requires the
+   loaded page to carry the requested article id (also read again just before
+   the click), counts only blocks after the click as a failed download, reads
+   the download iframe for login, challenge, and consent pages, and opens no
+   popup. All of this was exercised against fake pages in a real local Chrome
+   (stable over repeated runs), and **no further live KCI request was made**
+   for it: the terms for automated use are undecided. Not covered: a download
+   the page starts in the milliseconds between the click mark and the click
+   (cannot be tested deterministically), and the real portal's frame behavior,
+   so the download's frame is not used as a gate. The real fixture download
+   recorded earlier was made with the previous version of the driver; it was
+   not repeated.
 
 **End-to-end case that remains to be run.** Three human-verified KCI detail
 pages, with the verification date recorded: one with the control (expect

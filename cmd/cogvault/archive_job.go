@@ -196,6 +196,9 @@ func runArchiveJobRun(cmd *cobra.Command, _ []string) error {
 	if o.Poll <= 0 {
 		return fmt.Errorf("--poll must be positive")
 	}
+	if lease <= 0 {
+		return fmt.Errorf("--lease must be positive")
+	}
 	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return archivegate.RunLoop(ctx,

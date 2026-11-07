@@ -77,7 +77,9 @@ func ProductionActivation(cfg *config.Config) error {
 func WorkerAllowed(configPath, root string, activation func(*config.Config) error) error {
 	cfg, err := config.Load(configPath)
 	if err != nil {
-		return fmt.Errorf("collector blocked: config could not be loaded: %w", err)
+		// The load error can name paths or values (an OAuth issuer, a directory);
+		// the worker logs this error, so it gets a fixed code and the key to fix.
+		return &Error{Code: "config_invalid", Keys: []string{"--config"}}
 	}
 	if cfg.Archive.Root == "" || filepath.Clean(cfg.Archive.Root) != filepath.Clean(root) {
 		return &Error{Code: "worker_root_not_the_configured_archive_root", Keys: []string{"archive.root"}}

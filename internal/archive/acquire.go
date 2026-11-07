@@ -14,8 +14,10 @@ import (
 	"net/netip"
 	"net/url"
 	"path"
+	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -55,7 +57,46 @@ var (
 	// ErrAccessRestricted is a 401, 403, 407, or 451 response. Cogvault
 	// never retries with credentials; a person must act.
 	ErrAccessRestricted = errors.New("access restricted")
+	// ErrStore is a downloaded file that could not be stored (disk, registry,
+	// permissions): the download itself worked, so it is not a network fault.
+	ErrStore = errors.New("the downloaded file could not be stored")
 )
+
+// urlInText finds a URL inside an error text.
+var urlInText = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*://[^\s"']*`)
+
+// scrubURLs removes every URL from an error text. A client or parser error can
+// repeat a URL it was given, and a redirect URL can carry a signed token.
+func scrubURLs(s string) string { return urlInText.ReplaceAllString(s, "<url>") }
+
+// scrubbedError is an error whose text never repeats a URL. It still unwraps to
+// its cause, so errors.Is and errors.As (a DNS error, a timeout) keep working.
+type scrubbedError struct{ err error }
+
+func (e *scrubbedError) Error() string { return scrubURLs(e.err.Error()) }
+func (e *scrubbedError) Unwrap() error { return e.err }
+
+// storeFaultCode names a storage failure by a fixed code. The text of a
+// storage error can carry host paths, SQLite statements, or permission
+// details, so job status, which a remote client can read, gets only the code;
+// an operator finds the cause by checking the archive host (disk space,
+// permissions, the registry), not in the job record.
+func storeFaultCode(err error) string {
+	switch {
+	case errors.Is(err, syscall.ENOSPC):
+		return "no_space"
+	case errors.Is(err, syscall.EACCES), errors.Is(err, syscall.EPERM):
+		return "permission_denied"
+	case errors.Is(err, syscall.EROFS):
+		return "read_only"
+	case errors.Is(err, ErrConflict):
+		return "key_conflict"
+	}
+	if t := strings.ToLower(err.Error()); strings.Contains(t, "locked") || strings.Contains(t, "busy") {
+		return "registry_busy"
+	}
+	return "storage_error"
+}
 
 // RemoteStatusError is a refused HTTP status. It matches ErrRemote, so
 // callers that only test errors.Is(err, ErrRemote) are unaffected; the
@@ -292,17 +333,21 @@ func (q Acquirer) fetch(ctx context.Context, raw string) ([]byte, AcquisitionRec
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return nil, rec, fmt.Errorf("%w: %v", ErrInvalid, err)
+		return nil, rec, fmt.Errorf("%w: %s", ErrInvalid, scrubURLs(err.Error()))
 	}
 	req.Header.Set("User-Agent", acquireUserAgent)
 	req.Header.Set("Accept-Encoding", "identity")
 	resp, err := client.Do(req)
 	if err != nil {
-		// *url.Error repeats the request URL, which for a refused redirect
-		// is the URL that was refused; keep only the cause.
+		// *url.Error repeats the request URL, which for a refused redirect is
+		// the URL that was refused, and the cause can repeat the Location it
+		// could not parse. Keep the cause and scrub every URL from its text.
 		var ue *url.Error
 		if errors.As(err, &ue) {
 			err = ue.Err
+		}
+		if !errors.Is(err, ErrBlockedAddress) && !errors.Is(err, ErrInvalid) && !errors.Is(err, ErrRemote) && !errors.Is(err, ErrAccessRestricted) && !errors.Is(err, ErrTooLarge) {
+			err = &scrubbedError{err}
 		}
 		return nil, rec, err
 	}
@@ -420,12 +465,19 @@ func (a *Archive) acquire(ctx context.Context, q Acquirer, rawURL string, base S
 			}
 		}
 	}
+	if base.bind != nil {
+		base.bind.rec = rec
+	}
 	res, err := a.captureSource(ctx, SourceRequest{
 		Key: base.Key, Content: bytes.NewReader(body), OriginalName: name,
 		URL: captureURL, Supplier: base.Supplier, Title: base.Title, MediaType: stored,
+		bind: base.bind,
 	}, rec.FetchedAt, string(download))
 	if err != nil {
-		return Result{}, rec, err
+		if errors.Is(err, ErrLeaseLost) || errors.Is(err, ErrJobNotFound) {
+			return Result{}, rec, err
+		}
+		return Result{}, rec, fmt.Errorf("%w: %w", ErrStore, err)
 	}
 	return res, rec, nil
 }

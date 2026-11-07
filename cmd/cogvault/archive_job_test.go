@@ -357,3 +357,40 @@ func copyTo(t *testing.T, from, to string) string {
 	}
 	return to
 }
+
+// A lease of zero or less cannot hold a job, so a worker with one would pass the
+// gate and then fail every claim; it is refused at start, before the archive
+// is opened.
+func TestJobRunRefusesANonPositiveLease(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "archive")
+	cfg := writeWorkerConfig(t, base, root, true)
+	for _, lease := range []string{"0s", "-1m"} {
+		if _, _, err := executeCommand("archive", "--root", root, "--config", cfg, "job", "run", "--once", "--lease", lease); err == nil || !strings.Contains(err.Error(), "--lease must be positive") {
+			t.Fatalf("--lease %s: %v", lease, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "registry.db")); !os.IsNotExist(err) {
+		t.Fatal("a refused worker opened the archive")
+	}
+}
+
+// The worker logs the gate error, so a config that cannot be loaded must give a
+// fixed code, not the loader's text, which can name paths and values.
+func TestWorkerGateConfigErrorCarriesNoValues(t *testing.T) {
+	base := t.TempDir()
+	bad := filepath.Join(base, "SECRET-dir", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(bad), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "wiki_dir: relative-SECRET-value\ndb_path: x\nadapter: obsidian\narchive:\n  root: /a\n"
+	if err := os.WriteFile(bad, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{bad, filepath.Join(base, "SECRET-missing.yaml")} {
+		err := archivegate.WorkerAllowed(path, "/a", func(*config.Config) error { return nil })
+		if err == nil || !strings.Contains(err.Error(), "config_invalid") || strings.Contains(err.Error(), "SECRET") || strings.Contains(err.Error(), base) {
+			t.Fatalf("WorkerAllowed(%s) = %v", filepath.Base(path), err)
+		}
+	}
+}

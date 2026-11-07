@@ -55,8 +55,22 @@ services:
       # ADR 0027 item 14 evidence, READ-ONLY, at the SAME container paths as in
       # the serve stack and in config.yaml (archive.deployment). backups/ is not
       # mounted: backup_target is compared as a path only.
-      - ${EVIDENCE_DIR:?set EVIDENCE_DIR in .env to the directory holding reports/ and replica/}/reports:/evidence/reports:ro
-      - ${EVIDENCE_DIR}/replica:/evidence/replica:ro
+      # Long syntax with create_host_path: false, so a missing reports/ or replica/
+      # directory fails the deploy instead of being created empty (the short syntax
+      # creates it, and the worker would pause with restore_test_not_passed). The
+      # Compose file reference documents this option; it was not run on Portainer.
+      - type: bind
+        source: ${EVIDENCE_DIR:?set EVIDENCE_DIR in .env to the directory holding reports/ and replica/}/reports
+        target: /evidence/reports
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${EVIDENCE_DIR}/replica
+        target: /evidence/replica
+        read_only: true
+        bind:
+          create_host_path: false
     # No published ports and no inbound listener: the worker and its browser only dial out.
     read_only: true
     tmpfs:

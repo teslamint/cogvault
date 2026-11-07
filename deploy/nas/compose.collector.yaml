@@ -45,8 +45,22 @@ services:
       # these paths and compares the paths recorded in the report to the config,
       # so a different path, or a missing mount, keeps the worker paused.
       # backups/ is not mounted: backup_target is compared as a path only.
-      - ${EVIDENCE_DIR:?set EVIDENCE_DIR in .env to the directory holding reports/ and replica/}/reports:/evidence/reports:ro
-      - ${EVIDENCE_DIR}/replica:/evidence/replica:ro
+      # Long syntax with create_host_path: false, so a missing reports/ or replica/
+      # directory fails the deploy instead of being created empty (the short syntax
+      # creates it, and the worker would pause with restore_test_not_passed). The
+      # Compose file reference documents this option; it was not run on Portainer.
+      - type: bind
+        source: ${EVIDENCE_DIR:?set EVIDENCE_DIR in .env to the directory holding reports/ and replica/}/reports
+        target: /evidence/reports
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${EVIDENCE_DIR}/replica
+        target: /evidence/replica
+        read_only: true
+        bind:
+          create_host_path: false
     # No published ports and no inbound listener. The worker only dials out.
     read_only: true
     tmpfs:

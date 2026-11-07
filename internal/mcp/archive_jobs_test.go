@@ -226,3 +226,47 @@ func TestArchiveJobSubmitAdmitsTheAuditedBOKSourceOnly(t *testing.T) {
 		t.Fatal("the browser executor accepted the BOK URL")
 	}
 }
+
+// archive_status lists the collection jobs that stored a capture, with the
+// provenance, submitter, report, and claim each one recorded. The view is built
+// from archive.Collection, so a field dropped there would otherwise go unseen.
+func TestArchiveStatusReportsTheCollectionsOfACapture(t *testing.T) {
+	f := setupArchiveTools(t, true)
+	ctx := context.Background()
+	report, err := f.archive.ImportReport(ctx, archive.ReportRequest{Content: strings.NewReader("report body"), OriginalName: "r.md"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sub jobOut
+	toolJSON(t, callTool(t, f.srv, "archive_job_submit", map[string]any{
+		"url": "https://example.org/a.pdf", "submitter": "claude-chat", "claim": "p. 4", "report_capture_id": report.CaptureID,
+	}), &sub)
+	claimed, err := f.archive.ClaimJob(ctx, archive.ExecutorHTTP, "w", time.Minute)
+	if err != nil || claimed == nil {
+		t.Fatalf("claim = %+v, %v", claimed, err)
+	}
+	res, err := f.archive.CaptureSource(ctx, archive.SourceRequest{Content: strings.NewReader("%PDF-1.4 x"), OriginalName: "a.pdf", URL: "https://example.org/a.pdf"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.archive.CompleteJob(ctx, sub.Job.JobID, "w", claimed.AttemptsMade, archive.JobOutcome{State: archive.JobHeld, CaptureID: res.CaptureID, Detail: "stored"}); err != nil {
+		t.Fatal(err)
+	}
+	var c struct {
+		Collections []struct {
+			JobID           string `json:"job_id"`
+			Provenance      string `json:"provenance"`
+			Submitter       string `json:"submitter"`
+			ReportCaptureID string `json:"report_capture_id"`
+			ClaimRef        string `json:"claim_ref"`
+		} `json:"collections"`
+	}
+	toolJSON(t, callTool(t, f.srv, "archive_status", map[string]any{"capture_id": res.CaptureID}), &c)
+	if len(c.Collections) != 1 {
+		t.Fatalf("collections = %+v", c.Collections)
+	}
+	got := c.Collections[0]
+	if got.JobID != sub.Job.JobID || got.Provenance != archive.ProvRecovered || got.Submitter != "claude-chat" || got.ReportCaptureID != report.CaptureID || got.ClaimRef != "p. 4" {
+		t.Fatalf("collection = %+v", got)
+	}
+}

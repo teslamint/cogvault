@@ -146,6 +146,22 @@ Then decide, and record the decision:
 
 Importing manual bundles into a registry is a separate task (`archive capture` / `import-report`); this design does not do it.
 
+## What can be deployed today, and what must be decided first
+
+**Nothing in this directory can be deployed to the NAS today, and no backup is assumed.** ADR 0027 item 14 requires an off-NAS backup with a confirmed daily schedule and a passed restore test before any production capture. The cost of an off-NAS backup is not decided, so this design does not make adopting one the default plan: it only records that the gate stays closed without one. Item 14 also limits any gate-free prototype to temporary roots with no live wiki, NAS, config, or credentials, so even a separate temporary Portainer stack on the live NAS conflicts with it. The existing stacks, data, and security settings are not changed by this PR.
+
+| Allowed now | Not allowed now |
+|---|---|
+| Unit and package tests; isolated containers **on a development Mac** on temporary roots (this document's "Rehearsal" and "Validation record"); static checks of the amd64 image | Any run on the live NAS or Portainer, including a temporary stack; real credentials or the live config; enabling capture; publishing an image; a live request to KCI beyond the one recorded download |
+
+Decisions a human must make before the template can be used (each needs an ADR, or an update of ADR 0027 that supersedes the item it changes):
+
+1. **Durability policy (item 14).** Pay for and run an off-NAS backup, replica, and restore test, **or** write a new ADR that replaces item 14 with a cheaper policy and says what loss is accepted. Without one of these the worker stays paused.
+2. **Outbound requests and scope** (ADR 0027 "Missing decisions for MCP fetch scope", 1 to 8): whether the archive host may fetch at all, who may trigger it, destinations, rate, terms handling, and retention.
+3. **Source terms.** Whether KCI's and BOK's terms allow automated collection (the KCI FAQ's free full text is availability to a reader, not permission to automate or redistribute), and whether the BOK source policy may cover more than one fixture.
+4. **`--no-sandbox`**: approval from the permissions owner for the browser container, or a runtime where Chromium's sandbox works.
+5. **Where Chromium is proven on x86_64.** The NAS is not a test bed, so native x86_64 evidence needs another host (for example an x86_64 development machine or CI runner) before the amd64 image is trusted.
+
 ## Preconditions (all must hold; none is met today)
 
 1. ADR 0027 item 14 settings are real and proven: the archive volume; an off-NAS daily backup with 30-day retention; an off-NAS deletion-log replica; a passing `archive restore-test` that used that replica; a named owner for permissions, credential, and scope; the hand-off mount and paths. A human has reviewed them.
@@ -173,9 +189,19 @@ Each step has an exit check. Stop at the first failed check and use the rollback
 
 ```
       - ${ARCHIVE_DIR}:/data/archive
-      - ${EVIDENCE_DIR}/reports:/evidence/reports:ro
-      - ${EVIDENCE_DIR}/replica:/evidence/replica:ro
+      - type: bind
+        source: ${EVIDENCE_DIR}/reports
+        target: /evidence/reports
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${EVIDENCE_DIR}/replica
+        target: /evidence/replica
+        read_only: true
+        bind: {create_host_path: false}
 ```
+
+The long form with `create_host_path: false` makes a missing `reports/` or `replica/` fail the deploy; the short form would create an empty directory (Docker's Compose file reference, "volumes"). The collector templates use it. It was checked as YAML only: it was not run on Portainer 2.45.2 or on Docker 24.0.2, and a Portainer stack is not to be applied (see "What can be deployed today").
 
 Use `/evidence/...` in `config.yaml` exactly as in `config.archive.example.yaml`. A different path, a typo, or a missing mount makes the check fail with a coded error, never a silent pass; the tests `TestWorkerGateReadsEvidenceFromConfiguredMountPaths` and the reload cases pin this.
 

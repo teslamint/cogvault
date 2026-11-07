@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -162,6 +163,7 @@ func portal(t *testing.T) (*httptest.Server, func(path string) string) {
 		t.Error("the browser reached a host outside the allowlist")
 	})
 	mux.HandleFunc("/download", func(w http.ResponseWriter, r *http.Request) {
+		downloadHits.Add(1)
 		w.Header().Set("Content-Type", "application/pdf")
 		w.Header().Set("Content-Disposition", `attachment; filename="KCI_FI001.pdf"`)
 		if r.Referer() != "" && strings.HasSuffix(r.Referer(), "/big") {
@@ -170,6 +172,57 @@ func portal(t *testing.T) (*httptest.Server, func(path string) string) {
 			return
 		}
 		io.WriteString(w, pdfBody)
+	})
+	// A download the page starts by itself, before anyone clicks.
+	mux.HandleFunc("/stray.pdf", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/pdf")
+		w.Header().Set("Content-Disposition", `attachment; filename="stray.pdf"`)
+		io.WriteString(w, strayBody)
+	})
+	const strayFrame = `<iframe style="display:none" src="/stray.pdf"></iframe>`
+	mux.HandleFunc("/stray-ok", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, page(strayFrame, official)) })
+	mux.HandleFunc("/stray-only", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, page(strayFrame, `<a href="javascript:;" onclick="orteDownFrame.location.href='/not-a-file'"><span>KCI 원문 내려받기</span></a>`))
+	})
+	// An unrelated subresource on another host, blocked at load, is not a failed download.
+	mux.HandleFunc("/analytics", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, page(`<img src="http://localhost:`+hostPort(r)+`/pixel.png">`, official))
+	})
+	mux.HandleFunc("/pixel.png", func(w http.ResponseWriter, r *http.Request) {
+		t.Error("the browser reached a host outside the allowlist")
+	})
+	// A click that opens another site in a popup.
+	mux.HandleFunc("/popup", func(w http.ResponseWriter, r *http.Request) {
+		click("window.open('http://localhost:"+hostPort(r)+"/elsewhere')")(w, r)
+	})
+	// The download iframe shows a login, a challenge, or a consent page.
+	mux.HandleFunc("/frame-login", click("orteDownFrame.location.href='/frame-login-page'"))
+	mux.HandleFunc("/frame-challenge", click("orteDownFrame.location.href='/verify'"))
+	mux.HandleFunc("/frame-consent", click("orteDownFrame.location.href='/frame-consent-page'"))
+	mux.HandleFunc("/frame-login-page", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `<html><body><form><input type="password" name="pw"></form></body></html>`)
+	})
+	mux.HandleFunc("/frame-consent-page", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `<html><body><p>이용약관에 동의하세요</p></body></html>`)
+	})
+	// Pages that stand in for the detail page before anything is clicked.
+	mux.HandleFunc("/initial-challenge", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `<html><body><p>자동입력 방지 문자를 입력하세요</p></body></html>`)
+	})
+	mux.HandleFunc("/initial-consent", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `<html><body><p>이용약관에 동의해야 합니다</p></body></html>`)
+	})
+	// The right path and handler but another article: by a query rewritten after
+	// load, and by a redirect to the same path with another id.
+	mux.HandleFunc("/rewritten", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, page(`<script>history.replaceState(null, '', location.pathname + '?sereArticleSearchBean.artiId=ART2')</script>`, official))
+	})
+	mux.HandleFunc("/same-path", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("sereArticleSearchBean.artiId") == "ART1" {
+			http.Redirect(w, r, "/same-path?sereArticleSearchBean.artiId=ART2", http.StatusFound)
+			return
+		}
+		io.WriteString(w, page("", official))
 	})
 	srv = httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -244,5 +297,110 @@ func TestFetchRecordsTheBlockedHostWithoutReachingIt(t *testing.T) {
 	var ev evidence
 	if err := json.Unmarshal([]byte(f.Evidence), &ev); err != nil || len(ev.BlockedHosts) != 1 || ev.BlockedHosts[0] != "localhost" {
 		t.Fatalf("evidence = %+v, %v", ev, err)
+	}
+}
+
+// downloadHits counts requests to the portal's download endpoint, so a test can
+// tell that a page that was refused was never clicked.
+var downloadHits atomic.Int32
+
+const strayBody = "%PDF-1.4 stray, started by the page itself\n"
+
+func hostPort(r *http.Request) string { return r.Host[strings.LastIndex(r.Host, ":")+1:] }
+
+const artiQuery = "?sereArticleSearchBean.artiId=ART1"
+
+// A page that starts a download of its own before the click does not get it
+// stored as the article: the stray is cancelled and counted, and the file the
+// official control serves is the one returned. Limit (not tested, cannot be from
+// here): a download the page starts in the few milliseconds between the click
+// mark and the click itself would count as the control's.
+func TestFetchIgnoresADownloadTheOfficialControlDidNotStart(t *testing.T) {
+	haveChrome(t)
+	_, u := portal(t)
+	f, err := testDriver().Fetch(context.Background(), u("/stray-ok"))
+	if err != nil || f.Code != "" || string(f.Body) != pdfBody {
+		t.Fatalf("stray then control = code %q, body %q, %v; want the control's file", f.Code, f.Body, err)
+	}
+	var ev evidence
+	if err := json.Unmarshal([]byte(f.Evidence), &ev); err != nil || ev.StrayDownloads < 1 {
+		t.Fatalf("evidence = %+v, %v; want the stray counted", ev, err)
+	}
+	f, err = testDriver().Fetch(context.Background(), u("/stray-only"))
+	if err != nil || f.Code != archive.ReasonDownloadNotStarted || len(f.Body) != 0 {
+		t.Fatalf("stray only = code %q, body %q, %v; want download_not_started and no bytes", f.Code, f.Body, err)
+	}
+}
+
+// A blocked subresource that has nothing to do with the click is recorded but
+// does not turn the legitimate download into external_site.
+func TestFetchKeepsWaitingAfterAnUnrelatedBlockedRequest(t *testing.T) {
+	haveChrome(t)
+	_, u := portal(t)
+	f, err := testDriver().Fetch(context.Background(), u("/analytics"))
+	if err != nil || f.Code != "" || string(f.Body) != pdfBody {
+		t.Fatalf("fetch = code %q, %d bytes, %v", f.Code, len(f.Body), err)
+	}
+	var ev evidence
+	if err := json.Unmarshal([]byte(f.Evidence), &ev); err != nil || len(ev.BlockedHosts) != 1 || ev.BlockedHosts[0] != "localhost" {
+		t.Fatalf("evidence = %+v, %v; want the blocked host recorded", ev, err)
+	}
+}
+
+// A control that opens another site in a popup: no popup is opened (so it has no
+// requests of its own to guard), the target is recorded, and the job ends as
+// external_site with nothing fetched from it.
+func TestFetchReadsAPopupToAnotherSiteAsExternal(t *testing.T) {
+	haveChrome(t)
+	_, u := portal(t)
+	f, err := testDriver().Fetch(context.Background(), u("/popup"))
+	if err != nil || f.Code != archive.ReasonExternalSite || len(f.Body) != 0 {
+		t.Fatalf("popup = code %q, %d bytes, %v", f.Code, len(f.Body), err)
+	}
+	var ev evidence
+	if err := json.Unmarshal([]byte(f.Evidence), &ev); err != nil || len(ev.BlockedHosts) != 1 || ev.BlockedHosts[0] != "localhost" {
+		t.Fatalf("evidence = %+v, %v", ev, err)
+	}
+}
+
+// A login, challenge, or consent page that opens in the download iframe (not in
+// the detail page) is classified by its own wording, consent included.
+func TestFetchClassifiesWhatTheDownloadFrameShows(t *testing.T) {
+	haveChrome(t)
+	_, u := portal(t)
+	for path, want := range map[string]string{
+		"/frame-login":     archive.ReasonLoginRequired,
+		"/frame-challenge": archive.ReasonChallenge,
+		"/frame-consent":   archive.ReasonConsentRequired,
+		// A challenge or consent page in place of the detail page, before any click.
+		"/initial-challenge": archive.ReasonChallenge,
+		"/initial-consent":   archive.ReasonConsentRequired,
+	} {
+		f, err := testDriver().Fetch(context.Background(), u(path))
+		if err != nil || f.Code != want || len(f.Body) != 0 {
+			t.Errorf("%s = code %q (%d bytes), %v; want %s", path, f.Code, len(f.Body), err, want)
+		}
+	}
+}
+
+// The page must carry exactly the article the job asked for. The right path
+// with another id (rewritten after load, or reached by a redirect) is not that
+// article: it is not clicked, nothing is downloaded, and no bytes come back.
+func TestFetchRequiresTheRequestedArticleID(t *testing.T) {
+	haveChrome(t)
+	_, u := portal(t)
+	f, err := testDriver().Fetch(context.Background(), u("/ok"+artiQuery))
+	if err != nil || f.Code != "" || string(f.Body) != pdfBody {
+		t.Fatalf("the requested article = code %q, %d bytes, %v", f.Code, len(f.Body), err)
+	}
+	for _, path := range []string{"/rewritten", "/same-path"} {
+		before := downloadHits.Load()
+		f, err := testDriver().Fetch(context.Background(), u(path+artiQuery))
+		if err != nil || f.Code != archive.ReasonUnexpectedPage || len(f.Body) != 0 {
+			t.Errorf("%s = code %q (%d bytes), %v; want unexpected_page and no bytes", path, f.Code, len(f.Body), err)
+		}
+		if n := downloadHits.Load(); n != before {
+			t.Errorf("%s: the download endpoint was hit %d time(s) for another article", path, n-before)
+		}
 	}
 }

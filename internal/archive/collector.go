@@ -31,9 +31,22 @@ func (a *Archive) RunNextJob(ctx context.Context, q Acquirer, owner string, leas
 	if err != nil || job == nil {
 		return nil, err
 	}
-	res, rec, aerr := a.acquire(ctx, q, job.URL, SourceRequest{Supplier: JobSupplierPrefix + job.JobID})
+	// The capture and the job's completion are written in one transaction,
+	// behind the lease check: a try whose lease was reclaimed while it
+	// downloaded stores nothing and returns ErrLeaseLost.
+	bind := &jobBinding{id: job.JobID, owner: owner, attempt: job.AttemptsMade, outcome: func(res Result, rec AcquisitionRecord) JobOutcome {
+		return classifyAcquire(res, rec, nil)
+	}}
+	res, rec, aerr := a.acquire(ctx, q, job.URL, SourceRequest{Supplier: JobSupplierPrefix + job.JobID, bind: bind})
+	// done is set only after the transaction committed; an error means it did not.
+	if aerr == nil && bind.done != nil {
+		return bind.done, nil
+	}
 	if ctx.Err() != nil {
 		return job, ctx.Err()
+	}
+	if errors.Is(aerr, ErrLeaseLost) || errors.Is(aerr, ErrJobNotFound) {
+		return job, aerr
 	}
 	out := classifyAcquire(res, rec, aerr)
 	done, err := a.CompleteJob(ctx, job.JobID, owner, job.AttemptsMade, out)
@@ -78,6 +91,13 @@ func classifyAcquire(res Result, rec AcquisitionRecord, err error) JobOutcome {
 		out.State, out.Detail = JobFailed, "the bytes are quarantined or purged; an operator must restore them first"
 	case errors.Is(err, ErrIntegrity):
 		out.State, out.Detail = JobFailed, "a stored object failed its integrity check; an operator must check the archive"
+	case errors.Is(err, ErrStore):
+		// The download worked; storing it did not. Retrying would download the
+		// file again for the same fault, so the job fails and an operator checks
+		// the archive and retries it. Only a fixed code is recorded: the error
+		// text can name host paths or registry details, and job status is
+		// readable by remote clients.
+		out.State, out.Detail = JobFailed, "storage_failed ("+storeFaultCode(err)+"): the file was downloaded but could not be stored; an operator must check the archive host (disk space, permissions, registry) and retry the job"
 	case errors.As(err, &status):
 		out.Detail = fmt.Sprintf("remote refused or unusable response: HTTP %d", status.Status)
 		switch status.Status {

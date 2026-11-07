@@ -796,12 +796,34 @@ submitter's `seen_sha256`, and is kept on the attempt row, so a later retry
 that stores different bytes does not relabel an earlier capture;
 `Capture.Collections` reads it from `job_attempts`. `classifyAcquire` maps
 sentinel errors (`ErrBlockedAddress`, `ErrInvalid`, `ErrTooLarge`,
-`ErrAccessRestricted`, `RemoteStatusError`) to retry or terminal outcomes;
-anything it does not recognize is retried, never stored. The completeness of
-an HTTP download stays `unknown`, so jobs end `held`; no extra completeness
-check was added because `reassess` is the existing release path. The
-`browser` executor value only reserves the claim/complete contract; no
-browser executor exists.
+`ErrAccessRestricted`, `RemoteStatusError`, `ErrStore`) to retry or terminal
+outcomes; anything it does not recognize is retried, never stored. `ErrStore`
+wraps an error from storing a file that was already downloaded: it fails the
+job at once with a fixed `storage_failed (<code>)` detail from `storeFaultCode`
+(`no_space`, `permission_denied`, `read_only`, `key_conflict`, `registry_busy`,
+`storage_error`), because retrying would download the file again for the same
+fault and the error text can name host paths or SQL while job status is
+remote-readable. The completeness of an HTTP download stays `unknown`, so jobs
+end `held`; `CompleteJob` accepts `acquired` only for a capture whose
+completeness is `verified`.
+
+A capture a job stores is bound to the job's lease. `SourceRequest.bind` (an
+unexported `jobBinding`) makes `store` check the owner and attempt in its own
+transaction before the object file is written, and finish the job
+(`completeJobTx`, the body of `CompleteJob`) in the same transaction before
+the commit. The finished job is published (`jobBinding.done`) only after the
+commit returns, so a failed commit never reads as success. Limit: `store`
+publishes the object file before it opens the writes of the transaction (the
+archive's existing order), so an error between the publish and the commit can
+leave an object file with no capture. The file is content addressed; storing
+the same bytes later verifies and adopts it. No cleanup exists, and none was
+added: deleting an object the registry does not know would touch data this
+change does not own.
+
+The browser executor is implemented: `RunNextBrowserJob` claims
+`executor=browser` jobs and stores the driver's PDF through the same bound
+capture path, and the driver and its dependency live in `internal/kcibrowser`
+and the separate `cmd/cogvault-kci` binary (see below).
 
 Remote clients reach the queue through `internal/mcp/archive_job_tools.go`:
 `archive_job_submit`, `archive_job_status`, and `archive_job_retry` are
@@ -854,7 +876,9 @@ is redacted at the boundary: hop and final URLs go through `policyMatch.redact`
 before they are recorded, the capture's URL is the first URL, `Referer` is
 deleted in `CheckRedirect` (Go sets it from the previous URL before it calls
 the check, so without that the signed URL would reach a further hop), and the
-client's `*url.Error`, which repeats the request URL, is unwrapped to its cause.
+client's `*url.Error`, which repeats the request URL, is unwrapped to its cause,
+and every URL is then scrubbed from the remaining text (a `Location` that Go
+cannot parse is repeated by the client's own error, token included).
 `sourcePolicies` is a variable only so a test in this package can swap in a
 plain-http copy for a local server; nothing else writes it. `SubmitJob` stores
 the policy's normalized first URL, so a repeated submission is the same job.

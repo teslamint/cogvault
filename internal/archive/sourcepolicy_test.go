@@ -231,6 +231,10 @@ func (s *bokSite) serve(w http.ResponseWriter, r *http.Request) {
 		beh := s.first[id]
 		s.mu.Unlock()
 		switch beh {
+		case "bad-escape":
+			// A Location that Go cannot parse: the client's error repeats it.
+			w.Header().Set("Location", "http://file-cdn.bok.or.kr/portal/"+id+"/2/tempFile%zz.pdf?"+signedQuery(id, "2", secretHMAC))
+			w.WriteHeader(http.StatusFound)
 		case "other-id":
 			http.Redirect(w, r, signed(strings.Repeat("b", 32)), http.StatusFound)
 		case "extra-param":
@@ -585,5 +589,49 @@ func TestSubmitJobAdmitsTheAuditedSourceAndRefusesVariants(t *testing.T) {
 		if _, _, err := a.SubmitJob(ctx, JobRequest{URL: raw, Submitter: "t"}); !errors.Is(err, ErrInvalid) {
 			t.Errorf("SubmitJob(%q) = %v, want ErrInvalid", raw, err)
 		}
+	}
+}
+
+// A signed Location that Go cannot parse (a bad percent escape) makes the HTTP
+// client's error repeat the whole URL, token included. Nothing may carry it: not
+// the returned error, not the job status, not the recovery attempt that
+// Reacquire writes, and not a table.
+func TestMalformedSignedLocationLeaksNoToken(t *testing.T) {
+	a, _ := openTest(t)
+	s, _, q := newBOKSite(t)
+	id := s.id("bad-escape", "")
+	hasToken := func(label, text string) {
+		t.Helper()
+		if strings.Contains(text, secretHMAC[:12]) || strings.Contains(text, sigField) || strings.Contains(text, tokenParam+"=") {
+			t.Fatalf("%s carries the token: %q", label, text)
+		}
+	}
+	_, _, err := q.fetch(ctx, s.url(id))
+	if err == nil {
+		t.Fatal("a malformed Location was followed")
+	}
+	hasToken("fetch error", err.Error())
+	if _, _, aerr := a.Acquire(ctx, q, s.url(id)); aerr == nil {
+		t.Fatal("Acquire followed a malformed Location")
+	} else {
+		hasToken("Acquire error", aerr.Error())
+	}
+
+	submit(t, a, JobRequest{URL: s.url(id)})
+	got, jerr := a.RunNextJob(ctx, q, "w", DefaultJobLease)
+	if jerr != nil || got == nil || len(got.Attempts) != 1 {
+		t.Fatalf("job = %+v, %v", got, jerr)
+	}
+	hasToken("job detail", got.Attempts[0].Detail)
+	hasToken("job response", got.Attempts[0].Response)
+
+	old := mustCapture(t, a, SourceRequest{Content: strings.NewReader("old"), OriginalName: "old.pdf", URL: s.url(id)})
+	if _, _, rerr := a.Reacquire(ctx, q, old.CaptureID, "truncated"); rerr == nil {
+		t.Fatal("Reacquire followed a malformed Location")
+	} else {
+		hasToken("Reacquire error", rerr.Error())
+	}
+	if bad := leaked(t, a); len(bad) != 0 {
+		t.Fatalf("the signed token was stored: %q", bad)
 	}
 }

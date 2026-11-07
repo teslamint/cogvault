@@ -446,13 +446,8 @@ func (a *Archive) ClaimJob(ctx context.Context, executor, owner string, lease ti
 // reclaimed or finished returns ErrLeaseLost and records nothing. JobRetry
 // requeues with backoff, or fails the job when its attempts are used up.
 func (a *Archive) CompleteJob(ctx context.Context, id, owner string, attempt int, out JobOutcome) (Job, error) {
-	switch out.State {
-	case JobHeld, JobAcquired, JobFailed, JobHuman, JobRetry:
-	default:
-		return Job{}, fmt.Errorf("%w: outcome %q", ErrInvalid, out.State)
-	}
-	if (out.State == JobHeld || out.State == JobAcquired) != (out.CaptureID != "") {
-		return Job{}, fmt.Errorf("%w: a stored outcome needs a capture, any other outcome must not have one", ErrInvalid)
+	if err := checkOutcome(out); err != nil {
+		return Job{}, err
 	}
 	unlock, err := a.lock(ctx, false)
 	if err != nil {
@@ -464,6 +459,81 @@ func (a *Archive) CompleteJob(ctx context.Context, id, owner string, attempt int
 		return Job{}, err
 	}
 	defer tx.Rollback()
+	j, err := a.completeJobTx(ctx, tx, id, owner, attempt, out)
+	if err != nil {
+		return Job{}, err
+	}
+	return j, tx.Commit()
+}
+
+// checkOutcome rejects an outcome that is not a state a try can end in, or
+// whose capture does not match its state.
+func checkOutcome(out JobOutcome) error {
+	switch out.State {
+	case JobHeld, JobAcquired, JobFailed, JobHuman, JobRetry:
+	default:
+		return fmt.Errorf("%w: outcome %q", ErrInvalid, out.State)
+	}
+	if (out.State == JobHeld || out.State == JobAcquired) != (out.CaptureID != "") {
+		return fmt.Errorf("%w: a stored outcome needs a capture, any other outcome must not have one", ErrInvalid)
+	}
+	return nil
+}
+
+// checkLease is the lease fence of CompleteJob on its own: the job must still
+// be running for this owner and attempt. A capture that a try stores is written
+// in the same transaction, behind this check, so a try whose lease was
+// reclaimed cannot leave a capture behind.
+func checkLease(ctx context.Context, tx *sql.Tx, id, owner string, attempt int) error {
+	var state, leaseOwner string
+	var made int
+	err := tx.QueryRowContext(ctx, `SELECT state, lease_owner, attempts_made FROM jobs WHERE job_id = ?`, id).Scan(&state, &leaseOwner, &made)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w: %s", ErrJobNotFound, id)
+	}
+	if err != nil {
+		return err
+	}
+	if state != jobStateRunning || leaseOwner != owner || made != attempt {
+		return fmt.Errorf("%w: %s", ErrLeaseLost, id)
+	}
+	return nil
+}
+
+// jobBinding ties one capture to the claim that stores it (see
+// SourceRequest.bind). The executor sets id, owner, attempt, and outcome;
+// acquire sets rec. When the capture is stored, outcome turns the result into
+// the job's outcome, which is recorded in the same transaction. pending holds
+// that job until the transaction commits; only then is it published as done,
+// so a failed commit never reads as a finished job.
+type jobBinding struct {
+	id, owner string
+	attempt   int
+	rec       AcquisitionRecord
+	outcome   func(Result, AcquisitionRecord) JobOutcome
+	pending   *Job
+	done      *Job
+}
+
+// finishBinding records the job's outcome inside the capture's transaction.
+func (a *Archive) finishBinding(ctx context.Context, tx *sql.Tx, b *jobBinding, res Result) error {
+	j, err := a.completeJobTx(ctx, tx, b.id, b.owner, b.attempt, b.outcome(res, b.rec))
+	if err != nil {
+		return err
+	}
+	b.pending = &j
+	return nil
+}
+
+// committed publishes the job after its transaction committed.
+func (b *jobBinding) committed() { b.done = b.pending }
+
+// completeJobTx is CompleteJob inside the caller's transaction, which the caller
+// commits. The archive lock is held by the caller.
+func (a *Archive) completeJobTx(ctx context.Context, tx *sql.Tx, id, owner string, attempt int, out JobOutcome) (Job, error) {
+	if err := checkOutcome(out); err != nil {
+		return Job{}, err
+	}
 	j, err := readJob(ctx, tx, id)
 	if err != nil {
 		return Job{}, err
@@ -476,9 +546,14 @@ func (a *Archive) CompleteJob(ctx context.Context, id, owner string, attempt int
 	state, notBefore, detail := out.State, now, truncateText(out.Detail, 500)
 	prov := ""
 	if out.CaptureID != "" {
-		var obj string
-		if err := tx.QueryRowContext(ctx, `SELECT object_id FROM captures WHERE capture_id = ?`, out.CaptureID).Scan(&obj); err != nil {
+		var obj, completeness string
+		if err := tx.QueryRowContext(ctx, `SELECT object_id, completeness FROM captures WHERE capture_id = ?`, out.CaptureID).Scan(&obj, &completeness); err != nil {
 			return Job{}, fmt.Errorf("%w: %s", ErrNotFound, out.CaptureID)
+		}
+		// acquired promises a hand-off-eligible capture; held is the state for
+		// bytes whose completeness is not verified.
+		if out.State == JobAcquired && completeness != "verified" {
+			return Job{}, fmt.Errorf("%w: a job is acquired only when its capture's completeness is verified (it is %s)", ErrInvalid, completeness)
 		}
 		prov = ProvRecovered
 		switch {
@@ -512,7 +587,7 @@ func (a *Archive) CompleteJob(ctx context.Context, id, owner string, attempt int
 	if err != nil {
 		return Job{}, err
 	}
-	return j, tx.Commit()
+	return j, nil
 }
 
 const jobSelect = `SELECT job_id, url, executor, submitter, edition_hint, COALESCE(report_capture_id,''), claim_ref, seen_sha256, state, provenance, attempts_made, budget, max_attempts, not_before, lease_owner, lease_until, COALESCE(result_capture_id,''), started_at, created_at, updated_at FROM jobs WHERE job_id = ?`

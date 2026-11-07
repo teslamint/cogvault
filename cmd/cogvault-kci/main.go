@@ -13,6 +13,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -44,6 +45,9 @@ func run(args []string) error {
 	chrome := fs.String("chrome", "", "path to the Chrome or Chromium binary (default: find one)")
 	noSandbox := fs.Bool("no-sandbox", false, "disable Chrome's sandbox; only for a non-root container that cannot use it")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil // --help prints the usage and is not a failure
+		}
 		return err
 	}
 	if *root == "" || *config == "" {

@@ -134,7 +134,17 @@ func (a *Archive) RunNextBrowserJob(ctx context.Context, d BrowserDriver, owner 
 		if ctx.Err() != nil {
 			return job, ctx.Err()
 		}
-		out = a.browserOutcome(ctx, job, normalized, artiID, f, ferr)
+		// The capture and the job's completion are one transaction behind the
+		// lease check: a try whose lease was reclaimed while the browser ran
+		// stores nothing and returns ErrLeaseLost.
+		bind := &jobBinding{id: job.JobID, owner: owner, attempt: job.AttemptsMade}
+		out, err = a.browserOutcome(ctx, job, bind, normalized, artiID, f, ferr)
+		if err != nil {
+			return job, err
+		}
+		if bind.done != nil {
+			return bind.done, nil
+		}
 	}
 	done, err := a.CompleteJob(ctx, job.JobID, owner, job.AttemptsMade, out)
 	if err != nil {
@@ -146,8 +156,10 @@ func (a *Archive) RunNextBrowserJob(ctx context.Context, d BrowserDriver, owner 
 // browserOutcome maps a driver result to a job outcome, storing the file
 // through the same capture registry as every other capture. The capture is
 // held: a download does not show the document is complete, so completeness
-// stays unknown and release stays `reassess`.
-func (a *Archive) browserOutcome(ctx context.Context, job *Job, normalized, artiID string, f BrowserFetch, ferr error) JobOutcome {
+// stays unknown and release stays `reassess`. A stored file completes the job
+// inside bind (bind.done is set and the returned outcome is unused); the error
+// is ErrLeaseLost when the lease was reclaimed first.
+func (a *Archive) browserOutcome(ctx context.Context, job *Job, bind *jobBinding, normalized, artiID string, f BrowserFetch, ferr error) (JobOutcome, error) {
 	out := JobOutcome{Response: f.Evidence}
 	switch {
 	case ferr != nil:
@@ -155,7 +167,7 @@ func (a *Archive) browserOutcome(ctx context.Context, job *Job, normalized, arti
 		if !errors.Is(ferr, context.DeadlineExceeded) {
 			out.Detail = "browser error: the browser could not complete the request"
 		}
-		return out
+		return out, nil
 	case f.Code != "":
 		r, ok := browserReasons[f.Code]
 		if !ok {
@@ -163,36 +175,45 @@ func (a *Archive) browserOutcome(ctx context.Context, job *Job, normalized, arti
 			f.Code = reasonUnknown
 		}
 		out.State, out.Detail = r.state, f.Code+": "+r.detail
-		return out
+		return out, nil
 	}
 	if int64(len(f.Body)) > MaxObjectBytes {
 		r := browserReasons[ReasonTooLarge]
 		out.State, out.Detail = r.state, ReasonTooLarge+": "+r.detail
-		return out
+		return out, nil
 	}
 	if !bytes.HasPrefix(f.Body, []byte("%PDF-")) {
 		r := browserReasons[ReasonNotPDF]
 		out.State, out.Detail = r.state, ReasonNotPDF+": "+r.detail
-		return out
+		return out, nil
 	}
 	fetchedAt := a.now().UTC().Format(time.RFC3339Nano)
 	download, _ := json.Marshal(AcquisitionRecord{
 		RequestedURL: normalized, FinalURL: normalized, Hops: []Hop{}, FetchedAt: fetchedAt, Size: int64(len(f.Body)),
 		Headers: map[string]string{"Acquisition-Method": "browser_download (official control: " + KCIControlLabel + ")", "Content-Type": "application/pdf"},
 	})
-	res, err := a.captureSource(ctx, SourceRequest{
+	bind.outcome = func(res Result, _ AcquisitionRecord) JobOutcome {
+		return JobOutcome{
+			State: JobHeld, CaptureID: res.CaptureID, Response: f.Evidence,
+			Detail: "stored from the official download control; completeness unknown, so the capture is held from hand-off",
+		}
+	}
+	_, err := a.captureSource(ctx, SourceRequest{
 		Content: bytes.NewReader(f.Body), OriginalName: "kci-" + artiID + ".pdf", URL: normalized,
-		Supplier: JobSupplierPrefix + job.JobID, MediaType: "application/pdf",
+		Supplier: JobSupplierPrefix + job.JobID, MediaType: "application/pdf", bind: bind,
 	}, fetchedAt, string(download))
 	if err != nil {
+		if errors.Is(err, ErrLeaseLost) || errors.Is(err, ErrJobNotFound) {
+			return JobOutcome{}, err
+		}
 		// ErrDeleted, ErrIntegrity, and the like are not retryable by a browser.
-		out.State, out.Detail = JobFailed, "the downloaded file could not be stored"
+		// Only a fixed code is recorded: the error text can name host paths or
+		// registry details, and job status is readable by remote clients. The
+		// driver's own evidence (f.Evidence) stays as the contract set it.
+		out.State, out.Detail = JobFailed, "storage_failed ("+storeFaultCode(err)+"): the file was downloaded but could not be stored; an operator must check the archive host (disk space, permissions, registry) and retry the job"
 		if errors.Is(err, ErrDeleted) {
 			out.Detail = "the bytes are quarantined or purged; an operator must restore them first"
 		}
-		return out
 	}
-	out.State, out.CaptureID = JobHeld, res.CaptureID
-	out.Detail = "stored from the official download control; completeness unknown, so the capture is held from hand-off"
-	return out
+	return out, nil
 }

@@ -103,6 +103,21 @@ type session struct {
 	begin    *browser.EventDownloadWillBegin
 	progress *browser.EventDownloadProgress
 	wake     chan struct{}
+	// clicked is set just before the official control is clicked. A download
+	// that begins earlier is a stray (the page started it by itself): it is
+	// cancelled, counted, and never returned. blockedAfter holds the hosts
+	// blocked after the click; a block before it (an unrelated subresource) is
+	// not a failed download.
+	clicked      bool
+	blockedAfter map[string]bool
+	stray        int
+}
+
+// markClicked starts the window in which a download counts as the control's.
+func (s *session) markClicked() {
+	s.mu.Lock()
+	s.clicked = true
+	s.mu.Unlock()
 }
 
 func (s *session) signal() {
@@ -187,6 +202,7 @@ type evidence struct {
 	Size             int64    `json:"size,omitempty"`
 	BlockedHosts     []string `json:"blocked_hosts,omitempty"`
 	DialogsDismissed int      `json:"dialogs_dismissed,omitempty"`
+	StrayDownloads   int      `json:"stray_downloads,omitempty"`
 }
 
 // Fetch opens the article detail page and clicks the official control. It
@@ -227,6 +243,9 @@ func (d *Driver) Fetch(parent context.Context, detailURL string) (archive.Browse
 		chromedp.Flag("disable-sync", true),
 		chromedp.Flag("disable-background-networking", true),
 		chromedp.Flag("mute-audio", true),
+		// A popup would be a second target with its own, unguarded requests, so
+		// none is opened; the attempt is recorded (page.EventWindowOpen below).
+		chromedp.Flag("block-new-web-contents", true),
 	)
 	if d.o.ChromePath != "" {
 		opts = append(opts, chromedp.ExecPath(d.o.ChromePath))
@@ -239,12 +258,27 @@ func (d *Driver) Fetch(parent context.Context, detailURL string) (archive.Browse
 	cctx, cancelCtx := chromedp.NewContext(actx)
 	defer cancelCtx()
 
-	s := &session{blocked: map[string]bool{}, wake: make(chan struct{}, 1)}
+	s := &session{blocked: map[string]bool{}, blockedAfter: map[string]bool{}, wake: make(chan struct{}, 1)}
 	if err := chromedp.Listen(cctx, func(ev any) {
 		switch e := ev.(type) {
 		case *fetch.EventRequestPaused:
 			// Handlers must not run commands inline, so each decision runs in its own goroutine.
 			go d.guard(cctx, s, e)
+		case *page.EventWindowOpen:
+			// The popup itself is blocked by the browser flag; record where it
+			// meant to go so a click that opens another site reads as one.
+			if host, ok := d.allowedHost(e.URL); !ok {
+				if host == "" {
+					host = "(unparsable)"
+				}
+				s.mu.Lock()
+				s.blocked[host] = true
+				if s.clicked {
+					s.blockedAfter[host] = true
+				}
+				s.mu.Unlock()
+				s.signal()
+			}
 		case *page.EventJavascriptDialogOpening:
 			s.mu.Lock()
 			s.dialogs = append(s.dialogs, e.Message)
@@ -262,12 +296,26 @@ func (d *Driver) Fetch(parent context.Context, detailURL string) (archive.Browse
 		switch e := ev.(type) {
 		case *browser.EventDownloadWillBegin:
 			s.mu.Lock()
-			s.begin = e
+			official := s.clicked
+			if official {
+				s.begin = e
+			} else {
+				s.stray++
+			}
 			s.mu.Unlock()
+			if !official {
+				// Started before the click: not the control's. Cancel it; it is
+				// never read.
+				go func() {
+					_, _ = chromedp.CallBrowser(cctx, browser.CancelDownload, browser.CancelDownloadParams{GUID: e.GUID})
+				}()
+			}
 			s.signal()
 		case *browser.EventDownloadProgress:
 			s.mu.Lock()
-			s.progress = e
+			if s.begin != nil && s.begin.GUID == e.GUID {
+				s.progress = e
+			}
 			s.mu.Unlock()
 			s.signal()
 		}
@@ -295,6 +343,7 @@ func (d *Driver) Fetch(parent context.Context, detailURL string) (archive.Browse
 			ev.BlockedHosts = append(ev.BlockedHosts, h)
 		}
 		ev.DialogsDismissed = len(s.dialogs)
+		ev.StrayDownloads = s.stray
 		s.mu.Unlock()
 		sort.Strings(ev.BlockedHosts)
 		b, _ := json.Marshal(ev)
@@ -319,6 +368,16 @@ func (d *Driver) Fetch(parent context.Context, detailURL string) (archive.Browse
 	if len(nodes) == 0 {
 		return finish(archive.BrowserFetch{Code: archive.ReasonFulltextNotPublic})
 	}
+	// The page is read again right before the click, so a page that moved to
+	// another article or a login after it loaded is not clicked.
+	if code := d.pageCode(cctx, s, detailURL); code != "" {
+		return finish(archive.BrowserFetch{Code: code})
+	}
+	// Residual window: the mark is set before the click is dispatched, so a
+	// download the page starts by itself in those few milliseconds would count
+	// as the control's. Earlier ones are strays. The download event carries no
+	// link to the control, so this cannot be closed from here.
+	s.markClicked()
 	if err := chromedp.Do(cctx, chromedp.Click(controlXPath)); err != nil {
 		return archive.BrowserFetch{}, fmt.Errorf("click control: %w", err)
 	}
@@ -332,10 +391,12 @@ func (d *Driver) Fetch(parent context.Context, detailURL string) (archive.Browse
 func (d *Driver) pageCode(ctx context.Context, s *session, detailURL string) string {
 	var info struct {
 		Path        string `json:"path"`
+		Search      string `json:"search"`
 		HasHandler  bool   `json:"hasHandler"`
 		HasPassword bool   `json:"hasPassword"`
+		Text        string `json:"text"`
 	}
-	raw, err := chromedp.Run(ctx, chromedp.Evaluate[string](`JSON.stringify({path: location.pathname, hasHandler: typeof fncDown === 'function', hasPassword: !!document.querySelector('input[type=password]')})`))
+	raw, err := chromedp.Run(ctx, chromedp.Evaluate[string](`JSON.stringify({path: location.pathname, search: location.search, hasHandler: typeof fncDown === 'function', hasPassword: !!document.querySelector('input[type=password]'), text: (document.body ? document.body.innerText : '').slice(0, 4000)})`))
 	if err != nil || json.Unmarshal([]byte(raw), &info) != nil {
 		return archive.ReasonUnexpectedPage
 	}
@@ -344,7 +405,41 @@ func (d *Driver) pageCode(ctx context.Context, s *session, detailURL string) str
 	case info.HasPassword || strings.Contains(strings.ToLower(info.Path), "login"):
 		return archive.ReasonLoginRequired
 	case want == nil || info.Path != want.Path || !info.HasHandler:
+		// A challenge or consent page can stand in for the detail page.
+		if code := textCode(info.Text); code != "" {
+			return code
+		}
 		return archive.ReasonUnexpectedPage
+	case !sameArticle(want, info.Search):
+		// The same path with another article id is another article.
+		return archive.ReasonUnexpectedPage
+	}
+	return ""
+}
+
+// artiParam is the article id parameter of the KCI detail URL.
+const artiParam = "sereArticleSearchBean.artiId"
+
+// sameArticle reports whether the loaded page's query names exactly the article
+// the job asked for. A URL without an article id (a test fixture) has nothing
+// to compare.
+func sameArticle(want *url.URL, search string) bool {
+	wantIDs := want.Query()[artiParam]
+	if len(wantIDs) == 0 {
+		return true
+	}
+	got, err := url.ParseQuery(strings.TrimPrefix(search, "?"))
+	return err == nil && len(wantIDs) == 1 && len(got[artiParam]) == 1 && got[artiParam][0] == wantIDs[0]
+}
+
+// textCode names a challenge or consent page from what it says; "" otherwise.
+func textCode(text string) string {
+	t := strings.ToLower(text)
+	switch {
+	case strings.Contains(t, "captcha") || strings.Contains(t, "자동입력") || strings.Contains(t, "보안문자"):
+		return archive.ReasonChallenge
+	case strings.Contains(t, "이용약관") || strings.Contains(t, "동의"):
+		return archive.ReasonConsentRequired
 	}
 	return ""
 }
@@ -369,6 +464,9 @@ func (d *Driver) guard(ctx context.Context, s *session, e *fetch.EventRequestPau
 		host = "(unparsable)"
 	}
 	s.blocked[host] = true
+	if s.clicked {
+		s.blockedAfter[host] = true
+	}
 	s.mu.Unlock()
 	_, _ = chromedp.Call(ctx, fetch.FailRequest, fetch.FailRequestParams{RequestID: e.RequestID, ErrorReason: network.ErrorReasonBlockedByClient})
 	s.signal()
@@ -382,7 +480,7 @@ func (d *Driver) awaitDownload(ctx context.Context, s *session, dl, detailURL st
 	canceled := false
 	for {
 		s.mu.Lock()
-		begin, prog, blocked := s.begin, s.progress, len(s.blocked) > 0
+		begin, prog, blocked := s.begin, s.progress, len(s.blockedAfter) > 0
 		s.mu.Unlock()
 		if begin != nil {
 			if h, _, ok := strings.Cut(strings.TrimPrefix(strings.TrimPrefix(begin.URL, "https://"), "http://"), "/"); ok {
@@ -450,21 +548,34 @@ func (d *Driver) noDownloadCode(ctx context.Context, s *session, detailURL strin
 	case strings.Contains(dialogs, "동의") || strings.Contains(dialogs, "약관") || strings.Contains(dialogs, "agree") || strings.Contains(dialogs, "consent"):
 		return archive.ReasonConsentRequired
 	}
-	var info struct {
+	// The download iframe is read too: a login or challenge page opens there,
+	// not in the detail page. Its result comes first, as it is the more
+	// specific; the same three checks apply to both.
+	type pageInfo struct {
 		Path        string `json:"path"`
 		HasPassword bool   `json:"hasPassword"`
 		Text        string `json:"text"`
 	}
-	raw, err := chromedp.Run(ctx, chromedp.Evaluate[string](`JSON.stringify({path: location.pathname, hasPassword: !!document.querySelector('input[type=password]'), text: (document.body ? document.body.innerText : '').slice(0, 4000)})`))
-	if err == nil && json.Unmarshal([]byte(raw), &info) == nil {
-		text := strings.ToLower(info.Text)
-		switch {
-		case info.HasPassword || strings.Contains(strings.ToLower(info.Path), "login"):
-			return archive.ReasonLoginRequired
-		case strings.Contains(text, "captcha") || strings.Contains(text, "자동입력") || strings.Contains(text, "보안문자"):
-			return archive.ReasonChallenge
-		case strings.Contains(text, "이용약관") || strings.Contains(text, "동의"):
-			return archive.ReasonConsentRequired
+	var both struct {
+		Top   *pageInfo `json:"top"`
+		Frame *pageInfo `json:"frame"`
+	}
+	raw, err := chromedp.Run(ctx, chromedp.Evaluate[string](`JSON.stringify((function(){
+  function info(w){ try { var d = w.document; return {path: w.location.pathname, hasPassword: !!d.querySelector('input[type=password]'), text: (d.body ? d.body.innerText : '').slice(0, 4000)}; } catch (e) { return null; } }
+  var f = null; try { f = window.frames['orteDownFrame'] ? info(window.frames['orteDownFrame']) : null; } catch (e) {}
+  return {top: info(window), frame: f};
+})())`))
+	if err == nil && json.Unmarshal([]byte(raw), &both) == nil {
+		for _, p := range []*pageInfo{both.Frame, both.Top} {
+			if p == nil {
+				continue
+			}
+			if p.HasPassword || strings.Contains(strings.ToLower(p.Path), "login") {
+				return archive.ReasonLoginRequired
+			}
+			if code := textCode(p.Text); code != "" {
+				return code
+			}
 		}
 	}
 	return archive.ReasonDownloadNotStarted
