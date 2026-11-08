@@ -9,26 +9,59 @@ identity_auto_selected=0
 
 verify_apple_developer_id() {
   candidate_fp=$1
-  probe_bin=$(mktemp "${TMPDIR:-/tmp}/codesign-probe.XXXXXX")
-  if [ -f /usr/bin/true ]; then
-    cp /usr/bin/true "$probe_bin"
-  elif [ -f /bin/echo ]; then
-    cp /bin/echo "$probe_bin"
+
+  cert_pem=$(security find-certificate -a -Z -p 2>/dev/null | awk -v target_fp="$candidate_fp" '
+    /^SHA-1 hash:/ { match_fp = ($3 == target_fp) }
+    match_fp && /^-----BEGIN CERTIFICATE-----/ { in_cert = 1 }
+    in_cert { print }
+    in_cert && /^-----END CERTIFICATE-----/ { exit }
+  ')
+
+  if [ -z "$cert_pem" ]; then
+    return 1
+  fi
+
+  cert_text=$(printf '%s\n' "$cert_pem" | openssl x509 -text -noout 2>/dev/null || true)
+  if [ -z "$cert_text" ]; then
+    return 1
+  fi
+
+  case "$cert_text" in
+    *'1.2.840.113635.100.6.1.13'*'Developer ID Certification Authority'*) ;;
+    *'Developer ID Certification Authority'*'1.2.840.113635.100.6.1.13'*) ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  tmp_cand=$(mktemp "${TMPDIR:-/tmp}/cand-cert.XXXXXX")
+  tmp_root=$(mktemp "${TMPDIR:-/tmp}/apple-root.XXXXXX")
+  tmp_inter=$(mktemp "${TMPDIR:-/tmp}/devid-inter.XXXXXX")
+
+  printf '%s\n' "$cert_pem" >"$tmp_cand"
+
+  security find-certificate -a -c "Apple Root CA" -p /System/Library/Keychains/SystemRootCertificates.keychain >"$tmp_root" 2>/dev/null || true
+  if [ ! -s "$tmp_root" ]; then
+    rm -f "$tmp_cand" "$tmp_root" "$tmp_inter"
+    return 1
+  fi
+  # -ignore_critical is required because Apple marks Developer ID Application extension
+  # 1.2.840.113635.100.6.1.13 as critical (TN3161), which standard OpenSSL verify flags as
+  # unhandled critical extension. Cryptographic signature and chaining up to Apple Root CA
+  # remain enforced by OpenSSL; the required Developer ID leaf OID and issuer are verified above.
+  security find-certificate -a -c "Developer ID Certification Authority" -p >"$tmp_inter" 2>/dev/null || true
+  if [ -s "$tmp_inter" ]; then
+    if ! openssl verify -CAfile "$tmp_root" -untrusted "$tmp_inter" -ignore_critical "$tmp_cand" >/dev/null 2>&1; then
+      rm -f "$tmp_cand" "$tmp_root" "$tmp_inter"
+      return 1
+    fi
   else
-    : >"$probe_bin"
+    if ! openssl verify -CAfile "$tmp_root" -ignore_critical "$tmp_cand" >/dev/null 2>&1; then
+      rm -f "$tmp_cand" "$tmp_root" "$tmp_inter"
+      return 1
+    fi
   fi
-
-  if ! codesign --force --sign "$candidate_fp" "$probe_bin" >/dev/null 2>&1; then
-    rm -f "$probe_bin"
-    return 1
-  fi
-
-  if ! codesign --verify --strict -R "$dev_id_requirement" "$probe_bin" >/dev/null 2>&1; then
-    rm -f "$probe_bin"
-    return 1
-  fi
-
-  rm -f "$probe_bin"
+  rm -f "$tmp_cand" "$tmp_root" "$tmp_inter"
   return 0
 }
 
@@ -69,8 +102,11 @@ EOF
 fi
 
 cd "$repo_dir"
-make install "CODESIGN_IDENTITY=$identity"
-
+if [ "$identity_auto_selected" -eq 1 ]; then
+  make install "CODESIGN_IDENTITY=$identity" "CODESIGN_REQUIREMENT=$dev_id_requirement"
+else
+  make install "CODESIGN_IDENTITY=$identity"
+fi
 installed_binary=$HOME/bin/cogvault
 codesign --verify --strict --verbose=4 "$installed_binary"
 signature=$(codesign -d --verbose=4 "$installed_binary" 2>&1)

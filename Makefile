@@ -2,6 +2,7 @@ BINARY     = cogvault
 INSTALL_DIR = $(HOME)/bin
 CODESIGN_IDENTITY   ?= -
 CODESIGN_IDENTIFIER ?= dev.tmint.cogvault
+CODESIGN_REQUIREMENT ?=
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null)
 LDFLAGS = -X github.com/teslamint/cogvault/internal/version.injected=$(VERSION)
 
@@ -9,7 +10,7 @@ LDFLAGS = -X github.com/teslamint/cogvault/internal/version.injected=$(VERSION)
 
 build:
 	@set -eu; \
-		tmp=".$(BINARY).build"; \
+		tmp=".$(BINARY).build.$$$$"; \
 		trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
 		go build -ldflags "$(LDFLAGS)" -o "$$tmp" ./cmd/cogvault/; \
 		echo "codesign: identity=$(CODESIGN_IDENTITY) identifier=$(CODESIGN_IDENTIFIER)"; \
@@ -21,13 +22,16 @@ build:
 install: build
 	mkdir -p $(INSTALL_DIR)
 	@set -eu; \
-		tmp="$(INSTALL_DIR)/.$(BINARY).tmp"; \
+		tmp="$(INSTALL_DIR)/.$(BINARY).tmp.$$$$"; \
 		trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
 		cp $(BINARY) "$$tmp"; \
 		echo "codesign: identity=$(CODESIGN_IDENTITY) identifier=$(CODESIGN_IDENTIFIER)"; \
 		codesign --force --sign "$(CODESIGN_IDENTITY)" --identifier "$(CODESIGN_IDENTIFIER)" "$$tmp"; \
 		codesign --verify --strict --verbose=4 "$$tmp"; \
-		mv -f "$$tmp" $(INSTALL_DIR)/$(BINARY); \
+		if [ -n "$(CODESIGN_REQUIREMENT)" ]; then \
+			codesign --verify --strict -R "$(CODESIGN_REQUIREMENT)" "$$tmp"; \
+		fi; \
+		mv -f "$$tmp" "$(INSTALL_DIR)/$(BINARY)"; \
 		trap - EXIT HUP INT TERM
 
 test:
