@@ -2076,7 +2076,8 @@ source-page guidance.
 The conflict/provenance guidance is advisory text; no tool checks it. It tells
 agents to keep conflicting or superseded claims with a `CONFLICT` (sources
 disagree on the same measure) or `SUPERSEDED` (replaced by a later claim) mark
-instead of averaging, overwriting, or deleting one, and to record figures on
+instead of averaging, overwriting, or deleting one merely to resolve the
+disagreement (a removal the user explicitly requests is not that), and to record figures on
 different bases as separate claims; to attribute each claim to its own source
 page and as-of date or basis; to treat a `sources/` page as a record or summary
 generated at ingest, not the original or an archived copy of its bytes, with

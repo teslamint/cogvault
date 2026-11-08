@@ -33,7 +33,7 @@ const evidenceInstructions = `For optional research_evidence frontmatter (versio
 // provenance rules of anthropics/claude-quickstarts managed-agents/knowledge-wiki
 // at 4a4224bd; see docs/research/2026-11-09-knowledge-wiki-upstream-study.md.
 const conflictInstructions = `When pages disagree or a claim changes over time:
-- Keep conflicting or superseded claims. Do not average, overwrite, or delete one to resolve it; mark each CONFLICT (same measure, sources disagree) or SUPERSEDED (replaced by a later claim) and keep both sides. Figures on different bases are separate claims: record each with its basis and never merge them.
+- Keep conflicting or superseded claims. Do not average, overwrite, or delete one merely to resolve the disagreement (a removal the user explicitly requests is not that); mark each CONFLICT (same measure, sources disagree) or SUPERSEDED (replaced by a later claim) and keep both sides. Figures on different bases are separate claims: record each with its basis and never merge them.
 - Give every claim its own source page and as-of date or basis (scope, definition). A footer list of sources does not attribute individual claims.
 - A sources/ page is a record or summary generated at ingest (and possibly edited since), not the original and not an archived copy of its bytes; source_path is a local inbox path, not an origin. Cite an origin recorded on the page (url, source_url, canonical_url) or named in its text as recorded, not verified. Cite an origin the user supplied as user-provided, not verified. If neither exists, cite the page and say the origin is unrecorded.
 - "Not in this source" is not "not true": scope an absence to the sources you checked.
