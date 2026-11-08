@@ -17,3 +17,4 @@ Current documents:
 - `step7-9-code-review.md` — post-implementation review of Steps 7-9: 4 fixes applied (containsSubstring, search.go helper, .md case, race assertions)
 - `step9-validation-report.md` — 5-day real-world validation, partial success, CLI shortcut pivot planned
 - [O1: Headless PDF digestion verification](o1-headless-pdf-verification.md) — claude --print works interactive+launchd; code-fence stripping required
+- [Knowledge-wiki upstream study](2026-11-09-knowledge-wiki-upstream-study.md) — pinned comparison with Anthropic's knowledge-wiki quickstart; adopted conflict/provenance guidance, small synthetic pilot, limits

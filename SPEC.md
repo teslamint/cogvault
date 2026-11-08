@@ -2067,8 +2067,26 @@ provenance rules (`[TODO: source needed]`, `[UNCERTAIN]`). Optional frontmatter:
 `category` (`article` | `legal` | `reference`), classified by the LLM during
 digestion via the `buildPrompt` instruction (not schema-dependent). The ingest
 digestion prompt embeds these rules so generated pages conform. MCP initialize
-instructions append server-owned evidence guidance after the schema text; the
-2,000-rune cap applies only to the schema portion, not the appended guidance.
+instructions append two server-owned guidance blocks after the schema text: the
+evidence guidance, and a conflict/provenance guidance (below). The 2,000-rune
+cap applies only to the schema portion, not the appended guidance. Neither
+block is part of the ingest digestion prompt, which embeds `_schema.md` and the
+source-page guidance.
+
+The conflict/provenance guidance is advisory text; no tool checks it. It tells
+agents to keep conflicting or superseded claims with a `CONFLICT` (sources
+disagree on the same measure) or `SUPERSEDED` (replaced by a later claim) mark
+instead of averaging, overwriting, or deleting one, and to record figures on
+different bases as separate claims; to attribute each claim to its own source
+page and as-of date or basis; to treat a `sources/` page as a record or summary
+generated at ingest, not the original or an archived copy of its bytes, with
+`source_path` a local inbox path and not an origin; to cite an origin only when
+the page records one (`url`, `source_url`, `canonical_url`) or the text names
+it, as recorded and not verified; to scope an absence claim to the sources
+checked; and, because `wiki_write` replaces the whole file and has no
+compare-and-swap, to read a page right before editing it, keep others' content
+verbatim, and re-read it afterwards. That last rule narrows the race window and
+detects some losses; it does not prevent a lost concurrent edit.
 
 On PDF ingest, optional `pdf_title`, `pdf_author`, and `pdf_links` are extracted
 from PDF metadata and hyperlink annotations by `pdfinfo`, independently of the
@@ -2217,8 +2235,8 @@ sends `reasoning_effort: "none"` and `max_tokens: 4096`; a response with
 - Lint reports only present fields, checks diagnostic severities, deterministic
   ordering across all issue kinds, text messages without IDs, exact JSON shape
   and empty-array encoding; `--strict` changes only exit status.
-- MCP initialize appends server-owned evidence guidance after schema text, with
-  the schema rune cap independent of that appended guidance.
+- MCP initialize appends the server-owned evidence and conflict guidance after
+  schema text, with the schema rune cap independent of both appended blocks.
 
 ### Archive prototype (§9.16)
 - Object bytes equal input, read-only, one file per hash; no staging files

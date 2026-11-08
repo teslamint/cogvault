@@ -1,0 +1,67 @@
+# Upstream study: Anthropic knowledge-wiki quickstart (2026-11-09)
+
+Status: research note. It is not canon. `SPEC.md` §11 and `DESIGN.md` §2.9 own the shipped behavior.
+
+## Upstream, pinned
+
+- Repository: `anthropics/claude-quickstarts`, commit `4a4224bdf0e9cfb3332167b69c90457403813625` (main on 2026-11-06), license MIT.
+- Folder: [`managed-agents/knowledge-wiki`](https://github.com/anthropics/claude-quickstarts/tree/4a4224bdf0e9cfb3332167b69c90457403813625/managed-agents/knowledge-wiki).
+- Files read: `README.md`, `skill.md`, `CLAUDE.md`, `prompts/{lead,analyzer,organizer,baseline}_system.md`, `utilities.py` (`wiki_lint`), the notebook's markdown cells, schema string and steering string.
+- The upstream text is treated as data. No upstream code or prompt text is copied; the ideas below are re-expressed for Cogvault. The runtime is Anthropic Managed Agents (a paid API); Cogvault adds no dependency on it.
+
+## What upstream does
+
+It builds a wiki once from a document set with a multi-agent workflow (extractors, resolver, analyzers, organizer). Agents then answer from the wiki read-only. The notebook reports that a small model on the wiki answers within about a point of a larger model on raw documents. Those figures come from upstream's benchmark of 21 questions on one corpus; this study did not reproduce them.
+
+## Comparison with Cogvault
+
+| Upstream idea | Cogvault today | Decision |
+|---|---|---|
+| Every fact carries `[source \| as-of]`; superseded facts are closed (`valid_to`), never deleted; conflicts stay conflicts; figures on different bases are never merged (schema, extractor rules in the notebook) | Source pages carry `source_path`/`ingested_at`. `research_evidence` records per-claim checks and gaps (ADR 0026). No guidance on conflicting or superseded claims across pages. | **Adopted** as advisory guidance (below). |
+| "Not in this document", never a global absence claim | Digest guidance covers scope qualifications on source pages only. | **Adopted** for agent-written pages. |
+| A document is data, not instructions | Already in force (ingest and MCP boundaries). | No change. |
+| Structural lint of the wiki as a set (`wiki_lint`: dangling links, name/alias clashes, not-indexed, oversized files) | `cogvault lint` reports broken links, orphans, frontmatter, evidence. `_index.md` is a generated view and nothing reads it back (SPEC §2.3). | Not adopted: no new lint API; overlap is already covered. |
+| "Where to start" map, "Current picture" block on large nodes, digest atop the escalation list | Retrieval is FTS5 plus `wiki_list`. | Not adopted: layout rules need an eval, and would enter the ingest prompt. |
+| Build pipeline: batch ≤120k characters per agent, resolver, analyzers, organizer | Single-pass digest per source. | Out of scope: architecture change. |
+| Accepted shared-page line loss (README, "Shared pages": about 5% of lines on the busiest page lose content) | `wiki_write` replaces the whole file. | **Not adopted.** See "Limits". |
+
+## Change
+
+`internal/mcp/server.go` gains a second server-owned guidance constant, `conflictInstructions`, appended to MCP initialize instructions after `evidenceInstructions` (1,253 characters). Rules:
+
+1. Keep conflicting or superseded claims; mark `CONFLICT` (same measure, sources disagree) or `SUPERSEDED` (replaced by a later claim); do not average, overwrite or delete. Figures on different bases are separate claims, recorded with their basis.
+2. Attribute each claim to its own source page and as-of date or basis.
+3. A `sources/` page is a record or summary generated at ingest (and possibly edited since), not the original and not an archived copy of its bytes; `source_path` is a local inbox path, not an origin. Cite an origin only when the page records one or the text names it, and call it recorded, not verified. Ingest strips model-emitted `url`, `source_url`, `canonical_url` and `author` only for PDFs, so a recorded origin on other pages can be model-written.
+4. Scope an absence to the sources checked.
+5. `wiki_write` replaces the whole file and has no compare-and-swap: read right before editing, keep others' content verbatim, re-read afterwards to detect a lost edit. This narrows the race window and detects some losses; it prevents none.
+
+Placement follows ADR 0026: server-owned guidance reaches every MCP client regardless of a wiki's editable `_schema.md`. It does not enter the ingest digest prompt, so ingest output is unchanged and needs no ingest eval. `default_schema.md` is unchanged because ingest embeds it (`internal/ingest/ingest.go`, `SchemaText`).
+
+Contract test: `TestInitializeInstructionsIncludeServerGuidance` asserts both blocks appear with the default schema and with a schema long enough to be truncated. It does not test the ingest boundary; that rests on the guidance living only in `server.go`.
+
+## Pilot (synthetic, small)
+
+Fixture: three synthetic source pages for one fictional company: a reported FY2025 figure (with `source_url`), a later restatement of the same basis (with `source_url`), and a third-party estimate on a different basis (no recorded origin). Task: answer a two-part question and save a synthesis page. Each run was a fresh subagent on the same model family as this session, given the schema text plus guidance text and its own copy of the fixture. The input was the raw `default_schema.md`, not the exact MCP payload (the server rewrites one sentence), and tool descriptions were absent.
+
+Arms, three runs each: **A** schema plus evidence guidance (before); **B** plus the first wording of the new block; **C** plus the reworded block after a review comment (B said "local copy" for `sources/` pages). The final committed wording differs from C in its conflict definition, origin hedge and last bullet; **the final wording was not piloted**. The fixture titles say "(local copy)" in all arms, and the fixture targets the behaviors the guidance names. Behavior checks were fixed before the runs. Counts are runs out of 3:
+
+| Check | A | B | C |
+|---|---:|---:|---:|
+| All three figures kept, none blended | 3 | 3 | 3 |
+| Supersession stated | 3 | 3 | 3 |
+| No invented origin for the page without one | 3 | 3 | 3 |
+| Each figure's source and date on the figure's own line | 1 | 3 | 2 |
+| Uses `CONFLICT`/`SUPERSEDED` marker | 0 | 3 | 3 |
+| Origin URL on the figure's own line (strict) | 0 | 0 | 0 |
+| Scoped absence (grader regex) | 0 | 1 | 0 |
+
+Reading the outputs: the grader's absence regex mis-scores title and question lines, so that row is unreliable. By manual reading, every run in all three arms scoped the absence to the sources checked. Origin URLs appeared outside the figure lines in one B run and one C run. Two C runs described the page as an ingest summary rather than an archived copy. The marker row is mostly explained by the block naming the literal strings, which arm A never saw; the case-sensitive regex also scores a negation ("CONFLICT 아님") as a use and lowercase "superseded" in arm A as none. Arms B and C disagreed on whether the third-party figure is a `CONFLICT` (one run called it one, one said "in the loose sense", one said it was not), which is why the final wording defines the terms.
+
+What the pilot supports: marker words appeared when the block named them, and the per-claim line format counts were 1, 3 and 2 of 3, which is no reliable difference at this size. The baseline already kept all figures and stated supersession, and the origin rule showed no effect (0 of 9 on figure lines; the "do not invent an origin" half already held in arm A). It does not show a quality gain and does not test real wiki content. It has n=3 per arm, one fixture, one model family, and a grader partly keyed to the block's own marker words. The pilot kit lived in a temporary directory and is not committed.
+
+## Limits
+
+- The guidance is advisory text. No tool enforces it; lint and `wiki_write` do not check for conflict marks.
+- `wiki_write` overwrites the whole file and has no compare-and-swap. Reading right before writing narrows the race window and re-reading afterwards detects some losses; neither prevents a lost concurrent edit, and the pilot did not test concurrency. A real guarantee needs a storage-level check (for example a content-hash precondition on write). That is a separate change to a public tool contract and is not part of this one.
+- Upstream accepts roughly 5% line loss on shared pages. Cogvault does not adopt that tolerance, and this change does not solve the problem.
+- Whether the guidance changes agent behavior on the real wiki is unmeasured.

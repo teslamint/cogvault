@@ -47,8 +47,13 @@ func setupIntegration(t *testing.T) (string, *server.MCPServer) {
 	return root, s
 }
 
-func TestInitializeInstructionsIncludeEvidenceGuidance(t *testing.T) {
-	evidenceText := "Record performed checks"
+func TestInitializeInstructionsIncludeServerGuidance(t *testing.T) {
+	// One marker per server-owned guidance block; both must survive a schema
+	// long enough to hit the truncation cap, which applies to the schema only.
+	guidanceMarkers := map[string]string{
+		"evidence":  "Record performed checks",
+		"conflicts": "Keep conflicting or superseded claims",
+	}
 	for _, tc := range []struct {
 		name         string
 		schema       []byte
@@ -115,8 +120,10 @@ func TestInitializeInstructionsIncludeEvidenceGuidance(t *testing.T) {
 			if err := json.Unmarshal(respJSON, &rpcResp); err != nil {
 				t.Fatalf("unmarshal initialize response: %v\nraw: %s", err, respJSON)
 			}
-			if !strings.Contains(rpcResp.Result.Instructions, evidenceText) {
-				t.Errorf("initialize instructions omit evidence guidance")
+			for name, marker := range guidanceMarkers {
+				if !strings.Contains(rpcResp.Result.Instructions, marker) {
+					t.Errorf("initialize instructions omit %s guidance", name)
+				}
 			}
 			if tc.wantFullLink {
 				if !strings.Contains(rpcResp.Result.Instructions, tc.wantSchema) {
