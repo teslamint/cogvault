@@ -6,7 +6,21 @@ identity=${1-}
 
 if [ -z "$identity" ]; then
   identities=$(security find-identity -v -p codesigning 2>/dev/null |
-    awk -F '"' '/Developer ID Application:/ { print $2 }')
+    awk '
+      /Developer ID Application:/ {
+        fp = $2
+        split($0, parts, "\"")
+        name = parts[2]
+        if (fp != "" && name != "" && !seen[fp]++) {
+          identities[count++] = name
+        }
+      }
+      END {
+        for (i = 0; i < count; i++) {
+          print identities[i]
+        }
+      }
+    ')
   identity_count=$(printf '%s\n' "$identities" | awk 'NF { count++ } END { print count + 0 }')
   if [ "$identity_count" -ne 1 ]; then
     printf 'expected exactly one valid Developer ID Application identity; found %s\n' "$identity_count" >&2

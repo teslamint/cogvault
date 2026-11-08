@@ -100,6 +100,28 @@ PATH="$case_dir/bin:/usr/bin:/bin" HOME="$case_dir/home" INSTALL_SIGNED_TEST_LOG
 calls=$(cat "$log")
 assert_contains "$calls" 'make <install> <CODESIGN_IDENTITY=Developer ID Application: Org User (TEAM123456)>'
 
+# 2a. Duplicate copies of the same certificate across keychains (identical fingerprint): deduplicates to 1
+case_dir=$(setup_env "duplicate_same_cert" "printf '%s\n' '  1) ABCD1234EF567890 \"Developer ID Application: Shared Cert (TEAM123)\"' '  2) ABCD1234EF567890 \"Developer ID Application: Shared Cert (TEAM123)\"'")
+log="$case_dir/calls.log"
+
+PATH="$case_dir/bin:/usr/bin:/bin" HOME="$case_dir/home" INSTALL_SIGNED_TEST_LOG="$log" \
+  "$repo_dir/scripts/install-signed.sh" >/dev/null
+
+calls=$(cat "$log")
+assert_contains "$calls" 'make <install> <CODESIGN_IDENTITY=Developer ID Application: Shared Cert (TEAM123)>'
+
+# 2b. Distinct certificates sharing the same name (different fingerprints): not deduplicated, fails with found 2
+case_dir=$(setup_env "different_certs_same_name" "printf '%s\n' '  1) 1111111111111111 \"Developer ID Application: Same Name (TEAM123)\"' '  2) 2222222222222222 \"Developer ID Application: Same Name (TEAM123)\"'")
+log="$case_dir/calls.log"
+stderr="$case_dir/err.log"
+
+if PATH="$case_dir/bin:/usr/bin:/bin" HOME="$case_dir/home" INSTALL_SIGNED_TEST_LOG="$log" \
+  "$repo_dir/scripts/install-signed.sh" >/dev/null 2>"$stderr"; then
+  printf 'expected install-signed to fail when distinct certs share the same name\n' >&2
+  exit 1
+fi
+assert_contains "$(cat "$stderr")" 'expected exactly one valid Developer ID Application identity; found 2'
+
 # 3. Refusal when 0 Developer ID Application identities exist (e.g. only Apple Development)
 case_dir=$(setup_env "zero_dev_id" "printf '%s\n' '  1) EFGH \"Apple Development: Dev User (TEAM999999)\"'")
 log="$case_dir/calls.log"
