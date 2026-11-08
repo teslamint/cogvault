@@ -30,7 +30,7 @@ It builds a wiki once from a document set with a multi-agent workflow (extractor
 `internal/mcp/server.go` gains a second server-owned guidance constant, `conflictInstructions`, appended to MCP initialize instructions after `evidenceInstructions` (1,343 characters after review revisions). Rules:
 
 1. Keep conflicting or superseded claims; mark `CONFLICT` (same measure, sources disagree) or `SUPERSEDED` (replaced by a later claim); do not average, overwrite or delete one merely to resolve the disagreement (a user-requested removal is not that). Figures on different bases are separate claims, recorded with their basis.
-2. Attribute each claim to its own source page and as-of date or basis.
+2. Attribute each claim to its own source page, as-of date ("date unknown" if none is stated), and basis.
 3. A `sources/` page is a record or summary generated at ingest (and possibly edited since), not the original and not an archived copy of its bytes; `source_path` is a local inbox path, not an origin. Cite an origin recorded on the page or named in its text as recorded, not verified, and a user-supplied origin as user-provided, not verified. Ingest strips model-emitted `url`, `source_url`, `canonical_url` and `author` only for PDFs, so a recorded origin on other pages can be model-written.
 4. Scope an absence to the sources checked.
 5. `wiki_write` replaces the whole file and has no compare-and-swap: read right before editing, apply the requested changes, keep all other content verbatim, re-read afterwards to detect a lost edit. This narrows the race window and detects some losses; it prevents none.
