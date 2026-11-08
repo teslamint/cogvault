@@ -7,12 +7,12 @@ identity=${1-}
 if [ -z "$identity" ]; then
   identities=$(security find-identity -v -p codesigning 2>/dev/null |
     awk '
-      /Developer ID Application:/ {
-        fp = $2
+      {
         split($0, parts, "\"")
         name = parts[2]
-        if (fp != "" && name != "" && !seen[fp]++) {
-          identities[count++] = name
+        fp = $2
+        if (fp != "" && name ~ /^Developer ID Application:/ && !seen[fp]++) {
+          identities[count++] = fp
         }
       }
       END {
