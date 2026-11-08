@@ -41,7 +41,8 @@ if [ "$actual" != 'new-build' ]; then
   exit 1
 fi
 
-if [ -e "$tmp_dir/.cogvault.build" ]; then
-  printf 'temporary build output remains\n' >&2
+for f in "$tmp_dir"/.cogvault.build*; do
+  [ -e "$f" ] || continue
+  printf 'temporary build output remains: %s\n' "$f" >&2
   exit 1
-fi
+done
