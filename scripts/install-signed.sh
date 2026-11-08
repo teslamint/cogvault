@@ -37,31 +37,33 @@ verify_apple_developer_id() {
   tmp_cand=$(mktemp "${TMPDIR:-/tmp}/cand-cert.XXXXXX")
   tmp_root=$(mktemp "${TMPDIR:-/tmp}/apple-root.XXXXXX")
   tmp_inter=$(mktemp "${TMPDIR:-/tmp}/devid-inter.XXXXXX")
+  empty_dir=$(mktemp -d "${TMPDIR:-/tmp}/empty-capath.XXXXXX")
 
   printf '%s\n' "$cert_pem" >"$tmp_cand"
 
   security find-certificate -a -c "Apple Root CA" -p /System/Library/Keychains/SystemRootCertificates.keychain >"$tmp_root" 2>/dev/null || true
   if [ ! -s "$tmp_root" ]; then
-    rm -f "$tmp_cand" "$tmp_root" "$tmp_inter"
+    rm -rf "$tmp_cand" "$tmp_root" "$tmp_inter" "$empty_dir"
     return 1
   fi
   # -ignore_critical is required because Apple marks Developer ID Application extension
   # 1.2.840.113635.100.6.1.13 as critical (TN3161), which standard OpenSSL verify flags as
   # unhandled critical extension. Cryptographic signature and chaining up to Apple Root CA
   # remain enforced by OpenSSL; the required Developer ID leaf OID and issuer are verified above.
+  # -CApath is constrained to an empty directory to prevent fallback to system or default CA paths.
   security find-certificate -a -c "Developer ID Certification Authority" -p >"$tmp_inter" 2>/dev/null || true
   if [ -s "$tmp_inter" ]; then
-    if ! openssl verify -CAfile "$tmp_root" -untrusted "$tmp_inter" -ignore_critical "$tmp_cand" >/dev/null 2>&1; then
-      rm -f "$tmp_cand" "$tmp_root" "$tmp_inter"
+    if ! openssl verify -CAfile "$tmp_root" -untrusted "$tmp_inter" -CApath "$empty_dir" -ignore_critical "$tmp_cand" >/dev/null 2>&1; then
+      rm -rf "$tmp_cand" "$tmp_root" "$tmp_inter" "$empty_dir"
       return 1
     fi
   else
-    if ! openssl verify -CAfile "$tmp_root" -ignore_critical "$tmp_cand" >/dev/null 2>&1; then
-      rm -f "$tmp_cand" "$tmp_root" "$tmp_inter"
+    if ! openssl verify -CAfile "$tmp_root" -CApath "$empty_dir" -ignore_critical "$tmp_cand" >/dev/null 2>&1; then
+      rm -rf "$tmp_cand" "$tmp_root" "$tmp_inter" "$empty_dir"
       return 1
     fi
   fi
-  rm -f "$tmp_cand" "$tmp_root" "$tmp_inter"
+  rm -rf "$tmp_cand" "$tmp_root" "$tmp_inter" "$empty_dir"
   return 0
 }
 
