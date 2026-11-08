@@ -340,6 +340,7 @@ case " \$* " in
     printf 'signed-build\n' >"\$HOME/bin/cogvault"
     # Spawn concurrent plain install under install-lock.sh
     (
+      for fd in 3 4 5 6 7 8 9; do eval "exec \$fd>&-" 2>/dev/null || true; done
       env -u COGVAULT_INSTALL_LOCK_HELD sh "$repo_dir/scripts/install-lock.sh" "\$HOME/bin" \
         sh -c 'printf "adhoc-overwrite\n" > "\$HOME/bin/cogvault"; touch "'"$bg_done"'"' 2>"$case_dir/bg_err.log"
     ) &

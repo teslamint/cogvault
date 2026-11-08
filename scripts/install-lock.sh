@@ -18,6 +18,9 @@ canonical_dir=$(cd "$target_dir" && pwd -P)
 lock_file="$canonical_dir/.cogvault.install.lock"
 touch "$lock_file"
 export COGVAULT_INSTALL_LOCK_HELD=1
+for fd in 3 4 5 6 7 8 9; do
+  eval "exec $fd>&-" 2>/dev/null || true
+done
 
 if command -v lockf >/dev/null 2>&1; then
   exec lockf -k -t 15 "$lock_file" "$@"
