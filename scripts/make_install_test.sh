@@ -95,3 +95,12 @@ if [ ! -f "$fake_home/custom/cogvault" ]; then
   printf 'install failed to install into custom INSTALL_DIR\n' >&2
   exit 1
 fi
+
+# 6. Custom INSTALL_DIR containing single quotes installs successfully without shell syntax failure
+quoted_dir="$fake_home/custom O'Brien/bin"
+mkdir -p "$quoted_dir"
+PATH="$fake_bin:/usr/bin:/bin" HOME="$fake_home" make -C "$tmp_dir" install INSTALL_DIR="$quoted_dir" >/dev/null
+if [ ! -f "$quoted_dir/cogvault" ]; then
+  printf 'install failed to install into custom INSTALL_DIR containing single quotes\n' >&2
+  exit 1
+fi

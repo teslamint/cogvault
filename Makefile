@@ -26,7 +26,9 @@ install:
 	mkdir -p "$(INSTALL_DIR)"
 	@sh scripts/install-lock.sh "$(INSTALL_DIR)" \
 		/bin/sh -c 'set -eu; \
-			tmp="$(INSTALL_DIR)/.$(BINARY).tmp.$$$$"; \
+			target_dir="$$1"; \
+			binary="$$2"; \
+			tmp="$$target_dir/.$$binary.tmp.$$$$"; \
 			trap "rm -f \"\$$tmp\"" EXIT; \
 			trap "exit 1" HUP INT TERM; \
 			go build -ldflags "$(LDFLAGS)" -o "$$tmp" ./cmd/cogvault/; \
@@ -36,9 +38,9 @@ install:
 			if [ -n "$$CODESIGN_REQUIREMENT" ]; then \
 				codesign --verify --strict -R "$$CODESIGN_REQUIREMENT" "$$tmp"; \
 			fi; \
-			mv -f "$$tmp" "$(INSTALL_DIR)/$(BINARY)"; \
+			mv -f "$$tmp" "$$target_dir/$$binary"; \
 			trap - EXIT HUP INT TERM; \
-			rm -f "$$tmp"'
+			rm -f "$$tmp"' _ "$(INSTALL_DIR)" "$(BINARY)"
 
 test:
 	sh scripts/make_build_test.sh
