@@ -2,9 +2,19 @@
 set -eu
 
 repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
-install_dir="${INSTALL_DIR:-$HOME/bin}"
+install_dir="$HOME/bin"
+mkdir -p "$install_dir"
+canonical_dir=$(cd "$install_dir" && pwd -P)
 
-if [ "${COGVAULT_INSTALL_LOCK_HELD:-0}" != "1" ]; then
+if [ -n "${INSTALL_DIR:-}" ]; then
+  custom_dir=$(mkdir -p "$INSTALL_DIR" && cd "$INSTALL_DIR" && pwd -P)
+  if [ "$custom_dir" != "$canonical_dir" ]; then
+    printf 'install-signed only supports default install directory (%s); use make install for custom targets\n' "$install_dir" >&2
+    exit 1
+  fi
+fi
+
+if [ "${COGVAULT_INSTALL_LOCK_HELD:-}" != "$canonical_dir" ]; then
   exec sh "$repo_dir/scripts/install-lock.sh" "$install_dir" "$0" "$@"
 fi
 
@@ -134,9 +144,9 @@ fi
 
 cd "$repo_dir"
 if [ "$identity_auto_selected" -eq 1 ]; then
-  make install "INSTALL_DIR=$install_dir" "CODESIGN_IDENTITY=$identity" "CODESIGN_REQUIREMENT=$dev_id_requirement"
+  make install "CODESIGN_IDENTITY=$identity" "CODESIGN_REQUIREMENT=$dev_id_requirement"
 else
-  make install "INSTALL_DIR=$install_dir" "CODESIGN_IDENTITY=$identity"
+  make install "CODESIGN_IDENTITY=$identity"
 fi
 installed_binary=$install_dir/cogvault
 codesign --verify --strict --verbose=4 "$installed_binary"

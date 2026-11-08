@@ -382,7 +382,7 @@ PATH="$case_dir/bin:/usr/bin:/bin" HOME="$case_dir/home" INSTALL_SIGNED_TEST_LOG
   "$repo_dir/scripts/install-signed.sh" >/dev/null
 
 calls=$(cat "$log" 2>/dev/null || true)
-assert_contains "$calls" "$make_install_cmd <INSTALL_DIR="
+assert_contains "$calls" "$make_install_cmd"
 assert_contains "$calls" '<CODESIGN_IDENTITY=ABCD> <CODESIGN_REQUIREMENT='
 assert_contains "$calls" 'launchctl <print> <gui/'
 
@@ -406,25 +406,33 @@ if [ "$final_content" != 'adhoc-overwrite' ]; then
   exit 1
 fi
 
-# 10. Custom INSTALL_DIR propagates to make install and verifies custom binary path
-case_dir=$(setup_env "custom_install_dir" "$single_dev_id_security")
+# 10. Explicitly rejects unsupported non-default INSTALL_DIR before mutation
+case_dir=$(setup_env "reject_custom_install_dir" "$single_dev_id_security")
 log="$case_dir/calls.log"
+stderr="$case_dir/err.log"
 custom_bin="$case_dir/custom_bin"
 mkdir -p "$custom_bin"
-: >"$custom_bin/cogvault"
 
+exit_code=0
 PATH="$case_dir/bin:/usr/bin:/bin" HOME="$case_dir/home" INSTALL_DIR="$custom_bin" INSTALL_SIGNED_TEST_LOG="$log" \
-  "$repo_dir/scripts/install-signed.sh" >/dev/null
+  "$repo_dir/scripts/install-signed.sh" >/dev/null 2>"$stderr" || exit_code=$?
 
+if [ "$exit_code" -eq 0 ]; then
+  printf 'expected install-signed to reject non-default INSTALL_DIR; got 0\n' >&2
+  exit 1
+fi
+assert_contains "$(cat "$stderr")" 'install-signed only supports default install directory'
 calls=$(cat "$log" 2>/dev/null || true)
-assert_contains "$calls" "$make_install_cmd <INSTALL_DIR=$custom_bin> <CODESIGN_IDENTITY=ABCD>"
-assert_contains "$calls" "codesign <--verify> <--strict> <--verbose=4> <$custom_bin/cogvault>"
+assert_not_contains "$calls" "$make_install_cmd"
+assert_not_contains "$calls" 'launchctl'
 
 # 11. Pre-existing / empty lock file does not impede installation
-: >"$log"
-touch "$custom_bin/.cogvault.install.lock"
-PATH="$case_dir/bin:/usr/bin:/bin" HOME="$case_dir/home" INSTALL_DIR="$custom_bin" INSTALL_SIGNED_TEST_LOG="$log" \
+case_dir=$(setup_env "empty_lock_file" "$single_dev_id_security")
+log="$case_dir/calls.log"
+touch "$case_dir/home/bin/.cogvault.install.lock"
+PATH="$case_dir/bin:/usr/bin:/bin" HOME="$case_dir/home" INSTALL_SIGNED_TEST_LOG="$log" \
   "$repo_dir/scripts/install-signed.sh" >/dev/null
 
 calls=$(cat "$log" 2>/dev/null || true)
-assert_contains "$calls" "$make_install_cmd <INSTALL_DIR=$custom_bin> <CODESIGN_IDENTITY=ABCD>"
+assert_contains "$calls" "$make_install_cmd"
+assert_contains "$calls" '<CODESIGN_IDENTITY=ABCD>'
