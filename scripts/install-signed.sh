@@ -38,12 +38,18 @@ verify_apple_developer_id() {
   tmp_root=$(mktemp "${TMPDIR:-/tmp}/apple-root.XXXXXX")
   tmp_inter=$(mktemp "${TMPDIR:-/tmp}/devid-inter.XXXXXX")
   empty_dir=$(mktemp -d "${TMPDIR:-/tmp}/empty-capath.XXXXXX")
+  trap 'rm -rf "$tmp_cand" "$tmp_root" "$tmp_inter" "$empty_dir"; trap - EXIT HUP INT TERM' EXIT HUP INT TERM
+
+  cleanup_verify_artifacts() {
+    rm -rf "$tmp_cand" "$tmp_root" "$tmp_inter" "$empty_dir"
+    trap - EXIT HUP INT TERM
+  }
 
   printf '%s\n' "$cert_pem" >"$tmp_cand"
 
   security find-certificate -a -c "Apple Root CA" -p /System/Library/Keychains/SystemRootCertificates.keychain >"$tmp_root" 2>/dev/null || true
   if [ ! -s "$tmp_root" ]; then
-    rm -rf "$tmp_cand" "$tmp_root" "$tmp_inter" "$empty_dir"
+    cleanup_verify_artifacts
     return 1
   fi
   # -ignore_critical is required because Apple marks Developer ID Application extension
@@ -54,16 +60,16 @@ verify_apple_developer_id() {
   security find-certificate -a -c "Developer ID Certification Authority" -p >"$tmp_inter" 2>/dev/null || true
   if [ -s "$tmp_inter" ]; then
     if ! openssl verify -CAfile "$tmp_root" -untrusted "$tmp_inter" -CApath "$empty_dir" -ignore_critical "$tmp_cand" >/dev/null 2>&1; then
-      rm -rf "$tmp_cand" "$tmp_root" "$tmp_inter" "$empty_dir"
+      cleanup_verify_artifacts
       return 1
     fi
   else
     if ! openssl verify -CAfile "$tmp_root" -CApath "$empty_dir" -ignore_critical "$tmp_cand" >/dev/null 2>&1; then
-      rm -rf "$tmp_cand" "$tmp_root" "$tmp_inter" "$empty_dir"
+      cleanup_verify_artifacts
       return 1
     fi
   fi
-  rm -rf "$tmp_cand" "$tmp_root" "$tmp_inter" "$empty_dir"
+  cleanup_verify_artifacts
   return 0
 }
 
