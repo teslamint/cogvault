@@ -2079,11 +2079,12 @@ disagree on the same measure) or `SUPERSEDED` (replaced by a later claim) mark
 instead of averaging, overwriting, or deleting one merely to resolve the
 disagreement (a removal the user explicitly requests is not that), and to record figures on
 different bases as separate claims; to attribute each claim to its own source
-source (a wiki page, or the external source or the user when the claim is not from a page; a user's own observation is its own source), as-of date ("date unknown" if none is stated), and basis; to treat a `sources/` page as a record or summary
-generated at ingest, not the original or an archived copy of its bytes, with
+source (a wiki page, or the external source or the user when the claim is not from a page; a user's own observation is its own source), as-of date ("date unknown" if none is stated), and basis; to treat a `sources/` page as a wiki record, not the original and not proof that the
+original bytes are archived, calling it ingest-generated only when its provenance
+establishes that (otherwise its creation is unknown), with
 `source_path` a local inbox path and not an origin; to cite an origin recorded on
 the page (`url`, `source_url`, `canonical_url`) or named in its text as recorded
-and not verified, and a user-supplied origin as user-provided and not verified;
+and not verified, and a user-supplied origin as user-provided and not verified (or, if the agent checked it, stating what was checked);
 to scope an absence claim to the sources checked; and, because `wiki_write`
 replaces the whole file and has no compare-and-swap, to read a page right before
 editing it, apply only the requested changes, keep all other content verbatim,
