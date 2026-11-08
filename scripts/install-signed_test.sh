@@ -326,6 +326,7 @@ fi
 # 9. Concurrent make install with differing signature requirements is serialized by transaction lock
 case_dir=$(setup_env "concurrent_differing_signatures" "printf '%s\n' '  1) ABCD \"Developer ID Application: Test User (TEAM123456)\"'")
 log="$case_dir/calls.log"
+bg_done="$case_dir/bg_done"
 
 # Simulate concurrent make install attempting to overwrite destination binary during install-signed
 cat >"$case_dir/bin/make" <<EOF
@@ -333,20 +334,45 @@ cat >"$case_dir/bin/make" <<EOF
 printf 'make' >>"\$INSTALL_SIGNED_TEST_LOG"
 for arg in "\$@"; do printf ' <%s>' "\$arg" >>"\$INSTALL_SIGNED_TEST_LOG"; done
 printf '\n' >>"\$INSTALL_SIGNED_TEST_LOG"
-: >"\$HOME/bin/cogvault"
 
 case " \$* " in
   *"CODESIGN_REQUIREMENT="*)
-    # Trigger background concurrent plain make install while signed install is in flight
+    printf 'signed-build\n' >"\$HOME/bin/cogvault"
+    # Spawn concurrent plain install under install-lock.sh
     (
-      PATH="$case_dir/bin:/usr/bin:/bin" HOME="$case_dir/home" COGVAULT_INSTALL_LOCK_HELD=0 \
-        "$case_dir/bin/make" install CODESIGN_IDENTITY=adhoc >/dev/null 2>&1
+      env -u COGVAULT_INSTALL_LOCK_HELD sh "$repo_dir/scripts/install-lock.sh" "\$HOME/bin" \
+        sh -c 'printf "adhoc-overwrite\n" > "\$HOME/bin/cogvault"; touch "'"$bg_done"'"'
     ) &
-    sleep 0.1
+    sleep 0.05
     ;;
 esac
 EOF
 chmod +x "$case_dir/bin/make"
+
+# In codesign, verify that destination binary remained signed-build during the entire verification window
+cat >"$case_dir/bin/codesign" <<'EOF'
+#!/bin/sh
+target=""
+for arg in "$@"; do target="$arg"; done
+if [ -f "$target" ]; then
+  content=$(cat "$target")
+  if [ "$content" = 'adhoc-overwrite' ]; then
+    printf 'codesign: concurrent install broke exclusion barrier; binary was overwritten prematurely\n' >&2
+    exit 1
+  fi
+fi
+
+case " $* " in
+  *" -d "*)
+    printf 'Executable=/test\nIdentifier=dev.tmint.cogvault\nFormat=Mach-O thin (arm64)\n'
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+EOF
+chmod +x "$case_dir/bin/codesign"
 
 PATH="$case_dir/bin:/usr/bin:/bin" HOME="$case_dir/home" INSTALL_SIGNED_TEST_LOG="$log" \
   "$repo_dir/scripts/install-signed.sh" >/dev/null
@@ -355,7 +381,24 @@ calls=$(cat "$log" 2>/dev/null || true)
 assert_contains "$calls" 'make <install> <INSTALL_DIR='
 assert_contains "$calls" '<CODESIGN_IDENTITY=ABCD> <CODESIGN_REQUIREMENT='
 assert_contains "$calls" 'launchctl <print> <gui/'
-assert_not_contains "$calls" 'test-requirement: code failed to satisfy specified code requirement'
+
+# Verify that background concurrent install completes after install-signed releases lock
+attempts=0
+while [ ! -f "$bg_done" ] && [ "$attempts" -lt 50 ]; do
+  sleep 0.05
+  attempts=$((attempts + 1))
+done
+
+if [ ! -f "$bg_done" ]; then
+  printf 'expected background concurrent install to complete after lock release\n' >&2
+  exit 1
+fi
+
+final_content=$(cat "$case_dir/home/bin/cogvault")
+if [ "$final_content" != 'adhoc-overwrite' ]; then
+  printf 'expected background install to succeed after lock release; got %s\n' "$final_content" >&2
+  exit 1
+fi
 
 # 10. Custom INSTALL_DIR propagates to make install and verifies custom binary path
 case_dir=$(setup_env "custom_install_dir" "printf '%s\n' '  1) ABCD \"Developer ID Application: Test User (TEAM123456)\"'")
