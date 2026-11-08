@@ -3,16 +3,23 @@ set -eu
 
 repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 install_dir="$HOME/bin"
-mkdir -p "$install_dir"
-canonical_dir=$(cd "$install_dir" && pwd -P)
 
 if [ -n "${INSTALL_DIR:-}" ]; then
-  custom_dir=$(mkdir -p "$INSTALL_DIR" && cd "$INSTALL_DIR" && pwd -P)
-  if [ "$custom_dir" != "$canonical_dir" ]; then
+  if [ -d "$INSTALL_DIR" ] && [ -d "$install_dir" ]; then
+    can_target=$(cd "$INSTALL_DIR" && pwd -P)
+    can_default=$(cd "$install_dir" && pwd -P)
+    if [ "$can_target" != "$can_default" ]; then
+      printf 'install-signed only supports default install directory (%s); use make install for custom targets\n' "$install_dir" >&2
+      exit 1
+    fi
+  elif [ "$INSTALL_DIR" != "$install_dir" ] && [ "$INSTALL_DIR" != "$install_dir/" ]; then
     printf 'install-signed only supports default install directory (%s); use make install for custom targets\n' "$install_dir" >&2
     exit 1
   fi
 fi
+
+mkdir -p "$install_dir"
+canonical_dir=$(cd "$install_dir" && pwd -P)
 
 if [ "${COGVAULT_INSTALL_LOCK_HELD:-}" != "$canonical_dir" ]; then
   exec sh "$repo_dir/scripts/install-lock.sh" "$install_dir" "$0" "$@"

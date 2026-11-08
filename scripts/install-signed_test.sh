@@ -411,8 +411,6 @@ case_dir=$(setup_env "reject_custom_install_dir" "$single_dev_id_security")
 log="$case_dir/calls.log"
 stderr="$case_dir/err.log"
 custom_bin="$case_dir/custom_bin"
-mkdir -p "$custom_bin"
-
 exit_code=0
 PATH="$case_dir/bin:/usr/bin:/bin" HOME="$case_dir/home" INSTALL_DIR="$custom_bin" INSTALL_SIGNED_TEST_LOG="$log" \
   "$repo_dir/scripts/install-signed.sh" >/dev/null 2>"$stderr" || exit_code=$?
@@ -422,10 +420,13 @@ if [ "$exit_code" -eq 0 ]; then
   exit 1
 fi
 assert_contains "$(cat "$stderr")" 'install-signed only supports default install directory'
+if [ -e "$custom_bin" ]; then
+  printf 'expected non-default INSTALL_DIR to not be created; found %s\n' "$custom_bin" >&2
+  exit 1
+fi
 calls=$(cat "$log" 2>/dev/null || true)
 assert_not_contains "$calls" "$make_install_cmd"
 assert_not_contains "$calls" 'launchctl'
-
 # 11. Pre-existing / empty lock file does not impede installation
 case_dir=$(setup_env "empty_lock_file" "$single_dev_id_security")
 log="$case_dir/calls.log"
