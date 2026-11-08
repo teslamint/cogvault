@@ -120,10 +120,24 @@ func TestInitializeInstructionsIncludeServerGuidance(t *testing.T) {
 			if err := json.Unmarshal(respJSON, &rpcResp); err != nil {
 				t.Fatalf("unmarshal initialize response: %v\nraw: %s", err, respJSON)
 			}
-			for name, marker := range guidanceMarkers {
-				if !strings.Contains(rpcResp.Result.Instructions, marker) {
+			instr := rpcResp.Result.Instructions
+			schemaAnchor := tc.wantSchema
+			if schemaAnchor == "" {
+				schemaAnchor = "# Wiki Schema"
+			}
+			schemaAt := strings.Index(instr, schemaAnchor)
+			prev := schemaAt
+			// Both blocks come after the schema, evidence first.
+			for _, name := range []string{"evidence", "conflicts"} {
+				at := strings.Index(instr, guidanceMarkers[name])
+				if at < 0 {
 					t.Errorf("initialize instructions omit %s guidance", name)
+					continue
 				}
+				if schemaAt < 0 || at <= prev {
+					t.Errorf("%s guidance is not placed after the schema and the preceding block", name)
+				}
+				prev = at
 			}
 			if tc.wantFullLink {
 				if !strings.Contains(rpcResp.Result.Instructions, tc.wantSchema) {

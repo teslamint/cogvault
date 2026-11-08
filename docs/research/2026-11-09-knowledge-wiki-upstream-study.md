@@ -27,13 +27,13 @@ It builds a wiki once from a document set with a multi-agent workflow (extractor
 
 ## Change
 
-`internal/mcp/server.go` gains a second server-owned guidance constant, `conflictInstructions`, appended to MCP initialize instructions after `evidenceInstructions` (1,253 characters). Rules:
+`internal/mcp/server.go` gains a second server-owned guidance constant, `conflictInstructions`, appended to MCP initialize instructions after `evidenceInstructions` (1,343 characters after review revisions). Rules:
 
 1. Keep conflicting or superseded claims; mark `CONFLICT` (same measure, sources disagree) or `SUPERSEDED` (replaced by a later claim); do not average, overwrite or delete. Figures on different bases are separate claims, recorded with their basis.
 2. Attribute each claim to its own source page and as-of date or basis.
-3. A `sources/` page is a record or summary generated at ingest (and possibly edited since), not the original and not an archived copy of its bytes; `source_path` is a local inbox path, not an origin. Cite an origin only when the page records one or the text names it, and call it recorded, not verified. Ingest strips model-emitted `url`, `source_url`, `canonical_url` and `author` only for PDFs, so a recorded origin on other pages can be model-written.
+3. A `sources/` page is a record or summary generated at ingest (and possibly edited since), not the original and not an archived copy of its bytes; `source_path` is a local inbox path, not an origin. Cite an origin recorded on the page or named in its text as recorded, not verified, and a user-supplied origin as user-provided, not verified. Ingest strips model-emitted `url`, `source_url`, `canonical_url` and `author` only for PDFs, so a recorded origin on other pages can be model-written.
 4. Scope an absence to the sources checked.
-5. `wiki_write` replaces the whole file and has no compare-and-swap: read right before editing, keep others' content verbatim, re-read afterwards to detect a lost edit. This narrows the race window and detects some losses; it prevents none.
+5. `wiki_write` replaces the whole file and has no compare-and-swap: read right before editing, apply the requested changes, keep all other content verbatim, re-read afterwards to detect a lost edit. This narrows the race window and detects some losses; it prevents none.
 
 Placement follows ADR 0026: server-owned guidance reaches every MCP client regardless of a wiki's editable `_schema.md`. It does not enter the ingest digest prompt, so ingest output is unchanged and needs no ingest eval. `default_schema.md` is unchanged because ingest embeds it (`internal/ingest/ingest.go`, `SchemaText`).
 
@@ -79,3 +79,4 @@ Observations, three runs, no statistics:
 - `wiki_write` overwrites the whole file and has no compare-and-swap. Reading right before writing narrows the race window and re-reading afterwards detects some losses; neither prevents a lost concurrent edit, and the pilot did not test concurrency. A real guarantee needs a storage-level check (for example a content-hash precondition on write). That is a separate change to a public tool contract and is not part of this one.
 - Upstream accepts roughly 5% line loss on shared pages. Cogvault does not adopt that tolerance, and this change does not solve the problem.
 - Whether the guidance changes agent behavior on the real wiki is unmeasured.
+- After the pilots, CodeRabbit review changed rules 3 and 5 (user-supplied origins; requested edits may remove content), which grew the block to 1,343 characters. Those two bullets were not re-piloted. Two other CodeRabbit suggestions were declined: asserting the guidance's detail wording in tests (incidental-wording pin) and copying the block into three tool descriptions (about 1.3k characters added to every tool listing, and it moves the guidance out of the server-owned placement of ADR 0026).

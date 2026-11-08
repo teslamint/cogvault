@@ -2080,13 +2080,14 @@ instead of averaging, overwriting, or deleting one, and to record figures on
 different bases as separate claims; to attribute each claim to its own source
 page and as-of date or basis; to treat a `sources/` page as a record or summary
 generated at ingest, not the original or an archived copy of its bytes, with
-`source_path` a local inbox path and not an origin; to cite an origin only when
-the page records one (`url`, `source_url`, `canonical_url`) or the text names
-it, as recorded and not verified; to scope an absence claim to the sources
-checked; and, because `wiki_write` replaces the whole file and has no
-compare-and-swap, to read a page right before editing it, keep others' content
-verbatim, and re-read it afterwards. That last rule narrows the race window and
-detects some losses; it does not prevent a lost concurrent edit.
+`source_path` a local inbox path and not an origin; to cite an origin recorded on
+the page (`url`, `source_url`, `canonical_url`) or named in its text as recorded
+and not verified, and a user-supplied origin as user-provided and not verified;
+to scope an absence claim to the sources checked; and, because `wiki_write`
+replaces the whole file and has no compare-and-swap, to read a page right before
+editing it, apply only the requested changes, keep all other content verbatim,
+and re-read it afterwards. That last rule narrows the race window and detects
+some losses; it does not prevent a lost concurrent edit.
 
 On PDF ingest, optional `pdf_title`, `pdf_author`, and `pdf_links` are extracted
 from PDF metadata and hyperlink annotations by `pdfinfo`, independently of the
