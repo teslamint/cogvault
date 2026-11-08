@@ -283,7 +283,7 @@ assert_contains "$calls" 'launchctl <print> <gui/'
 assert_not_contains "$calls" 'launchctl <kickstart>'
 assert_contains "$(cat "$stdout")" 'installed and verified; launchd ingest job is not loaded'
 
-# 8. Temporary artifacts cleaned up on interruption (SIGINT)
+# 8. Signal interruption (SIGINT) cleans up temporary artifacts and aborts before make/launchctl
 case_dir=$(setup_env "interrupt_cleanup" "printf '%s\n' '  1) ABCD \"Developer ID Application: Test User (TEAM123456)\"'")
 log="$case_dir/calls.log"
 tmp_test="$case_dir/tmp"
@@ -294,7 +294,7 @@ cat >"$case_dir/bin/openssl" <<'EOF'
 case " $* " in
   *" verify "*)
     kill -INT "$PPID"
-    exit 1
+    exit 0
     ;;
   *)
     exec /usr/bin/openssl "$@"
@@ -303,10 +303,18 @@ esac
 EOF
 chmod +x "$case_dir/bin/openssl"
 
-(
-  PATH="$case_dir/bin:/usr/bin:/bin" HOME="$case_dir/home" TMPDIR="$tmp_test" INSTALL_SIGNED_TEST_LOG="$log" \
-    "$repo_dir/scripts/install-signed.sh" >/dev/null 2>&1
-) || true
+exit_code=0
+PATH="$case_dir/bin:/usr/bin:/bin" HOME="$case_dir/home" TMPDIR="$tmp_test" INSTALL_SIGNED_TEST_LOG="$log" \
+  "$repo_dir/scripts/install-signed.sh" >/dev/null 2>&1 || exit_code=$?
+
+if [ "$exit_code" -eq 0 ]; then
+  printf 'expected install-signed to exit non-zero on SIGINT; got 0\n' >&2
+  exit 1
+fi
+
+calls=$(cat "$log" 2>/dev/null || true)
+assert_not_contains "$calls" 'make <install>'
+assert_not_contains "$calls" 'launchctl'
 
 leftover=$(ls -A "$tmp_test" 2>/dev/null || true)
 if [ -n "$leftover" ]; then

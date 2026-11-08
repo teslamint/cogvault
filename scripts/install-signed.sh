@@ -38,12 +38,22 @@ verify_apple_developer_id() {
   tmp_root=$(mktemp "${TMPDIR:-/tmp}/apple-root.XXXXXX")
   tmp_inter=$(mktemp "${TMPDIR:-/tmp}/devid-inter.XXXXXX")
   empty_dir=$(mktemp -d "${TMPDIR:-/tmp}/empty-capath.XXXXXX")
-  trap 'rm -rf "$tmp_cand" "$tmp_root" "$tmp_inter" "$empty_dir"; trap - EXIT HUP INT TERM' EXIT HUP INT TERM
 
   cleanup_verify_artifacts() {
     rm -rf "$tmp_cand" "$tmp_root" "$tmp_inter" "$empty_dir"
     trap - EXIT HUP INT TERM
   }
+
+  on_verify_signal() {
+    sig=$1
+    cleanup_verify_artifacts
+    trap - HUP INT TERM
+    kill -"$sig" "$$"
+  }
+  trap 'on_verify_signal HUP' HUP
+  trap 'on_verify_signal INT' INT
+  trap 'on_verify_signal TERM' TERM
+  trap 'cleanup_verify_artifacts' EXIT
 
   printf '%s\n' "$cert_pem" >"$tmp_cand"
 
