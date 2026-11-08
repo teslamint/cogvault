@@ -343,6 +343,7 @@ case " \$* " in
       env -u COGVAULT_INSTALL_LOCK_HELD sh "$repo_dir/scripts/install-lock.sh" "\$HOME/bin" \
         sh -c 'printf "adhoc-overwrite\n" > "\$HOME/bin/cogvault"; touch "'"$bg_done"'"' 2>"$case_dir/bg_err.log"
     ) &
+    echo "\$!" > "$case_dir/bg_pid"
     sleep 0.05
     ;;
 esac
@@ -383,8 +384,9 @@ assert_contains "$calls" '<CODESIGN_IDENTITY=ABCD> <CODESIGN_REQUIREMENT='
 assert_contains "$calls" 'launchctl <print> <gui/'
 
 # Verify that background concurrent install completes after install-signed releases lock
+bg_pid=$(cat "$case_dir/bg_pid" 2>/dev/null || true)
 attempts=0
-while [ ! -f "$bg_done" ] && [ "$attempts" -lt 50 ]; do
+while [ -n "$bg_pid" ] && kill -0 "$bg_pid" 2>/dev/null && [ "$attempts" -lt 200 ]; do
   sleep 0.05
   attempts=$((attempts + 1))
 done
