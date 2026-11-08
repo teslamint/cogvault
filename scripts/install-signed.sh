@@ -4,24 +4,62 @@ set -eu
 repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 identity=${1-}
 
+dev_id_requirement='=anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists'
+identity_auto_selected=0
+
+verify_apple_developer_id() {
+  candidate_fp=$1
+  probe_bin=$(mktemp "${TMPDIR:-/tmp}/codesign-probe.XXXXXX")
+  if [ -f /usr/bin/true ]; then
+    cp /usr/bin/true "$probe_bin"
+  elif [ -f /bin/echo ]; then
+    cp /bin/echo "$probe_bin"
+  else
+    : >"$probe_bin"
+  fi
+
+  if ! codesign --force --sign "$candidate_fp" "$probe_bin" >/dev/null 2>&1; then
+    rm -f "$probe_bin"
+    return 1
+  fi
+
+  if ! codesign --verify --strict -R "$dev_id_requirement" "$probe_bin" >/dev/null 2>&1; then
+    rm -f "$probe_bin"
+    return 1
+  fi
+
+  rm -f "$probe_bin"
+  return 0
+}
+
 if [ -z "$identity" ]; then
-  identities=$(security find-identity -v -p codesigning 2>/dev/null |
+  identity_auto_selected=1
+  raw_candidates=$(security find-identity -v -p codesigning 2>/dev/null |
     awk '
       {
         split($0, parts, "\"")
         name = parts[2]
         fp = $2
         if (fp != "" && name ~ /^Developer ID Application:/ && !seen[fp]++) {
-          identities[count++] = fp
-        }
-      }
-      END {
-        for (i = 0; i < count; i++) {
-          print identities[i]
+          print fp "\t" name
         }
       }
     ')
-  identity_count=$(printf '%s\n' "$identities" | awk 'NF { count++ } END { print count + 0 }')
+
+  identities=""
+  identity_count=0
+  if [ -n "$raw_candidates" ]; then
+    while IFS="$(printf '\t')" read -r cand_fp cand_name; do
+      [ -n "$cand_fp" ] || continue
+      if verify_apple_developer_id "$cand_fp"; then
+        identities="$cand_fp"
+        identity_count=$((identity_count + 1))
+      fi
+    done <<EOF
+$raw_candidates
+EOF
+  fi
+
   if [ "$identity_count" -ne 1 ]; then
     printf 'expected exactly one valid Developer ID Application identity; found %s\n' "$identity_count" >&2
     printf 'pass the full identity as the first argument when more than one exists\n' >&2
@@ -43,6 +81,10 @@ case "$signature" in
     exit 1
     ;;
 esac
+
+if [ "$identity_auto_selected" -eq 1 ]; then
+  codesign --verify --strict -R "$dev_id_requirement" "$installed_binary"
+fi
 
 job="gui/$(id -u)/com.teslamint.cogvault.ingest"
 if launchctl print "$job" >/dev/null 2>&1; then

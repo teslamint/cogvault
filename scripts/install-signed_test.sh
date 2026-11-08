@@ -34,10 +34,10 @@ setup_env() {
   security_body=${2-}
   codesign_id=${3-dev.tmint.cogvault}
   launchctl_exit=${4-0}
+  codesign_req_exit=${5-0}
 
   case_dir="$test_root/$name"
   mkdir -p "$case_dir/bin" "$case_dir/home/bin"
-
   cat >"$case_dir/bin/security" <<EOF
 #!/bin/sh
 $security_body
@@ -58,6 +58,7 @@ for arg in "\$@"; do printf ' <%s>' "\$arg" >>"\$INSTALL_SIGNED_TEST_LOG"; done
 printf '\n' >>"\$INSTALL_SIGNED_TEST_LOG"
 case " \$* " in
   *' -d '*) printf '%s\n' 'Identifier=$codesign_id' >&2 ;;
+  *' -R '*) exit $codesign_req_exit ;;
 esac
 EOF
 
@@ -85,6 +86,7 @@ PATH="$case_dir/bin:/usr/bin:/bin" HOME="$case_dir/home" INSTALL_SIGNED_TEST_LOG
 calls=$(cat "$log")
 assert_contains "$calls" 'make <install> <CODESIGN_IDENTITY=ABCD>'
 assert_contains "$calls" "codesign <--verify> <--strict> <--verbose=4> <$case_dir/home/bin/cogvault>"
+assert_contains "$calls" 'codesign <--verify> <--strict> <-R> <=anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists>'
 assert_contains "$calls" "codesign <-d> <--verbose=4> <$case_dir/home/bin/cogvault>"
 assert_contains "$calls" 'launchctl <print> <gui/'
 assert_contains "$calls" 'launchctl <kickstart> <-k> <gui/'
@@ -133,6 +135,22 @@ if PATH="$case_dir/bin:/usr/bin:/bin" HOME="$case_dir/home" INSTALL_SIGNED_TEST_
   exit 1
 fi
 assert_contains "$(cat "$stderr")" 'expected exactly one valid Developer ID Application identity; found 0'
+
+# 2d. Non-Apple or self-signed cert with "Developer ID Application:" name: rejected by Apple trust requirement
+case_dir=$(setup_env "non_apple_ca_rejected" \
+  "printf '%s\n' '  1) FAKE1234 \"Developer ID Application: Fake User (TEAM123456)\"'" \
+  "dev.tmint.cogvault" 0 3)
+log="$case_dir/calls.log"
+stderr="$case_dir/err.log"
+
+if PATH="$case_dir/bin:/usr/bin:/bin" HOME="$case_dir/home" INSTALL_SIGNED_TEST_LOG="$log" \
+  "$repo_dir/scripts/install-signed.sh" >/dev/null 2>"$stderr"; then
+  printf 'expected install-signed to fail when candidate cert fails Apple Developer ID requirement\n' >&2
+  exit 1
+fi
+assert_contains "$(cat "$stderr")" 'expected exactly one valid Developer ID Application identity; found 0'
+calls=$(cat "$log")
+assert_not_contains "$calls" 'make <install>'
 
 # 3. Refusal when 0 Developer ID Application identities exist (e.g. only Apple Development)
 case_dir=$(setup_env "zero_dev_id" "printf '%s\n' '  1) EFGH \"Apple Development: Dev User (TEAM999999)\"'")
