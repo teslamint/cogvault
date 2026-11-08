@@ -143,7 +143,8 @@ PATH="$case_dir/bin:/usr/bin:/bin" HOME="$case_dir/home" INSTALL_SIGNED_TEST_LOG
   "$repo_dir/scripts/install-signed.sh" >"$stdout" 2>"$stderr"
 
 calls=$(cat "$log")
-assert_contains "$calls" 'make <install> <CODESIGN_IDENTITY=ABCD>'
+assert_contains "$calls" 'make <install>'
+assert_contains "$calls" '<CODESIGN_IDENTITY=ABCD>'
 assert_contains "$calls" 'CODESIGN_REQUIREMENT==anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists'
 assert_contains "$calls" "codesign <--verify> <--strict> <--verbose=4> <$case_dir/home/bin/cogvault>"
 assert_contains "$calls" 'codesign <--verify> <--strict> <-R> <=anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists>'
@@ -159,8 +160,8 @@ PATH="$case_dir/bin:/usr/bin:/bin" HOME="$case_dir/home" INSTALL_SIGNED_TEST_LOG
   "$repo_dir/scripts/install-signed.sh" >/dev/null
 
 calls=$(cat "$log")
-assert_contains "$calls" 'make <install> <CODESIGN_IDENTITY=ABCD>'
-
+assert_contains "$calls" 'make <install>'
+assert_contains "$calls" '<CODESIGN_IDENTITY=ABCD>'
 # 2a. Duplicate copies of the same certificate across keychains (identical fingerprint): deduplicates to 1
 case_dir=$(setup_env "duplicate_same_cert" "printf '%s\n' '  1) ABCD1234EF567890 \"Developer ID Application: Shared Cert (TEAM123)\"' '  2) ABCD1234EF567890 \"Developer ID Application: Shared Cert (TEAM123)\"'")
 log="$case_dir/calls.log"
@@ -169,8 +170,8 @@ PATH="$case_dir/bin:/usr/bin:/bin" HOME="$case_dir/home" INSTALL_SIGNED_TEST_LOG
   "$repo_dir/scripts/install-signed.sh" >/dev/null
 
 calls=$(cat "$log")
-assert_contains "$calls" 'make <install> <CODESIGN_IDENTITY=ABCD1234EF567890>'
-
+assert_contains "$calls" 'make <install>'
+assert_contains "$calls" '<CODESIGN_IDENTITY=ABCD1234EF567890>'
 # 2b. Distinct certificates sharing the same name (different fingerprints): not deduplicated, fails with found 2
 case_dir=$(setup_env "different_certs_same_name" "printf '%s\n' '  1) 1111111111111111 \"Developer ID Application: Same Name (TEAM123)\"' '  2) 2222222222222222 \"Developer ID Application: Same Name (TEAM123)\"'")
 log="$case_dir/calls.log"
@@ -220,8 +221,8 @@ PATH="$case_dir/bin:/usr/bin:/bin" HOME="$case_dir/home" INSTALL_SIGNED_TEST_LOG
   "$repo_dir/scripts/install-signed.sh" >/dev/null
 
 calls=$(cat "$log")
-assert_contains "$calls" 'make <install> <CODESIGN_IDENTITY=ABCD>'
-
+assert_contains "$calls" 'make <install>'
+assert_contains "$calls" '<CODESIGN_IDENTITY=ABCD>'
 # 3. Refusal when 0 Developer ID Application identities exist (e.g. only Apple Development)
 case_dir=$(setup_env "zero_dev_id" "printf '%s\n' '  1) EFGH \"Apple Development: Dev User (TEAM999999)\"'")
 log="$case_dir/calls.log"
@@ -256,8 +257,8 @@ PATH="$case_dir/bin:/usr/bin:/bin" HOME="$case_dir/home" INSTALL_SIGNED_TEST_LOG
   "$repo_dir/scripts/install-signed.sh" "Apple Development: Explicit (TEAM123)" >/dev/null
 
 calls=$(cat "$log")
-assert_contains "$calls" 'make <install> <CODESIGN_IDENTITY=Apple Development: Explicit (TEAM123)>'
-
+assert_contains "$calls" 'make <install>'
+assert_contains "$calls" '<CODESIGN_IDENTITY=Apple Development: Explicit (TEAM123)>'
 # 6. Refusal when installed binary has the wrong code-signing identifier
 case_dir=$(setup_env "wrong_identifier" "printf '%s\n' '  1) ABCD \"Developer ID Application: Test User (TEAM123456)\"'" "wrong.identifier")
 log="$case_dir/calls.log"
@@ -351,6 +352,30 @@ PATH="$case_dir/bin:/usr/bin:/bin" HOME="$case_dir/home" INSTALL_SIGNED_TEST_LOG
   "$repo_dir/scripts/install-signed.sh" >/dev/null
 
 calls=$(cat "$log" 2>/dev/null || true)
-assert_contains "$calls" 'make <install> <CODESIGN_IDENTITY=ABCD> <CODESIGN_REQUIREMENT='
+assert_contains "$calls" 'make <install> <INSTALL_DIR='
+assert_contains "$calls" '<CODESIGN_IDENTITY=ABCD> <CODESIGN_REQUIREMENT='
 assert_contains "$calls" 'launchctl <print> <gui/'
 assert_not_contains "$calls" 'test-requirement: code failed to satisfy specified code requirement'
+
+# 10. Custom INSTALL_DIR propagates to make install and verifies custom binary path
+case_dir=$(setup_env "custom_install_dir" "printf '%s\n' '  1) ABCD \"Developer ID Application: Test User (TEAM123456)\"'")
+log="$case_dir/calls.log"
+custom_bin="$case_dir/custom_bin"
+mkdir -p "$custom_bin"
+: >"$custom_bin/cogvault"
+
+PATH="$case_dir/bin:/usr/bin:/bin" HOME="$case_dir/home" INSTALL_DIR="$custom_bin" INSTALL_SIGNED_TEST_LOG="$log" \
+  "$repo_dir/scripts/install-signed.sh" >/dev/null
+
+calls=$(cat "$log" 2>/dev/null || true)
+assert_contains "$calls" "make <install> <INSTALL_DIR=$custom_bin> <CODESIGN_IDENTITY=ABCD>"
+assert_contains "$calls" "codesign <--verify> <--strict> <--verbose=4> <$custom_bin/cogvault>"
+
+# 11. Pre-existing / empty lock file does not impede installation
+: >"$log"
+touch "$custom_bin/.cogvault.install.lock"
+PATH="$case_dir/bin:/usr/bin:/bin" HOME="$case_dir/home" INSTALL_DIR="$custom_bin" INSTALL_SIGNED_TEST_LOG="$log" \
+  "$repo_dir/scripts/install-signed.sh" >/dev/null
+
+calls=$(cat "$log" 2>/dev/null || true)
+assert_contains "$calls" "make <install> <INSTALL_DIR=$custom_bin> <CODESIGN_IDENTITY=ABCD>"

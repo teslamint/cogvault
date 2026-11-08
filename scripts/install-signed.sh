@@ -2,6 +2,12 @@
 set -eu
 
 repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+install_dir="${INSTALL_DIR:-$HOME/bin}"
+
+if [ "${COGVAULT_INSTALL_LOCK_HELD:-0}" != "1" ]; then
+  exec sh "$repo_dir/scripts/install-lock.sh" "$install_dir" "$0" "$@"
+fi
+
 identity=${1-}
 
 dev_id_requirement='=anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists'
@@ -126,50 +132,11 @@ EOF
   identity=$identities
 fi
 
-install_dir="${INSTALL_DIR:-$HOME/bin}"
-install_lock_dir="$install_dir/.cogvault.install.lock.d"
-
-cleanup_install_lock() {
-  rm -rf "$install_lock_dir" 2>/dev/null || true
-  trap - EXIT HUP INT TERM
-}
-
-on_install_signal() {
-  sig=$1
-  cleanup_install_lock
-  trap - HUP INT TERM
-  kill -"$sig" "$$"
-}
-
-mkdir -p "$install_dir"
-attempts=0
-while ! mkdir "$install_lock_dir" 2>/dev/null; do
-  if [ -f "$install_lock_dir/pid" ]; then
-    holder_pid=$(cat "$install_lock_dir/pid" 2>/dev/null || true)
-    if [ -n "$holder_pid" ] && ! kill -0 "$holder_pid" 2>/dev/null; then
-      rm -rf "$install_lock_dir" 2>/dev/null || true
-      continue
-    fi
-  fi
-  attempts=$((attempts + 1))
-  if [ "$attempts" -ge 300 ]; then
-    printf 'timed out waiting for installation lock: %s\n' "$install_lock_dir" >&2
-    exit 1
-  fi
-  sleep 0.05 2>/dev/null || sleep 1
-done
-echo "$$" > "$install_lock_dir/pid"
-trap 'on_install_signal HUP' HUP
-trap 'on_install_signal INT' INT
-trap 'on_install_signal TERM' TERM
-trap 'cleanup_install_lock' EXIT
-export COGVAULT_INSTALL_LOCK_HELD=1
-
 cd "$repo_dir"
 if [ "$identity_auto_selected" -eq 1 ]; then
-  make install "CODESIGN_IDENTITY=$identity" "CODESIGN_REQUIREMENT=$dev_id_requirement"
+  make install "INSTALL_DIR=$install_dir" "CODESIGN_IDENTITY=$identity" "CODESIGN_REQUIREMENT=$dev_id_requirement"
 else
-  make install "CODESIGN_IDENTITY=$identity"
+  make install "INSTALL_DIR=$install_dir" "CODESIGN_IDENTITY=$identity"
 fi
 installed_binary=$install_dir/cogvault
 codesign --verify --strict --verbose=4 "$installed_binary"
@@ -193,5 +160,3 @@ if launchctl print "$job" >/dev/null 2>&1; then
 else
   printf 'installed and verified; launchd ingest job is not loaded\n'
 fi
-
-cleanup_install_lock
