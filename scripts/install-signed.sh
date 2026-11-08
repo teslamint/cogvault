@@ -34,13 +34,16 @@ verify_apple_developer_id() {
       ;;
   esac
 
-  tmp_cand=$(mktemp "${TMPDIR:-/tmp}/cand-cert.XXXXXX")
-  tmp_root=$(mktemp "${TMPDIR:-/tmp}/apple-root.XXXXXX")
-  tmp_inter=$(mktemp "${TMPDIR:-/tmp}/devid-inter.XXXXXX")
-  empty_dir=$(mktemp -d "${TMPDIR:-/tmp}/empty-capath.XXXXXX")
+  tmp_cand=""
+  tmp_root=""
+  tmp_inter=""
+  empty_dir=""
 
   cleanup_verify_artifacts() {
-    rm -rf "$tmp_cand" "$tmp_root" "$tmp_inter" "$empty_dir"
+    [ -n "$tmp_cand" ] && rm -f "$tmp_cand"
+    [ -n "$tmp_root" ] && rm -f "$tmp_root"
+    [ -n "$tmp_inter" ] && rm -f "$tmp_inter"
+    [ -n "$empty_dir" ] && rm -rf "$empty_dir"
     trap - EXIT HUP INT TERM
   }
 
@@ -55,6 +58,10 @@ verify_apple_developer_id() {
   trap 'on_verify_signal TERM' TERM
   trap 'cleanup_verify_artifacts' EXIT
 
+  tmp_cand=$(mktemp "${TMPDIR:-/tmp}/cand-cert.XXXXXX")
+  tmp_root=$(mktemp "${TMPDIR:-/tmp}/apple-root.XXXXXX")
+  tmp_inter=$(mktemp "${TMPDIR:-/tmp}/devid-inter.XXXXXX")
+  empty_dir=$(mktemp -d "${TMPDIR:-/tmp}/empty-capath.XXXXXX")
   printf '%s\n' "$cert_pem" >"$tmp_cand"
 
   security find-certificate -a -c "Apple Root CA" -p /System/Library/Keychains/SystemRootCertificates.keychain >"$tmp_root" 2>/dev/null || true
@@ -119,13 +126,52 @@ EOF
   identity=$identities
 fi
 
+install_dir="${INSTALL_DIR:-$HOME/bin}"
+install_lock_dir="$install_dir/.cogvault.install.lock.d"
+
+cleanup_install_lock() {
+  rm -rf "$install_lock_dir" 2>/dev/null || true
+  trap - EXIT HUP INT TERM
+}
+
+on_install_signal() {
+  sig=$1
+  cleanup_install_lock
+  trap - HUP INT TERM
+  kill -"$sig" "$$"
+}
+
+mkdir -p "$install_dir"
+attempts=0
+while ! mkdir "$install_lock_dir" 2>/dev/null; do
+  if [ -f "$install_lock_dir/pid" ]; then
+    holder_pid=$(cat "$install_lock_dir/pid" 2>/dev/null || true)
+    if [ -n "$holder_pid" ] && ! kill -0 "$holder_pid" 2>/dev/null; then
+      rm -rf "$install_lock_dir" 2>/dev/null || true
+      continue
+    fi
+  fi
+  attempts=$((attempts + 1))
+  if [ "$attempts" -ge 300 ]; then
+    printf 'timed out waiting for installation lock: %s\n' "$install_lock_dir" >&2
+    exit 1
+  fi
+  sleep 0.05 2>/dev/null || sleep 1
+done
+echo "$$" > "$install_lock_dir/pid"
+trap 'on_install_signal HUP' HUP
+trap 'on_install_signal INT' INT
+trap 'on_install_signal TERM' TERM
+trap 'cleanup_install_lock' EXIT
+export COGVAULT_INSTALL_LOCK_HELD=1
+
 cd "$repo_dir"
 if [ "$identity_auto_selected" -eq 1 ]; then
   make install "CODESIGN_IDENTITY=$identity" "CODESIGN_REQUIREMENT=$dev_id_requirement"
 else
   make install "CODESIGN_IDENTITY=$identity"
 fi
-installed_binary=$HOME/bin/cogvault
+installed_binary=$install_dir/cogvault
 codesign --verify --strict --verbose=4 "$installed_binary"
 signature=$(codesign -d --verbose=4 "$installed_binary" 2>&1)
 case "$signature" in
@@ -147,3 +193,5 @@ if launchctl print "$job" >/dev/null 2>&1; then
 else
   printf 'installed and verified; launchd ingest job is not loaded\n'
 fi
+
+cleanup_install_lock

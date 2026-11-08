@@ -321,3 +321,36 @@ if [ -n "$leftover" ]; then
   printf 'interruption leaked temporary verification artifacts: %s\n' "$leftover" >&2
   exit 1
 fi
+
+# 9. Concurrent make install with differing signature requirements is serialized by transaction lock
+case_dir=$(setup_env "concurrent_differing_signatures" "printf '%s\n' '  1) ABCD \"Developer ID Application: Test User (TEAM123456)\"'")
+log="$case_dir/calls.log"
+
+# Simulate concurrent make install attempting to overwrite destination binary during install-signed
+cat >"$case_dir/bin/make" <<EOF
+#!/bin/sh
+printf 'make' >>"\$INSTALL_SIGNED_TEST_LOG"
+for arg in "\$@"; do printf ' <%s>' "\$arg" >>"\$INSTALL_SIGNED_TEST_LOG"; done
+printf '\n' >>"\$INSTALL_SIGNED_TEST_LOG"
+: >"\$HOME/bin/cogvault"
+
+case " \$* " in
+  *"CODESIGN_REQUIREMENT="*)
+    # Trigger background concurrent plain make install while signed install is in flight
+    (
+      PATH="$case_dir/bin:/usr/bin:/bin" HOME="$case_dir/home" COGVAULT_INSTALL_LOCK_HELD=0 \
+        "$case_dir/bin/make" install CODESIGN_IDENTITY=adhoc >/dev/null 2>&1
+    ) &
+    sleep 0.1
+    ;;
+esac
+EOF
+chmod +x "$case_dir/bin/make"
+
+PATH="$case_dir/bin:/usr/bin:/bin" HOME="$case_dir/home" INSTALL_SIGNED_TEST_LOG="$log" \
+  "$repo_dir/scripts/install-signed.sh" >/dev/null
+
+calls=$(cat "$log" 2>/dev/null || true)
+assert_contains "$calls" 'make <install> <CODESIGN_IDENTITY=ABCD> <CODESIGN_REQUIREMENT='
+assert_contains "$calls" 'launchctl <print> <gui/'
+assert_not_contains "$calls" 'test-requirement: code failed to satisfy specified code requirement'
