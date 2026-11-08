@@ -12,6 +12,7 @@ printf 'previous-install\n' >"$fake_home/bin/cogvault"
 mkdir -p "$tmp_dir/scripts"
 cp "$repo_dir/Makefile" "$tmp_dir/Makefile"
 cp "$repo_dir/scripts/install-lock.sh" "$tmp_dir/scripts/install-lock.sh"
+chmod +x "$tmp_dir/scripts/install-lock.sh"
 cat >"$fake_bin/go" <<'EOF'
 #!/bin/sh
 while [ "$#" -gt 0 ]; do

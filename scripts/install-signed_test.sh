@@ -341,7 +341,7 @@ case " \$* " in
     # Spawn concurrent plain install under install-lock.sh
     (
       env -u COGVAULT_INSTALL_LOCK_HELD sh "$repo_dir/scripts/install-lock.sh" "\$HOME/bin" \
-        sh -c 'printf "adhoc-overwrite\n" > "\$HOME/bin/cogvault"; touch "'"$bg_done"'"'
+        sh -c 'printf "adhoc-overwrite\n" > "\$HOME/bin/cogvault"; touch "'"$bg_done"'"' 2>"$case_dir/bg_err.log"
     ) &
     sleep 0.05
     ;;
@@ -390,7 +390,8 @@ while [ ! -f "$bg_done" ] && [ "$attempts" -lt 50 ]; do
 done
 
 if [ ! -f "$bg_done" ]; then
-  printf 'expected background concurrent install to complete after lock release\n' >&2
+  bg_err=$(cat "$case_dir/bg_err.log" 2>/dev/null || true)
+  printf 'expected background concurrent install to complete after lock release; err: %s\n' "$bg_err" >&2
   exit 1
 fi
 

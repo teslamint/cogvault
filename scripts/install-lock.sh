@@ -16,6 +16,7 @@ fi
 mkdir -p "$target_dir"
 canonical_dir=$(cd "$target_dir" && pwd -P)
 lock_file="$canonical_dir/.cogvault.install.lock"
+touch "$lock_file"
 export COGVAULT_INSTALL_LOCK_HELD=1
 
 if command -v lockf >/dev/null 2>&1; then
