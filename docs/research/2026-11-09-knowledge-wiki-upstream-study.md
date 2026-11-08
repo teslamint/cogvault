@@ -43,7 +43,7 @@ Contract test: `TestInitializeInstructionsIncludeServerGuidance` asserts both bl
 
 Fixture: three synthetic source pages for one fictional company: a reported FY2025 figure (with `source_url`), a later restatement of the same basis (with `source_url`), and a third-party estimate on a different basis (no recorded origin). Task: answer a two-part question and save a synthesis page. Each run was a fresh subagent on the same model family as this session, given the schema text plus guidance text and its own copy of the fixture. The input was the raw `default_schema.md`, not the exact MCP payload (the server rewrites one sentence), and tool descriptions were absent.
 
-Arms, three runs each: **A** schema plus evidence guidance (before); **B** plus the first wording of the new block; **C** plus the reworded block after a review comment (B said "local copy" for `sources/` pages). The final committed wording differs from C in its conflict definition, origin hedge and last bullet; **the final wording was not piloted**. The fixture titles say "(local copy)" in all arms, and the fixture targets the behaviors the guidance names. Behavior checks were fixed before the runs. Counts are runs out of 3:
+Arms, three runs each: **A** schema plus evidence guidance (before); **B** plus the first wording of the new block; **C** plus the reworded block after a review comment (B said "local copy" for `sources/` pages). The committed wording differs from C in its conflict definition, origin hedge and last bullet; it was checked separately in the next section. The fixture titles say "(local copy)" in all arms, and the fixture targets the behaviors the guidance names. Behavior checks were fixed before the runs. Counts are runs out of 3:
 
 | Check | A | B | C |
 |---|---:|---:|---:|
@@ -58,6 +58,20 @@ Arms, three runs each: **A** schema plus evidence guidance (before); **B** plus 
 Reading the outputs: the grader's absence regex mis-scores title and question lines, so that row is unreliable. By manual reading, every run in all three arms scoped the absence to the sources checked. Origin URLs appeared outside the figure lines in one B run and one C run. Two C runs described the page as an ingest summary rather than an archived copy. The marker row is mostly explained by the block naming the literal strings, which arm A never saw; the case-sensitive regex also scores a negation ("CONFLICT 아님") as a use and lowercase "superseded" in arm A as none. Arms B and C disagreed on whether the third-party figure is a `CONFLICT` (one run called it one, one said "in the loose sense", one said it was not), which is why the final wording defines the terms.
 
 What the pilot supports: marker words appeared when the block named them, and the per-claim line format counts were 1, 3 and 2 of 3, which is no reliable difference at this size. The baseline already kept all figures and stated supersession, and the origin rule showed no effect (0 of 9 on figure lines; the "do not invent an origin" half already held in arm A). It does not show a quality gain and does not test real wiki content. It has n=3 per arm, one fixture, one model family, and a grader partly keyed to the block's own marker words. The pilot kit lived in a temporary directory and is not committed.
+
+## Fresh-session check of the committed payload
+
+Added to satisfy live verification of an instruction change. It uses the exact payload of the committed server, not a reconstruction: a binary built from this commit was started over stdio on a synthetic wiki (`cogvault init`, then the three fixture pages), and the `initialize` instructions (3,828 characters, including the new block) and the seven `tools/list` descriptions were saved verbatim. Three fresh subagents each received only that payload and a private copy of the wiki, with plain file tools standing in for the MCP tools; no live MCP transport was used. The wiki also held a page by "another agent" with two sections that had to survive. Task: answer the same two-part question, then add the finding to that existing page.
+
+Observations, three runs, no statistics:
+
+- Another agent's two sections were present and unchanged in all three outputs.
+- All three kept the $120M, $118M and $132M figures, marked the $120M as `SUPERSEDED`, and scoped the segment-margin absence to the three pages checked.
+- No run labelled the $132M different-basis figure a `CONFLICT`; two wrote that it is not one, which matches the new definition.
+- No run cited a recorded origin URL or mentioned the origin question, although two fixture pages record `source_url`. The origin rule had no visible effect here, as in the earlier arms.
+- Two of three runs said they re-read the page after writing. The third did not mention it.
+- The real `cogvault lint` reported one `orphan` per output (the notes page has no incoming links, as in the seeded page) and nothing else.
+- Limits: one fixture, one model family, plain file tools instead of MCP, no concurrent writers, and no check of the real wiki. The agents were told to follow the payload, so the result shows the text is followable, not that unprompted clients will follow it.
 
 ## Limits
 
