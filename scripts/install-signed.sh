@@ -6,10 +6,10 @@ identity=${1-}
 
 if [ -z "$identity" ]; then
   identities=$(security find-identity -v -p codesigning 2>/dev/null |
-    awk -F '"' '/Apple Development:/ { print $2 }')
+    awk -F '"' '/Developer ID Application:/ { print $2 }')
   identity_count=$(printf '%s\n' "$identities" | awk 'NF { count++ } END { print count + 0 }')
   if [ "$identity_count" -ne 1 ]; then
-    printf 'expected exactly one valid Developer ID Application or Apple Development identity; found %s\n' "$identity_count" >&2
+    printf 'expected exactly one valid Developer ID Application identity; found %s\n' "$identity_count" >&2
     printf 'pass the full identity as the first argument when more than one exists\n' >&2
     exit 1
   fi

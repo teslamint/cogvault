@@ -31,8 +31,7 @@ jobs:
 
       # Not `make build`: that target adhoc-codesigns the binary for macOS Full
       # Disk Access, which has no meaning on this runner and no `codesign` to
-      # run. `make test` is `go test -race ./...`, which is what the test step
-      # below runs.
+      # run. Shell tests and go test run under the test step below.
       - name: build
         run: go build ./...
 
@@ -44,4 +43,8 @@ jobs:
         run: sh scripts/lint.sh
 
       - name: test
-        run: go test -race ./... -count=1
+        run: |
+          sh scripts/make_build_test.sh
+          sh scripts/make_install_test.sh
+          sh scripts/install-signed_test.sh
+          go test -race ./... -count=1
