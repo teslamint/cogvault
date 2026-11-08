@@ -2079,7 +2079,7 @@ disagree on the same measure) or `SUPERSEDED` (replaced by a later claim) mark
 instead of averaging, overwriting, or deleting one merely to resolve the
 disagreement (a removal the user explicitly requests is not that), and to record figures on
 different bases as separate claims; to attribute each claim to its own source
-page (the user, when the user supplied it and no page exists), as-of date ("date unknown" if none is stated), and basis; to treat a `sources/` page as a record or summary
+source (a wiki page, or the external source or the user when the claim is not from a page; a user's own observation is its own source), as-of date ("date unknown" if none is stated), and basis; to treat a `sources/` page as a record or summary
 generated at ingest, not the original or an archived copy of its bytes, with
 `source_path` a local inbox path and not an origin; to cite an origin recorded on
 the page (`url`, `source_url`, `canonical_url`) or named in its text as recorded
