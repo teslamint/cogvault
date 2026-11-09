@@ -2082,10 +2082,13 @@ different bases as separate claims; to attribute each claim to its own source
 source (a wiki page, or the external source or the user when the claim is not from a page; a user's own observation is its own source), as-of date ("date unknown" if none is stated), and basis; to treat a `sources/` page as a wiki record, reporting how it was created only as far
 as its provenance or the user establishes it (otherwise unknown) and not assuming it is
 the original or that the original bytes are archived, with
-`source_path` the recorded location of the collected local file, not an origin and
-not evidence that the file is the original or a copy (a URL there is a recorded URL, not verified as the origin); to cite an origin recorded on
-the page (`url`, `source_url`, `canonical_url`) or named in its text as recorded
-and not verified, and a user-supplied origin as user-provided and not verified (or, if the agent checked it, stating what was checked);
+`source_path` only a path value recorded on the page, not an origin and not evidence
+that the path was collected or is the original or a copy (a URL there is a recorded
+URL, not verified as the origin); to cite `url`, `source_url` or `canonical_url` as a
+recorded origin only when the page presents it as the source, an origin named in the
+page text as recorded and not verified, a user-supplied origin as user-provided and not
+verified, and an origin the agent checked with what was checked, saying the origin is
+unrecorded only when none exists;
 to scope an absence claim to the sources checked; and, because `wiki_write`
 replaces the whole file and has no compare-and-swap, to read a page right before
 editing it, apply only the requested changes, keep all other content verbatim,
