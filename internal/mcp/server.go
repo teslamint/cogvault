@@ -27,9 +27,21 @@ const evidenceInstructions = `For optional research_evidence frontmatter (versio
 - Passing lint or wiki_write checks confirms structure only, not factual accuracy.
 - Follow wiki_write warnings and review research_evidence summaries returned by wiki_search.`
 
+// conflictInstructions is server-owned, like evidenceInstructions, so it
+// reaches every MCP client regardless of a wiki's editable _schema.md and
+// never enters the ingest digest prompt. Distilled from the claim-level
+// provenance rules of anthropics/claude-quickstarts managed-agents/knowledge-wiki
+// at 4a4224bd; see docs/research/2026-11-09-knowledge-wiki-upstream-study.md.
+const conflictInstructions = `When pages disagree or a claim changes over time:
+- Keep conflicting or superseded claims. Do not average, overwrite, or delete one merely to resolve the disagreement (a removal the user explicitly requests is not that); mark each CONFLICT (same measure, sources disagree) or SUPERSEDED (replaced by a later claim) and keep both sides. Figures on different bases are separate claims: record each with its basis and never merge them.
+- Give every claim its own source: a wiki page, or the actual external source or the user when the claim does not come from a page (a user's own observation is its own source even if a page mentions the event). Add the as-of date (when the value applied) and basis (scope, definition); write "date unknown" if no date is stated. A footer list of sources does not attribute individual claims.
+- A sources/ page is a wiki record. Report how it was created (ingest-generated, written by hand) only as far as its provenance or the user establishes it, and say unknown otherwise; do not assume it is the original or that the original bytes are archived. source_path is only a path value recorded on the page: it is not an origin and does not show whether that path was collected, or is the original or a copy; if it holds a URL, report it as a recorded URL, not verified as the origin. Cite a url, source_url or canonical_url as the recorded origin only when the page presents it as the source. Cite an origin named in the page text as recorded, not verified, and one the user supplied as user-provided, not verified. If you checked an origin yourself, cite it and say what you checked. Only if no origin is recorded, supplied or checked, cite the page and say the origin is unrecorded.
+- "Not in this source" is not "not true": scope an absence to the sources you checked.
+- wiki_write replaces the whole file and has no compare-and-swap. Read the page right before editing, apply the changes you were asked to make, keep all other content verbatim, and re-read it afterwards to detect a lost edit. This narrows the race window and detects some losses; it does not prevent them.`
+
 func NewServer(root string, cfg *config.Config, store storage.Storage, idx index.Index, adpt adapter.Adapter) *server.MCPServer {
 	s := server.NewMCPServer(serverName, version.String(),
-		server.WithInstructions(schemaInstructions(cfg, store)+"\n\n"+evidenceInstructions),
+		server.WithInstructions(schemaInstructions(cfg, store)+"\n\n"+evidenceInstructions+"\n\n"+conflictInstructions),
 		server.WithToolHandlerMiddleware(callLogMiddleware),
 	)
 	registerTools(s, root, cfg, store, idx, adpt)

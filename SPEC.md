@@ -2067,8 +2067,33 @@ provenance rules (`[TODO: source needed]`, `[UNCERTAIN]`). Optional frontmatter:
 `category` (`article` | `legal` | `reference`), classified by the LLM during
 digestion via the `buildPrompt` instruction (not schema-dependent). The ingest
 digestion prompt embeds these rules so generated pages conform. MCP initialize
-instructions append server-owned evidence guidance after the schema text; the
-2,000-rune cap applies only to the schema portion, not the appended guidance.
+instructions append two server-owned guidance blocks after the schema text: the
+evidence guidance, and a conflict/provenance guidance (below). The 2,000-rune
+cap applies only to the schema portion, not the appended guidance. Neither
+block is part of the ingest digestion prompt, which embeds `_schema.md` and the
+source-page guidance.
+
+The conflict/provenance guidance is advisory text; no tool checks it. It tells
+agents to keep conflicting or superseded claims with a `CONFLICT` (sources
+disagree on the same measure) or `SUPERSEDED` (replaced by a later claim) mark
+instead of averaging, overwriting, or deleting one merely to resolve the
+disagreement (a removal the user explicitly requests is not that), and to record figures on
+different bases as separate claims; to attribute each claim to its own source
+source (a wiki page, or the external source or the user when the claim is not from a page; a user's own observation is its own source), as-of date ("date unknown" if none is stated), and basis; to treat a `sources/` page as a wiki record, reporting how it was created only as far
+as its provenance or the user establishes it (otherwise unknown) and not assuming it is
+the original or that the original bytes are archived, with
+`source_path` only a path value recorded on the page, not an origin and not evidence
+that the path was collected or is the original or a copy (a URL there is a recorded
+URL, not verified as the origin); to cite `url`, `source_url` or `canonical_url` as a
+recorded origin only when the page presents it as the source, an origin named in the
+page text as recorded and not verified, a user-supplied origin as user-provided and not
+verified, and an origin the agent checked with what was checked, saying the origin is
+unrecorded only when none is recorded, supplied or checked;
+to scope an absence claim to the sources checked; and, because `wiki_write`
+replaces the whole file and has no compare-and-swap, to read a page right before
+editing it, apply only the requested changes, keep all other content verbatim,
+and re-read it afterwards. That last rule narrows the race window and detects
+some losses; it does not prevent a lost concurrent edit.
 
 On PDF ingest, optional `pdf_title`, `pdf_author`, and `pdf_links` are extracted
 from PDF metadata and hyperlink annotations by `pdfinfo`, independently of the
@@ -2217,8 +2242,8 @@ sends `reasoning_effort: "none"` and `max_tokens: 4096`; a response with
 - Lint reports only present fields, checks diagnostic severities, deterministic
   ordering across all issue kinds, text messages without IDs, exact JSON shape
   and empty-array encoding; `--strict` changes only exit status.
-- MCP initialize appends server-owned evidence guidance after schema text, with
-  the schema rune cap independent of that appended guidance.
+- MCP initialize appends the server-owned evidence and conflict guidance after
+  schema text, with the schema rune cap independent of both appended blocks.
 
 ### Archive prototype (§9.16)
 - Object bytes equal input, read-only, one file per hash; no staging files
