@@ -2083,7 +2083,7 @@ source (a wiki page, or the external source or the user when the claim is not fr
 as its provenance or the user establishes it (otherwise unknown) and not assuming it is
 the original or that the original bytes are archived, with
 `source_path` the recorded location of the collected local file, not an origin and
-not evidence that the file is the original or a copy; to cite an origin recorded on
+not evidence that the file is the original or a copy (a URL there is a recorded URL, not verified as the origin); to cite an origin recorded on
 the page (`url`, `source_url`, `canonical_url`) or named in its text as recorded
 and not verified, and a user-supplied origin as user-provided and not verified (or, if the agent checked it, stating what was checked);
 to scope an absence claim to the sources checked; and, because `wiki_write`
