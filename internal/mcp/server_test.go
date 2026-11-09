@@ -75,23 +75,29 @@ func TestInitializeInstructionsIncludeServerGuidance(t *testing.T) {
 				schemaAnchor = "# Wiki Schema"
 			}
 			assertGuidanceAfterSchema(t, instr, schemaAnchor, guidanceMarkers)
-			if !tc.wantFullLink {
-				return
-			}
-			if !strings.Contains(instr, tc.wantSchema) {
-				t.Errorf("initialize instructions omit truncated schema")
-			}
-			if !strings.Contains(instr, `[Full schema: wiki_read("_schema.md")]`) {
-				t.Errorf("initialize instructions omit full schema link")
-			}
-			got, err := os.ReadFile(filepath.Join(root, cfg.SchemaPath()))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !bytes.Equal(got, tc.schema) {
-				t.Errorf("NewServer changed _schema.md bytes")
+			if tc.wantFullLink {
+				assertTruncatedSchema(t, instr, tc.wantSchema, filepath.Join(root, cfg.SchemaPath()), tc.schema)
 			}
 		})
+	}
+}
+
+// assertTruncatedSchema checks the truncated schema text and the full-schema
+// link, and that starting the server left the schema file bytes unchanged.
+func assertTruncatedSchema(t *testing.T, instr, wantSchema, schemaFile string, schema []byte) {
+	t.Helper()
+	if !strings.Contains(instr, wantSchema) {
+		t.Errorf("initialize instructions omit truncated schema")
+	}
+	if !strings.Contains(instr, `[Full schema: wiki_read("_schema.md")]`) {
+		t.Errorf("initialize instructions omit full schema link")
+	}
+	got, err := os.ReadFile(schemaFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, schema) {
+		t.Errorf("NewServer changed _schema.md bytes")
 	}
 }
 
