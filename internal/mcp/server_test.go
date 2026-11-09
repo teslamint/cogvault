@@ -69,92 +69,105 @@ func TestInitializeInstructionsIncludeServerGuidance(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			root := t.TempDir()
-			cfg := &config.Config{
-				WikiDir:             "_wiki",
-				DBPath:              ".cogvault.db",
-				Exclude:             []string{".obsidian", ".trash"},
-				ExcludeRead:         []string{},
-				Adapter:             "obsidian",
-				ConsistencyInterval: 0,
-			}
-			if err := os.MkdirAll(filepath.Join(root, "_wiki"), 0755); err != nil {
-				t.Fatal(err)
-			}
-			store := storage.NewFSStorage(root, cfg)
-			if tc.schema != nil {
-				if err := os.WriteFile(filepath.Join(root, cfg.SchemaPath()), tc.schema, 0644); err != nil {
-					t.Fatal(err)
-				}
-			}
-			idx, err := index.NewSQLiteIndex(root, filepath.Join(root, cfg.DBPath), cfg)
-			if err != nil {
-				t.Fatalf("NewSQLiteIndex: %v", err)
-			}
-			t.Cleanup(func() { idx.Close() })
-
-			s := mcp.NewServer(root, cfg, store, idx, obsidian.New())
-			initMsg, err := json.Marshal(map[string]any{
-				"jsonrpc": "2.0",
-				"id":      0,
-				"method":  "initialize",
-				"params": map[string]any{
-					"protocolVersion": "2024-11-05",
-					"capabilities":    map[string]any{},
-					"clientInfo":      map[string]any{"name": "test", "version": "0.0.1"},
-				},
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			resp := s.HandleMessage(context.Background(), initMsg)
-			respJSON, err := json.Marshal(resp)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var rpcResp struct {
-				Result struct {
-					Instructions string `json:"instructions"`
-				} `json:"result"`
-			}
-			if err := json.Unmarshal(respJSON, &rpcResp); err != nil {
-				t.Fatalf("unmarshal initialize response: %v\nraw: %s", err, respJSON)
-			}
-			instr := rpcResp.Result.Instructions
+			root, cfg, instr := initializeInstructions(t, tc.schema)
 			schemaAnchor := tc.wantSchema
 			if schemaAnchor == "" {
 				schemaAnchor = "# Wiki Schema"
 			}
-			schemaAt := strings.Index(instr, schemaAnchor)
-			prev := schemaAt
-			// Both blocks come after the schema, evidence first.
-			for _, name := range []string{"evidence", "conflicts"} {
-				at := strings.Index(instr, guidanceMarkers[name])
-				if at < 0 {
-					t.Errorf("initialize instructions omit %s guidance", name)
-					continue
-				}
-				if schemaAt < 0 || at <= prev {
-					t.Errorf("%s guidance is not placed after the schema and the preceding block", name)
-				}
-				prev = at
+			assertGuidanceAfterSchema(t, instr, schemaAnchor, guidanceMarkers)
+			if !tc.wantFullLink {
+				return
 			}
-			if tc.wantFullLink {
-				if !strings.Contains(rpcResp.Result.Instructions, tc.wantSchema) {
-					t.Errorf("initialize instructions omit truncated schema")
-				}
-				if !strings.Contains(rpcResp.Result.Instructions, `[Full schema: wiki_read("_schema.md")]`) {
-					t.Errorf("initialize instructions omit full schema link")
-				}
-				got, err := os.ReadFile(filepath.Join(root, cfg.SchemaPath()))
-				if err != nil {
-					t.Fatal(err)
-				}
-				if !bytes.Equal(got, tc.schema) {
-					t.Errorf("NewServer changed _schema.md bytes")
-				}
+			if !strings.Contains(instr, tc.wantSchema) {
+				t.Errorf("initialize instructions omit truncated schema")
+			}
+			if !strings.Contains(instr, `[Full schema: wiki_read("_schema.md")]`) {
+				t.Errorf("initialize instructions omit full schema link")
+			}
+			got, err := os.ReadFile(filepath.Join(root, cfg.SchemaPath()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, tc.schema) {
+				t.Errorf("NewServer changed _schema.md bytes")
 			}
 		})
+	}
+}
+
+// initializeInstructions starts a server over a fresh wiki (optionally with a
+// pre-written schema) and returns the instructions from its initialize reply.
+func initializeInstructions(t *testing.T, schema []byte) (string, *config.Config, string) {
+	t.Helper()
+	root := t.TempDir()
+	cfg := &config.Config{
+		WikiDir:             "_wiki",
+		DBPath:              ".cogvault.db",
+		Exclude:             []string{".obsidian", ".trash"},
+		ExcludeRead:         []string{},
+		Adapter:             "obsidian",
+		ConsistencyInterval: 0,
+	}
+	if err := os.MkdirAll(filepath.Join(root, "_wiki"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	store := storage.NewFSStorage(root, cfg)
+	if schema != nil {
+		if err := os.WriteFile(filepath.Join(root, cfg.SchemaPath()), schema, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	idx, err := index.NewSQLiteIndex(root, filepath.Join(root, cfg.DBPath), cfg)
+	if err != nil {
+		t.Fatalf("NewSQLiteIndex: %v", err)
+	}
+	t.Cleanup(func() { idx.Close() })
+
+	s := mcp.NewServer(root, cfg, store, idx, obsidian.New())
+	initMsg, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      0,
+		"method":  "initialize",
+		"params": map[string]any{
+			"protocolVersion": "2024-11-05",
+			"capabilities":    map[string]any{},
+			"clientInfo":      map[string]any{"name": "test", "version": "0.0.1"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	respJSON, err := json.Marshal(s.HandleMessage(context.Background(), initMsg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rpcResp struct {
+		Result struct {
+			Instructions string `json:"instructions"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(respJSON, &rpcResp); err != nil {
+		t.Fatalf("unmarshal initialize response: %v\nraw: %s", err, respJSON)
+	}
+	return root, cfg, rpcResp.Result.Instructions
+}
+
+// assertGuidanceAfterSchema checks that each marker is present and that the
+// blocks follow the schema in order (evidence, then conflicts).
+func assertGuidanceAfterSchema(t *testing.T, instr, schemaAnchor string, markers map[string]string) {
+	t.Helper()
+	schemaAt := strings.Index(instr, schemaAnchor)
+	prev := schemaAt
+	for _, name := range []string{"evidence", "conflicts"} {
+		at := strings.Index(instr, markers[name])
+		if at < 0 {
+			t.Errorf("initialize instructions omit %s guidance", name)
+			continue
+		}
+		if schemaAt < 0 || at <= prev {
+			t.Errorf("%s guidance is not placed after the schema and the preceding block", name)
+		}
+		prev = at
 	}
 }
 

@@ -2088,7 +2088,7 @@ URL, not verified as the origin); to cite `url`, `source_url` or `canonical_url`
 recorded origin only when the page presents it as the source, an origin named in the
 page text as recorded and not verified, a user-supplied origin as user-provided and not
 verified, and an origin the agent checked with what was checked, saying the origin is
-unrecorded only when none exists;
+unrecorded only when none is recorded, supplied or checked;
 to scope an absence claim to the sources checked; and, because `wiki_write`
 replaces the whole file and has no compare-and-swap, to read a page right before
 editing it, apply only the requested changes, keep all other content verbatim,
