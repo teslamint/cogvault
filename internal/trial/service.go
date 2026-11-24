@@ -163,6 +163,22 @@ func (s *Service) reportAcquirer() archive.Acquirer {
 	return q
 }
 
+func (s *Service) reportAcquirerFor(rawURL string) archive.Acquirer {
+	q := s.reportAcquirer()
+	if s.reportExactURLAllowed(rawURL) || !s.reportSelectedURLAllowed(rawURL) {
+		return q
+	}
+	u, _ := url.Parse(rawURL)
+	host := u.Hostname()
+	q.AllowHost = func(candidate string) bool {
+		return strings.EqualFold(candidate, host)
+	}
+	q.AllowURL = func(candidate *url.URL) bool {
+		return strings.EqualFold(candidate.Hostname(), host) && selectedPublicHTTPS(candidate.String())
+	}
+	return q
+}
+
 // Wait is why RunOnce did not run a job.
 type Wait struct{ Reason string }
 
@@ -222,7 +238,7 @@ func (s *Service) RunOnce(ctx context.Context) (*archive.Job, string, error) {
 	}
 	q := s.acquirer()
 	if job.ReportCaptureID != "" {
-		q = s.reportAcquirer()
+		q = s.reportAcquirerFor(job.URL)
 	}
 	done, err := s.A.RunClaimedJob(ctx, q, job, s.Owner)
 	return done, "", err
@@ -251,9 +267,11 @@ func (s *Service) refuse(job *archive.Job) string {
 	switch {
 	case job.Executor != archive.ExecutorHTTP:
 		return "only the http executor is run"
-	case s.checkURL(job.URL) != nil:
+	case job.ReportCaptureID != "" && !s.reportURLAllowed(job.URL):
+		return "the URL is outside the report URL policy"
+	case job.ReportCaptureID == "" && s.checkURL(job.URL) != nil:
 		return "the URL is outside the allowed hosts or scheme"
-	case len(s.Cfg.AllowedURLs) > 0 && !containsURL(s.Cfg.AllowedURLs, job.URL):
+	case job.ReportCaptureID == "" && len(s.Cfg.AllowedURLs) > 0 && !containsURL(s.Cfg.AllowedURLs, job.URL):
 		return "the URL is outside the exact initial URL policy"
 	case job.AttemptsMade > s.Cfg.MaxAttempts:
 		return "the trial attempt limit is used up"

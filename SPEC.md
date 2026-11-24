@@ -1682,6 +1682,16 @@ verified judgment, backup scheduling, or backup expiry.
       exact initial entry; empty policy never authorizes report fetches.
       Nonempty policy also narrows legacy submissions. Workers recheck both
       policy and report/source association for jobs inserted by other routes.
+      The default remains exact-only. The operator can opt into
+      `REPORT_URL_POLICY=selected_public_https` for report-linked sources only.
+      Manifest import still queues nothing; an authenticated, explicit submit
+      must identify the report, source and matching URL. This extension admits
+      public HTTPS DNS hostnames without prelisting, but no query, credential,
+      fragment, nondefault port, IP literal, or local hostname. Redirects for
+      these additional URLs are limited to the same hostname and the same URL
+      rules; all dial targets still undergo independent public-address checks.
+      Existing exact approvals retain their audited exceptions; URL-only
+      submissions, media and budgets remain unchanged.
       `MEDIA_TYPES` remains `pdf` by default; explicit `pdf,html` permits only
       actual PDF or matching HTML/XHTML MIME with UTF-8/ASCII identity bytes.
       Unsupported media/encoding is refused. No scripts, linked assets, DOM

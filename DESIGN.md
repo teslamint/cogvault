@@ -1034,7 +1034,12 @@ mounted, scanned or read by the trial service.
 manifest metadata. Empty lists preserve host-only behavior for legacy submits
 but refuse report-linked fetches. Nonempty initial/destination lists narrow all
 trial HTTP requests. A destination match never replaces the archive's independent
-signed-redirect query validation. Media defaults to PDF-only; optional HTML
+signed-redirect query validation. With the separately opt-in report policy, the
+worker selects a per-source HTTPS acquirer only after rechecking the persisted
+manifest association; it binds host and URL gates to that source's hostname.
+Legacy and already exact-approved sources keep the original policy. The archive
+still checks all resolved addresses, dials only a checked IP, and uses no proxy.
+Media defaults to PDF-only; optional HTML
 supports matching MIME, sniffed HTML and UTF-8/ASCII identity bytes, not rendering.
 Recognizable access pages and trial 429 stop without automated retry. There is
 no automatic robots/terms checker, link discovery, login or browser executor.
