@@ -55,6 +55,7 @@ const (
 	EnvAllowedURLs      = envPrefix + "ALLOWED_URLS"
 	EnvRedirectURLs     = envPrefix + "REDIRECT_URLS"
 	EnvMaxRedirects     = envPrefix + "MAX_REDIRECTS"
+	EnvReportURLPolicy  = envPrefix + "REPORT_URL_POLICY"
 )
 
 // Hard caps. A setting above one is refused, so no configuration can turn the
@@ -99,6 +100,12 @@ type Config struct {
 	RedirectURLs []string
 	AllowHTML    bool
 	MaxRedirects int
+	// ReportURLPolicy is the report URL policy mode.
+	// "" means legacy exact allowlist; "selected_public_https" means
+	// report-manifest-linked sources use exact URL equality against the
+	// manifest acquire_url, with HTTPS-only, no credentials, default port,
+	// no query/fragment/IP-literal/special-use-local hostnames.
+	ReportURLPolicy string
 	// ForbiddenPaths are protected paths the root must not overlap. The built-in
 	// ones are always included; these are extra.
 	ForbiddenPaths []string
@@ -127,6 +134,7 @@ var knownEnv = map[string]bool{
 	EnvMaxQueued: true, EnvMaxSubmitsPerDay: true, EnvMaxFetchesHour: true, EnvMaxFetchesDay: true,
 	EnvMinInterval: true, EnvMaxAttempts: true, EnvMaxBytes: true,
 	EnvMediaTypes: true, EnvAllowedURLs: true, EnvRedirectURLs: true, EnvMaxRedirects: true,
+	EnvReportURLPolicy: true,
 }
 
 var hostPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$`)

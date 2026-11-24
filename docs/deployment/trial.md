@@ -329,6 +329,17 @@ reset. No new Auth0 scope or route is needed for these trial-only helpers.
    `MAX_REDIRECTS` is 0..5 (default 5). Values belong to `COGVAULT_TRIAL_*`.
    The archive still validates signed redirects itself. A report cannot add
    hosts, paths or arbitrary queries. KCI browser/network collection remains out.
+   To trial selected public URLs without prelisting, explicitly set
+   `COGVAULT_TRIAL_REPORT_URL_POLICY=selected_public_https` on **both** the
+   authenticated MCP listener and its worker. Leave it unset to roll back.
+   Exact approved URLs retain their existing behavior. For newly admitted URLs,
+   submit the exact HTTPS URL stored in a selected-source manifest. Public DNS
+   only, no query string or cross-host redirect; keep such sources in the exact
+   approved or manual flow. Manifest import does not submit or fetch anything.
+   Verify the dedicated trial volume and network, no production access or new
+   ports, no proxy, and egress isolation before enabling. Keep the existing
+   caps, media setting, and pause mechanism. Do not bypass a site's access
+   restrictions or automate access where its terms do not permit it.
 6. Only then submit an HTTP-mode source using `trial_submit(url, report_id,
    source_id)` or `submit --report REPORT_ID --source SOURCE_ID URL`. Manual
    sources cannot be submitted. Legacy `trial_submit(url)` still works under

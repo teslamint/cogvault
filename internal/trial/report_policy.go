@@ -3,11 +3,44 @@ package trial
 import (
 	"encoding/json"
 	"net/url"
+	"strings"
 
 	"github.com/teslamint/cogvault/internal/archive"
 )
 
+// ReportURLPolicySelected is the opt-in mode where report-manifest-linked
+// sources are admitted by exact URL equality against the manifest acquire_url,
+// with HTTPS-only, no credentials, default port, no query/fragment,
+// no IP-literal or special-use-local hostnames. Legacy exact allowlist mode
+// is the default ("" or absent).
+const ReportURLPolicySelected = "selected_public_https"
+
+// selectedPublicHTTPS is a presentation-layer check. The archive transport
+// independently rejects every nonpublic DNS answer and pins the checked dial.
+func selectedPublicHTTPS(raw string) bool {
+	if !safeManifestURL(raw) || strings.ContainsAny(raw, "?#") || archive.CheckHTTPSourceURL(raw) != nil {
+		return false
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	for _, suffix := range []string{".localhost", ".local", ".localdomain", ".internal", ".example", ".test", ".invalid", ".onion", ".home.arpa", ".lan", ".corp", ".alt"} {
+		if host == suffix[1:] || strings.HasSuffix(host, suffix) {
+			return false
+		}
+	}
+	return !isKCI(host)
+}
+
 func parseReportPolicy(env map[string]string, c *Config) error {
+	switch env[EnvReportURLPolicy] {
+	case "", ReportURLPolicySelected:
+		c.ReportURLPolicy = env[EnvReportURLPolicy]
+	default:
+		return configErr(EnvReportURLPolicy, "must be empty or selected_public_https")
+	}
 	switch env[EnvMediaTypes] {
 	case "", "pdf":
 	case "pdf,html":
@@ -58,8 +91,16 @@ func containsURL(urls []string, raw string) bool {
 	return false
 }
 
-func (s *Service) reportURLAllowed(raw string) bool {
+func (s *Service) reportExactURLAllowed(raw string) bool {
 	return s.checkURL(raw) == nil && containsURL(s.Cfg.AllowedURLs, raw)
+}
+
+func (s *Service) reportSelectedURLAllowed(raw string) bool {
+	return s.Cfg.ReportURLPolicy == ReportURLPolicySelected && selectedPublicHTTPS(raw)
+}
+
+func (s *Service) reportURLAllowed(raw string) bool {
+	return s.reportExactURLAllowed(raw) || s.reportSelectedURLAllowed(raw)
 }
 
 func (s *Service) fetchURLAllowed(u *url.URL) bool {
