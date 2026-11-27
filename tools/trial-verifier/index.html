@@ -1,0 +1,634 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cogvault trial: selected public HTTPS source verifier</title>
+<style>
+:root{--fg:#1b1f24;--muted:#5b6470;--line:#d0d7de;--ok:#1a7f37;--bad:#cf222e;--warn:#9a6700;--accent:#0550ae;--bg2:#f6f8fa}
+*{box-sizing:border-box}body{font:14px/1.45 system-ui,sans-serif;color:var(--fg);margin:0}
+header{padding:12px 20px;border-bottom:1px solid var(--line)}header h1{font-size:18px;margin:0}
+header p{margin:4px 0 0;color:var(--muted)}
+nav{display:flex;gap:4px;padding:8px 20px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+nav button{border:1px solid var(--line);background:#fff;padding:6px 12px;border-radius:6px;cursor:pointer}
+nav button[aria-selected=true]{background:var(--accent);color:#fff;border-color:var(--accent)}
+main{padding:16px 20px;max-width:1280px}section[hidden]{display:none}
+fieldset{border:1px solid var(--line);border-radius:8px;margin:0 0 14px;padding:10px 14px}legend{font-weight:600;padding:0 4px}
+label{display:inline-flex;flex-direction:column;gap:2px;margin:0 12px 8px 0;font-size:13px;color:var(--muted)}
+label.inline{flex-direction:row;align-items:center;gap:6px;color:var(--fg)}
+input[type=text],input[type=number],input[type=url],select,textarea{font:inherit;padding:4px 6px;border:1px solid var(--line);border-radius:4px;color:var(--fg)}
+textarea{width:100%;min-height:60px;font-family:ui-monospace,monospace;font-size:12px}
+input.wide{width:34em}button.act{border:1px solid var(--line);background:var(--bg2);padding:4px 10px;border-radius:6px;cursor:pointer;margin:0 6px 6px 0}
+table{border-collapse:collapse;width:100%;margin:6px 0 12px}th,td{border:1px solid var(--line);padding:4px 6px;text-align:left;vertical-align:top;font-size:13px}
+th{background:var(--bg2)}code,.mono{font-family:ui-monospace,monospace;font-size:12px;word-break:break-all}
+.ok{color:var(--ok);font-weight:600}.bad{color:var(--bad);font-weight:600}.warn{color:var(--warn);font-weight:600}.muted{color:var(--muted)}
+.card{border:1px solid var(--line);border-radius:8px;padding:10px 14px;margin:0 0 14px}
+.pill{display:inline-block;border:1px solid var(--line);border-radius:10px;padding:0 8px;font-size:12px;margin-right:4px}
+.pill.pdf{border-color:#8250df;color:#8250df}.pill.html{border-color:#bc4c00;color:#bc4c00}
+ul.v{margin:4px 0;padding-left:18px}pre{background:var(--bg2);padding:8px;border-radius:6px;overflow:auto;font-size:12px;white-space:pre-wrap}
+</style>
+</head>
+<body>
+<header>
+<h1>Selected public HTTPS source verifier</h1>
+<p>Collect and verify originals of sources selected in Sites deep research, under <code>COGVAULT_TRIAL_REPORT_URL_POLICY=selected_public_https</code>. Static page: it sends no request and changes nothing. State stays in this browser (localStorage).</p>
+</header>
+<nav role="tablist" id="tabs"></nav>
+<main>
+<section id="tab-policy"></section>
+<section id="tab-sources" hidden></section>
+<section id="tab-verify" hidden></section>
+<section id="tab-scenarios" hidden></section>
+<section id="tab-export" hidden></section>
+</main>
+<script>
+"use strict";
+// ---------- Policy mirror of internal/trial/report_policy.go selectedPublicHTTPS ----------
+const POLICY = "selected_public_https";
+const MAX_URL = 2048;
+const HOST_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/;
+// Characters Go's url.URL.String() reproduces unchanged in a path (u.String() != raw is refused).
+const PATH_RE = /^(\/[A-Za-z0-9\-._~\/;=,@:$&+]*)?$/;
+const LOCAL_SUFFIXES = ["localhost","local","localdomain","internal","example","test","invalid","onion","home.arpa","lan","corp","alt"];
+
+function isIPv4Literal(h){
+  const p = h.split(".");
+  return p.length === 4 && p.every(x => /^(0|[1-9][0-9]{0,2})$/.test(x) && +x <= 255);
+}
+
+// Returns [] when admitted, otherwise a list of {code, msg}.
+function checkSelectedURL(raw){
+  const v = [];
+  const add = (code, msg) => v.push({code, msg});
+  if (!raw) { add("empty", "URL is empty"); return v; }
+  if (raw.length > MAX_URL) add("too_long", "longer than 2048 characters");
+  if (/[\\\r\n\t %]/.test(raw)) add("bad_chars", "contains a backslash, whitespace, or percent-encoding");
+  if (!raw.startsWith("https://")) { add("not_https", "only lowercase https:// is admitted"); return v; }
+  const rest = raw.slice(8);
+  const cut = rest.search(/[\/?#]/);
+  const authority = cut < 0 ? rest : rest.slice(0, cut);
+  let tail = cut < 0 ? "" : rest.slice(cut);
+  if (authority.includes("@")) add("credentials", "userinfo (credentials) in the URL");
+  let host = authority.slice(authority.lastIndexOf("@") + 1);
+  if (host.startsWith("[")) add("ip_literal", "IP literal host");
+  else if (host.includes(":")) { add("port", "explicit port (even :443) is refused"); host = host.slice(0, host.indexOf(":")); }
+  if (tail.includes("#")) { add("fragment", "fragment (#) is refused"); tail = tail.slice(0, tail.indexOf("#")); }
+  if (tail.includes("?")) { add("query", "query string is refused under selected_public_https"); tail = tail.slice(0, tail.indexOf("?")); }
+  if (!host) add("no_host", "no host");
+  else if (isIPv4Literal(host)) add("ip_literal", "IP literal host");
+  else if (host.length > 253 || !HOST_RE.test(host)) add("host_syntax", "host must be a lowercase DNS name with a dot");
+  else {
+    if (LOCAL_SUFFIXES.some(s => host === s || host.endsWith("." + s))) add("local_host", "special-use or local hostname");
+    if (host === "kci.go.kr" || host.endsWith(".kci.go.kr")) add("kci", "KCI network acquisition is excluded");
+  }
+  if (!PATH_RE.test(tail)) add("path_chars", "path characters Go would re-encode (u.String() != raw)");
+  return v;
+}
+
+function hostOf(raw){ try { return new URL(raw).hostname.toLowerCase(); } catch { return ""; } }
+
+// Redirect history: each hop {url, status}. First hop is the requested URL.
+function checkRedirects(requested, hops, maxRedirects){
+  const v = [];
+  const origin = hostOf(requested);
+  const redirects = hops.filter(h => h.status >= 300 && h.status < 400).length;
+  if (redirects > maxRedirects) v.push({code:"redirect_limit", msg:`${redirects} redirects exceed MAX_REDIRECTS=${maxRedirects}`});
+  hops.forEach((h, i) => {
+    if (i === 0) {
+      if (h.url !== requested) v.push({code:"not_selected_url", msg:`first request ${h.url} is not the selected acquire_url`});
+      return;
+    }
+    const host = hostOf(h.url);
+    if (host && host !== origin) v.push({code:"cross_host_redirect", msg:`hop ${i+1} goes to ${host}, not ${origin}`});
+    checkSelectedURL(h.url).forEach(x => v.push({code:"redirect_" + x.code, msg:`hop ${i+1}: ${x.msg}`}));
+  });
+  return v;
+}
+
+// Measured against the Go functions on main 97fdfff (selectedPublicHTTPS). true = admitted.
+const GO_TRUTH = [
+ ["https://www.rfc-editor.org/rfc/rfc9110.pdf",true],["https://journal.example.com/final.pdf",true],
+ ["http://journal.example.com/final.pdf",false],["https://journal.example.com/final.pdf?x=1",false],
+ ["https://journal.example.com/a?",false],["https://journal.example.com:8443/final",false],
+ ["https://journal.example.com:443/final",false],["https://x:y@journal.example.com/final",false],
+ ["https://journal.example.com/final#section",false],["https://journal.example.com/a#",false],
+ ["https://nas.local/a",false],["https://device.home.arpa/a",false],["https://10.0.0.2/a",false],
+ ["https://localhost/a",false],["https://printer.lan/a",false],["https://site.test/a",false],
+ ["https://x.example/a",false],["https://HOST.example.com/a",false],["HTTPS://www.rfc-editor.org/a",false],
+ ["https://www.kci.go.kr/kciportal/a",false],["https://kci.go.kr/a",false],
+ ["https://www.bok.or.kr/portal/cmmn/file/fileDown.do?atchFileId=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&fileSn=2",false],
+ ["https://example.org/a%20b",false],["https://example.org/a b",false],["https://example.org/a(b)",false],
+ ["https://example.org/a!b",false],["https://example.org/a'b",false],["https://example.org/a*b",false],
+ ["https://example.org/café",false],["https://example.org",true],["https://example.org/",true],
+ ["https://example.org/a;b=c,d@e:f$g&h+i",true],["https://[2001:db8::1]/a",false],["https://010.0.0.1/a",true],
+ ["https://1.2.3.4/a",false],["https://xn--bcher-kva.example/a",false],["https://xn--bcher-kva.ch/a",true],
+ ["https://-bad.example.com/a",false],["https://example.org/~user/file.pdf",true],["https://a.example.onion/a",false],
+ ["https://journal.example.com/a/../b",true],["https://example.org/a\\b",false],["https://example.org/a[b]",false],
+ ["https://example.org/a|b",false],["https://example.org/a{b}",false],["https://ex_ample.org/a",false],
+ ["https://example.org.",false],["https://example.org:/a",false],["https:///a",false],["https://example.org//a",true],
+ ["https://intranet.corp/a",false],["https://x.localdomain/a",false],["https://x.internal/a",false],
+ ["https://x.alt/a",false],["https://x.invalid/a",false],["https://123.example/a",false],["https://example.123/a",true],
+ ["ftp://example.org/a",false],["https:example.org/a",false],["https://example.org/a?b#c",false],
+ ["https://example.org/" + "a".repeat(2040), false],
+];
+
+// ---------- State ----------
+const STORE = "cogvault-trial-verifier-v1";
+function blankSource(n){
+  return {id:`S${String(n).padStart(4,"0")}`, citationUrl:"", acquireUrl:"", relation:"citation", citationCount:1, mode:"http",
+    format:"pdf", expectedPages:"", htmlIndicator:"", label:"", title:"", publisher:"", notes:"",
+    record:{bytes:"", mime:"", status:"", finalUrl:"", hops:"", sha256:"", collectedAt:"", jobId:"", captureId:"", completeness:"", detail:""},
+    recalc:null, pdfinfoPages:""};
+}
+function defaultState(){
+  return {
+    policy:{worker:POLICY, listener:POLICY, mediaTypes:"pdf,html", maxRedirects:5, allowedUrlsSet:false},
+    nas:{imageId:"", workerImage:"", listenerImage:"", workerVersion:"", listenerVersion:"", workerCreated:"", listenerCreated:"", deployedAt:"", prodUnchanged:false, notes:""},
+    report:{reportId:"report-example", selectedSha256:""},
+    sources:[blankSource(1)],
+    checks:{},
+    cases:defaultCases(),
+  };
+}
+let S = load();
+function load(){
+  try { const s = JSON.parse(localStorage.getItem(STORE)); if (s && s.sources) return Object.assign(defaultState(), s); } catch {}
+  return defaultState();
+}
+function save(){ localStorage.setItem(STORE, JSON.stringify(S)); }
+
+// ---------- Scenarios, checklists, test cases ----------
+// Lanes: "nonmutating" never changes production (this page, local dev container, read-only NAS inspection);
+// "live" contacts a real external source or changes NAS state.
+const SCENARIOS = {
+  success:{title:"Collection success", steps:[
+    "Both containers show COGVAULT_TRIAL_REPORT_URL_POLICY=selected_public_https (docker inspect, Policy tab).",
+    "Source is http mode, acquire_url passes every validation rule, format chosen (PDF or HTML).",
+    "Manifest imported (import-manifest / trial_import_manifest); nothing is queued by import.",
+    "Submit with report and source IDs: trial_submit(url, report_id, source_id) or submit --report --source URL.",
+    "status JOB_ID --json shows held; paste it in Verify to fill the record.",
+    "Load an independent copy of the bytes; recalculated SHA-256 and size equal the record.",
+    "Completeness check: PDF page count equals expected and %%EOF present; HTML end tag and indicator present.",
+  ]},
+  rejection:{title:"Collection rejection", steps:[
+    "Remote returns 401/403/407/451, 429, or a login/challenge HTML page.",
+    "Job ends human_action_required (access_restricted / rate_limited); no capture stored.",
+    "report-status shows failure_reason; no automatic retry happened.",
+    "Record the failure cause and reproduction steps; obtain an authorized copy by the manual flow.",
+  ]},
+  violation:{title:"Policy violation", steps:[
+    "Validator flags the URL (query, port, credentials, IP, local host, http, fragment, path characters).",
+    "Submit through the listener is refused before queueing (refused by the trial policy).",
+    "A redirect to a different host, or a redirect that breaks the URL rules, ends the job failed (policy_refused); nothing is sent to that host.",
+    "Listener and worker policy values match; a mismatch is itself a configuration violation.",
+  ]},
+  partial:{title:"Partial collection", steps:[
+    "Stored HTML lacks the completeness indicator (for example an abstract or landing page), or PDF page count is below the expected count.",
+    "Record completeness as partial; the archive keeps held/unknown and never promotes it.",
+    "For operator import use --completeness incomplete; keep the PDF capture separate.",
+    "Plan a manual acquisition of the full original.",
+  ]},
+  restore:{title:"Policy restoration", steps:[
+    "In the cogvault-trial worker console run: cogvault-trial pause. Confirm it prints paused.",
+    "Run status until waiting_or_running is 0; suspend submissions to the listener.",
+    "In Portainer stack 11 remove COGVAULT_TRIAL_REPORT_URL_POLICY from both cogvault-trial and cogvault-trial-mcp.",
+    "Recreate both containers with the updated stack (a restart does not change environment). Do not recreate the wiki, cloudflared, or the volume.",
+    "docker inspect both: the variable is absent or empty, Created is newer than the change, and the PAUSE file still exists.",
+    "A previously admitted selected URL is now refused by the listener (exact-only policy).",
+    "Run cogvault-trial resume only when ready.",
+  ]},
+  nas:{title:"NAS application confirmation (new feature actually applied)", steps:[
+    "Image ID of cogvault-trial and cogvault-trial-mcp equals the built image ID recorded for this release.",
+    "cogvault-trial version in each container prints the expected build.",
+    "docker inspect env of each container shows the expected policy value.",
+    "Container Created timestamps are after the deployment; cogvault-trial check prints ok.",
+    "Production cogvault and cloudflared keep their container IDs, StartedAt, and zero restart counts.",
+  ]},
+};
+
+function defaultCases(){
+  const c = (id, scenario, lane, title, steps, expected) => ({id, scenario, lane, title, steps, expected, result:"", failure:"", repro:"", ranAt:""});
+  return [
+    c("TC-S1","success","nonmutating","Validator admits the selected URL and the manifest is valid","Enter source; open Manifest tab","No violation; manifest 1-5 sources, at most 8 KiB, generated JSON parses"),
+    c("TC-S2","success","live","Submit one selected PDF and verify hash and page count","Steps of Collection success scenario, one fetch only","Job held; recalculated SHA-256 and size equal; page count equals expected"),
+    c("TC-S3","success","live","Submit one selected HTML page and verify completeness","Same, with MEDIA_TYPES=pdf,html","Job held; HTML end tag and indicator present; no linked resource fetched"),
+    c("TC-R1","rejection","live","Access-restricted or challenge source stops for a person","Submit a selected source that answers 403 or a login page","human_action_required; failure_reason access_restricted; no capture"),
+    c("TC-R2","rejection","nonmutating","Local file of an unsupported format is classified as rejected","Load a non-PDF, non-HTML file in Verify","Detected format is neither; record would be media_not_allowed"),
+    c("TC-P1","violation","nonmutating","Validator matches the Go truth table","Click Run validator self-test (Policy tab)","All rows agree with selectedPublicHTTPS"),
+    c("TC-P2","violation","nonmutating","Cross-host redirect in a recorded history is flagged","Paste a hop list whose second host differs","cross_host_redirect violation shown"),
+    c("TC-P3","violation","nonmutating","Listener and worker policy values agree","docker inspect both containers (read-only); enter values in Policy","Both selected_public_https, or both empty"),
+    c("TC-T1","partial","nonmutating","HTML without the indicator is partial","Load a saved abstract page; set indicator text","Completeness verdict partial"),
+    c("TC-T2","partial","live","Stored partial HTML stays held/unknown","report-status after a partial HTML collection","completeness unknown; not promoted by another capture"),
+    c("TC-X1","restore","live","Pause, remove variable from both containers, recreate both","Policy restoration scenario steps 1-5","Both replacements exact-only; still paused"),
+    c("TC-X2","restore","nonmutating","Restored listener refuses a selected-only URL","trial_submit with a selected-only URL after restore","refused by the trial policy; nothing queued"),
+    c("TC-N1","nas","nonmutating","New feature is applied on the NAS","NAS application confirmation steps","Image IDs, versions, env, Created timestamps match; production unchanged"),
+  ];
+}
+
+// Existing automated coverage this page must not repeat.
+const EXISTING_TESTS = [
+  ["go test -race ./... (CI)","Full Go suite with the race detector"],
+  ["go vet, sh scripts/lint.sh (gosec)","Static analysis"],
+  ["TestSelectedPublicReportAdmissionAndWorker","Selected admission, mixed DNS blocked before dial, rollback stops a queued job before network"],
+  ["TestSelectedPublicReportRedirectAndOldExactPolicy","Same-host redirect, query/port/credentials/fragment refused, exact policy kept"],
+  ["TestAcquireRefusesNonPublicDestinations, TestAcquireDialsOnlyTheCheckedAddress","Public-address rule and pinned dial"],
+  ["TestAcquirerAllowHostCoversTheFirstURLAndEveryRedirect, TestAcquirerAllowURLStopsRedirectBeforeNetwork","Redirect host/URL policy before any request"],
+  ["TestTrialRedirectBudgetBoundsActualRequests, TestTrialPolicyKeepsRedirectURLChecks","Redirect limit and audited redirect checks"],
+  ["TestTrialHTMLAccessPagesStopWithoutStorageOrRetry, TestTrialRateLimitStopsOnlyWhenRequested","Access pages and 429 stop for a person"],
+  ["TestReportPolicyDefaultsAndStrictConfig","Strict REPORT_URL_POLICY values"],
+];
+
+// ---------- Helpers ----------
+const $ = (sel, el=document) => el.querySelector(sel);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+function download(name, text, type){
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], {type}));
+  a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+function vlist(v){ return v.length ? `<ul class="v">${v.map(x => `<li class="bad">${esc(x.code)}: ${esc(x.msg)}</li>`).join("")}</ul>` : `<span class="ok">admitted</span>`; }
+function parseHops(text){
+  return String(text || "").split("\n").map(l => l.trim()).filter(Boolean).map(l => {
+    const m = l.match(/^(\d{3})\s+(\S+)$/) || l.match(/^(\S+)\s+(\d{3})$/);
+    if (!m) return {url:l, status:0};
+    return /^\d{3}$/.test(m[1]) ? {url:m[2], status:+m[1]} : {url:m[1], status:+m[2]};
+  });
+}
+function acquireURL(src){ return src.acquireUrl || src.citationUrl; }
+
+// ---------- Tabs ----------
+const TABS = [["policy","1. Policy"],["sources","2. Sources and conditions"],["verify","3. Hash and completeness"],["scenarios","4. Scenarios and test cases"],["export","5. Manifest and export"]];
+function renderTabs(active){
+  $("#tabs").innerHTML = TABS.map(([k,l]) => `<button role="tab" data-tab="${k}" aria-selected="${k===active}">${l}</button>`).join("");
+  TABS.forEach(([k]) => { $("#tab-" + k).hidden = k !== active; });
+  ({policy:renderPolicy, sources:renderSources, verify:renderVerify, scenarios:renderScenarios, export:renderExport})[active]();
+  location.hash = active;
+}
+$("#tabs").addEventListener("click", e => { const t = e.target.dataset.tab; if (t) renderTabs(t); });
+
+// ---------- Generic two-way binding: data-bind="path.to.field" ----------
+function bindAll(root){
+  root.querySelectorAll("[data-bind]").forEach(el => {
+    const path = el.dataset.bind.split(".");
+    let o = S; for (const k of path.slice(0, -1)) o = o[k];
+    const k = path[path.length - 1];
+    if (el.type === "checkbox") el.checked = !!o[k]; else el.value = o[k] ?? "";
+    // Selects and checkboxes may change the layout, so they redraw the tab. Text fields refresh only
+    // computed result areas: replacing inputs drops focus, pasted text and an in-progress click.
+    el.addEventListener(el.tagName === "SELECT" || el.type === "checkbox" ? "change" : "input", () => {
+      o[k] = el.type === "checkbox" ? el.checked : el.type === "number" ? (el.value === "" ? "" : +el.value) : el.value;
+      save();
+      if (!el.dataset.rerender) return;
+      if (el.tagName === "SELECT" || el.type === "checkbox") renderTabs(el.dataset.rerender); else refresh(el.dataset.rerender);
+    });
+  });
+}
+function refresh(tab){
+  if (tab === "policy") $("#nas-verdict").innerHTML = nasVerdict();
+  else if (tab === "sources") S.sources.forEach((s, i) => { $(`[data-cond="${i}"]`).innerHTML = conditionsHTML(s); });
+  else if (tab === "verify") S.sources.forEach((s, i) => { $(`[data-result="${i}"]`).innerHTML = verifyResult(s); });
+}
+
+// ---------- 1. Policy ----------
+function policyFindings(){
+  const p = S.policy, f = [];
+  if (p.worker !== p.listener) {
+    f.push(p.listener === POLICY
+      ? "Listener admits selected URLs but the worker does not: queued jobs end failed (trial policy: the URL is outside the report URL policy; nothing was sent)."
+      : "Worker admits selected URLs but the listener does not: trial_submit refuses them (refused by the trial policy).");
+  }
+  if (p.worker !== POLICY && p.listener !== POLICY) f.push("Both containers use the exact-only policy: selected URLs are refused unless listed in COGVAULT_TRIAL_ALLOWED_URLS.");
+  if (p.mediaTypes === "pdf" && S.sources.some(s => s.format === "html")) f.push("A source is HTML but MEDIA_TYPES=pdf: HTML responses end media_not_allowed.");
+  return f;
+}
+function renderPolicy(){
+  const el = $("#tab-policy");
+  const f = policyFindings();
+  el.innerHTML = `
+  <fieldset><legend>COGVAULT_TRIAL_REPORT_URL_POLICY per container</legend>
+    <p class="muted">The value must be set on both the MCP listener (cogvault-trial-mcp) and the collection worker (cogvault-trial). Read it with <code>docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' CONTAINER</code>.</p>
+    <label>Collection worker (cogvault-trial)<select data-bind="policy.worker" data-rerender="policy"><option value="${POLICY}">${POLICY}</option><option value="">(empty: exact-only)</option></select></label>
+    <label>MCP listener (cogvault-trial-mcp)<select data-bind="policy.listener" data-rerender="policy"><option value="${POLICY}">${POLICY}</option><option value="">(empty: exact-only)</option></select></label>
+    <label>COGVAULT_TRIAL_MEDIA_TYPES<select data-bind="policy.mediaTypes" data-rerender="policy"><option>pdf</option><option>pdf,html</option></select></label>
+    <label>COGVAULT_TRIAL_MAX_REDIRECTS<input type="number" min="0" max="5" data-bind="policy.maxRedirects"></label>
+    <div>${f.length ? `<ul class="v">${f.map(x => `<li class="warn">${esc(x)}</li>`).join("")}</ul>` : `<span class="ok">Both containers apply ${POLICY}.</span>`}</div>
+  </fieldset>
+  <fieldset><legend>Validation rules (selected_public_https)</legend>
+    <ul class="v">
+      <li>Only selected sources: the URL must equal the manifest <code>acquire_url</code> of an http-mode source, submitted with its report and source IDs.</li>
+      <li>Public HTTPS only: lowercase <code>https://</code>, DNS hostname, no IP literal, no local or special-use suffix, no credentials, no port, no fragment; every dial target is checked for a public address by the worker.</li>
+      <li>No URL query string, including an empty <code>?</code>.</li>
+      <li>No redirect to a different host; each redirect must pass the same rules; at most MAX_REDIRECTS hops.</li>
+    </ul>
+    <label>Check one URL<input type="text" class="wide" id="probe" placeholder="https://"></label>
+    <div id="probe-out"></div>
+    <button class="act" id="selftest">Run validator self-test against Go truth table</button>
+    <div id="selftest-out"></div>
+  </fieldset>
+  <fieldset><legend>NAS application record</legend>
+    <label>Expected image ID<input type="text" class="wide" data-bind="nas.imageId" placeholder="sha256:..."></label><br>
+    <label>Worker image ID<input type="text" class="wide" data-bind="nas.workerImage" data-rerender="policy"></label>
+    <label>Listener image ID<input type="text" class="wide" data-bind="nas.listenerImage" data-rerender="policy"></label><br>
+    <label>Worker version<input type="text" data-bind="nas.workerVersion"></label>
+    <label>Listener version<input type="text" data-bind="nas.listenerVersion"></label>
+    <label>Worker Created<input type="text" data-bind="nas.workerCreated"></label>
+    <label>Listener Created<input type="text" data-bind="nas.listenerCreated"></label>
+    <label>Deployed at (UTC)<input type="text" data-bind="nas.deployedAt"></label>
+    <label class="inline"><input type="checkbox" data-bind="nas.prodUnchanged"> Production cogvault and cloudflared unchanged</label>
+    <div id="nas-verdict">${nasVerdict()}</div>
+  </fieldset>`;
+  bindAll(el);
+  $("#probe").addEventListener("input", e => { $("#probe-out").innerHTML = vlist(checkSelectedURL(e.target.value)); });
+  $("#selftest").addEventListener("click", () => { $("#selftest-out").innerHTML = selfTest(); });
+}
+function nasVerdict(){
+  const n = S.nas, out = [];
+  if (!n.imageId) return `<span class="muted">Enter the expected image ID.</span>`;
+  out.push(n.workerImage === n.imageId ? `<span class="ok">worker image matches</span>` : `<span class="bad">worker image differs</span>`);
+  out.push(n.listenerImage === n.imageId ? `<span class="ok">listener image matches</span>` : `<span class="bad">listener image differs</span>`);
+  if (n.deployedAt) for (const [k, v] of [["worker", n.workerCreated], ["listener", n.listenerCreated]])
+    out.push(v && Date.parse(v) >= Date.parse(n.deployedAt) ? `<span class="ok">${k} recreated after deploy</span>` : `<span class="bad">${k} not recreated after deploy</span>`);
+  return out.join(" · ");
+}
+function selfTest(){
+  const rows = GO_TRUTH.map(([u, want]) => ({u, want, got: checkSelectedURL(u).length === 0}));
+  const bad = rows.filter(r => r.got !== r.want);
+  return `<p class="${bad.length ? "bad" : "ok"}" id="selftest-summary">${rows.length - bad.length}/${rows.length} rows agree with Go</p>` +
+    (bad.length ? `<table><tr><th>URL</th><th>Go</th><th>page</th></tr>${bad.map(r => `<tr><td class="mono">${esc(r.u)}</td><td>${r.want}</td><td>${r.got}</td></tr>`).join("")}</table>` : "");
+}
+
+// ---------- 2. Sources ----------
+function renderSources(){
+  const el = $("#tab-sources");
+  el.innerHTML = `
+  <fieldset><legend>Report</legend>
+    <label>report_id<input type="text" data-bind="report.reportId"></label>
+    <label>selected_sha256 (sha256:hex of the selected body)<input type="text" class="wide" data-bind="report.selectedSha256"></label>
+  </fieldset>
+  ${S.sources.map((s, i) => sourceCard(s, i)).join("")}
+  <button class="act" id="add-src" ${S.sources.length >= 5 ? "disabled" : ""}>Add source (max 5)</button>`;
+  bindAll(el);
+  $("#add-src").addEventListener("click", () => { S.sources.push(blankSource(S.sources.length + 1)); save(); renderTabs("sources"); });
+  el.querySelectorAll("[data-del]").forEach(b => b.addEventListener("click", () => { S.sources.splice(+b.dataset.del, 1); save(); renderTabs("sources"); }));
+}
+function conditionsHTML(s){
+  return s.mode === "manual" ? `<span class="muted">manual source: no HTTP submission; use import-original</span>` : vlist(checkSelectedURL(acquireURL(s)));
+}
+function sourceCard(s, i){
+  const p = `sources.${i}`;
+  return `<div class="card">
+    <strong>${esc(s.id)}</strong> <span class="pill ${s.format}">${s.format.toUpperCase()}</span> <span class="pill">${s.mode}</span>
+    <button class="act" data-del="${i}">Remove</button><br>
+    <label>id<input type="text" data-bind="${p}.id"></label>
+    <label>citation_url<input type="text" class="wide" data-bind="${p}.citationUrl" data-rerender="sources"></label>
+    <label>acquire_url (empty = citation_url)<input type="text" class="wide" data-bind="${p}.acquireUrl" data-rerender="sources"></label><br>
+    <label>relation<select data-bind="${p}.relation"><option>citation</option><option>body_url</option></select></label>
+    <label>citation_count<input type="number" min="0" max="10000" data-bind="${p}.citationCount"></label>
+    <label>mode<select data-bind="${p}.mode" data-rerender="sources"><option>http</option><option>manual</option></select></label>
+    <label>Expected format<select data-bind="${p}.format" data-rerender="sources"><option value="pdf">Public PDF</option><option value="html">HTML</option></select></label>
+    ${s.format === "pdf"
+      ? `<label>Expected page count<input type="number" min="1" data-bind="${p}.expectedPages"></label>`
+      : `<label>HTML completeness indicator (text that only the full page contains)<input type="text" class="wide" data-bind="${p}.htmlIndicator"></label>`}<br>
+    <label>Title<input type="text" class="wide" data-bind="${p}.title"></label>
+    <label>Publisher<input type="text" data-bind="${p}.publisher"></label>
+    <label>Submit label<input type="text" data-bind="${p}.label"></label>
+    <div>Collection conditions: <span data-cond="${i}">${conditionsHTML(s)}</span></div>
+  </div>`;
+}
+
+// ---------- 3. Verify ----------
+const HTML_TEXT = new Map(); // source id -> loaded HTML text, this page session only
+const ACCESS_PHRASES = ["access denied","access restricted","forbidden","unauthorized","authentication required","login required","sign in","log in","login","captcha","just a moment","verify you are human","verify that you are human","checking your browser","security check","attention required"];
+function accessHeading(t){
+  const s = t.toLowerCase().split(/\s+/).filter(Boolean).join(" ").replace(/^[ .!?:]+|[ .!?:]+$/g, "");
+  return ACCESS_PHRASES.some(p => s === p || s.startsWith(p + " - ") || s.startsWith(p + " | "));
+}
+async function analyze(buf){
+  const bytes = new Uint8Array(buf);
+  const hex = [...new Uint8Array(await crypto.subtle.digest("SHA-256", buf))].map(b => b.toString(16).padStart(2, "0")).join("");
+  const head = new TextDecoder("latin1").decode(bytes.slice(0, 1024));
+  const r = {sha256:hex, bytes:bytes.length, format:"other"};
+  if (head.startsWith("%PDF-")) {
+    const text = new TextDecoder("latin1").decode(bytes);
+    r.format = "pdf";
+    r.eof = new TextDecoder("latin1").decode(bytes.slice(-2048)).includes("%%EOF");
+    r.pageObjects = (text.match(/\/Type\s*\/Page(?![a-zA-Z])/g) || []).length;
+    return r;
+  }
+  let text;
+  try { text = new TextDecoder("utf-8", {fatal:true}).decode(bytes); } catch { r.utf8 = false; return r; }
+  const sniff = text.replace(/^\uFEFF/, "").trimStart().slice(0, 512).toLowerCase();
+  if (/^(<\?xml[^>]*>\s*)?(<!doctype html|<html|<head|<body|<!--)/.test(sniff)) {
+    r.format = "html";
+    r.text = text;
+    r.endTag = /<\/html>\s*$/i.test(text.trimEnd());
+    const doc = new DOMParser().parseFromString(text, "text/html");
+    r.title = doc.title;
+    r.accessPage = !!doc.querySelector("input[type=password i], #challenge-form, .challenge-form, .g-recaptcha, .h-captcha") ||
+      [...doc.querySelectorAll("title,h1")].some(n => accessHeading(n.textContent));
+  }
+  return r;
+}
+function completeness(s){
+  const r = s.recalc;
+  if (!r) return {verdict:"not_checked", why:["no file loaded"]};
+  const why = [];
+  if (r.format !== s.format) why.push(`detected ${r.format}, expected ${s.format}`);
+  if (s.format === "pdf" && r.format === "pdf") {
+    if (!r.eof) why.push("no %%EOF in the last 2 KiB (truncated?)");
+    const pages = s.pdfinfoPages !== "" ? +s.pdfinfoPages : null;
+    if (s.expectedPages === "") why.push("expected page count not set");
+    else if (pages === null) why.push("enter pdfinfo Pages (page objects are only an estimate)");
+    else if (pages !== +s.expectedPages) why.push(`pdfinfo Pages ${pages} != expected ${s.expectedPages}`);
+  }
+  if (s.format === "html" && r.format === "html") {
+    if (!r.endTag) why.push("no closing </html>");
+    if (r.accessPage) why.push("looks like an access or challenge page");
+    if (!s.htmlIndicator) why.push("completeness indicator not set");
+    else {
+      const live = HTML_TEXT.get(s.id);
+      const found = live !== undefined ? live.includes(s.htmlIndicator) : r.indicatorFor === s.htmlIndicator ? r.indicatorFound : null;
+      if (found === null) why.push("indicator changed since the file was loaded: load the file again");
+      else if (!found) why.push(`indicator "${s.htmlIndicator}" not found`);
+    }
+  }
+  if (r.format === "other") return {verdict:"rejected", why:["neither PDF nor UTF-8 HTML: media_not_allowed"]};
+  return {verdict: why.length ? "partial" : "complete", why};
+}
+function hashCompare(s){
+  const rec = String(s.record.sha256 || "").replace(/^sha256:/, "").toLowerCase();
+  if (!s.recalc || !rec) return {state:"incomplete", why:"record hash or file missing"};
+  const why = [];
+  if (rec !== s.recalc.sha256) why.push("SHA-256 differs");
+  if (s.record.bytes !== "" && +s.record.bytes !== s.recalc.bytes) why.push(`size ${s.record.bytes} != ${s.recalc.bytes}`);
+  return {state: why.length ? "mismatch" : "match", why:why.join("; ")};
+}
+function importStatus(s, raw){
+  const j = JSON.parse(raw);
+  const job = j.job || {}, cap = j.capture || {};
+  const at = (job.attempts || []).filter(a => a.response).pop() || (job.attempts || []).slice(-1)[0] || {};
+  let resp = {};
+  if (at.response) resp = JSON.parse(at.response);
+  const hops = resp.hops || [];
+  Object.assign(s.record, {
+    jobId: job.job_id || "", captureId: cap.capture_id || "",
+    sha256: cap.object_id || "", bytes: cap.size ?? resp.size ?? "",
+    mime: cap.media_type || (resp.headers || {})["Content-Type"] || "",
+    status: hops.length ? String(hops[hops.length - 1].status) : "",
+    finalUrl: resp.final_url || "", hops: hops.map(h => `${h.status} ${h.url}`).join("\n"),
+    collectedAt: resp.fetched_at || cap.recorded_at || at.finished_at || "",
+    completeness: cap.completeness || "", detail: at.detail || job.state || "",
+  });
+}
+function verifyResult(s){
+  const hv = checkRedirects(acquireURL(s), parseHops(s.record.hops), +S.policy.maxRedirects);
+  const h = hashCompare(s), c = completeness(s), r = s.recalc;
+  const cls = x => ({match:"ok", complete:"ok", mismatch:"bad", rejected:"bad", partial:"warn"}[x] || "muted");
+  return `<div>Redirect rules: ${vlist(hv)}</div>
+      <table><tr><th>Check</th><th>Recorded</th><th>Recalculated</th><th>Result</th></tr>
+        <tr><td>SHA-256</td><td class="mono">${esc(s.record.sha256)}</td><td class="mono">${r ? "sha256:" + r.sha256 : ""}</td><td class="${cls(h.state)}">${h.state} ${esc(h.why)}</td></tr>
+        <tr><td>Bytes</td><td>${esc(s.record.bytes)}</td><td>${r ? r.bytes : ""}</td><td></td></tr>
+        <tr><td>Format</td><td>${esc(s.record.mime)}</td><td>${r ? r.format : ""}</td><td></td></tr>
+        <tr><td>${s.format === "pdf" ? "Pages (expected / pdfinfo / page objects)" : "HTML (end tag / access page / title)"}</td>
+          <td>${s.format === "pdf" ? esc(s.expectedPages) : esc(s.htmlIndicator)}</td>
+          <td>${!r ? "" : s.format === "pdf" ? `${esc(s.pdfinfoPages)} / ${r.pageObjects ?? ""} · EOF ${r.eof ?? ""}` : `${r.endTag ?? ""} / ${r.accessPage ?? ""} / ${esc(r.title ?? "")}`}</td>
+          <td class="${cls(c.verdict)}">${c.verdict} ${esc(c.why.join("; "))}</td></tr>
+      </table>`;
+}
+function renderVerify(){
+  const el = $("#tab-verify");
+  el.innerHTML = S.sources.map((s, i) => {
+    const p = `sources.${i}.record`;
+    return `<div class="card">
+      <strong>${esc(s.id)}</strong> <span class="pill ${s.format}">${s.format.toUpperCase()}</span> <span class="mono">${esc(acquireURL(s))}</span>
+      <details><summary>Import <code>cogvault-trial status JOB_ID --json</code></summary>
+        <textarea data-import="${i}" placeholder='{"job":{...},"capture":{...}}'></textarea>
+        <button class="act" data-do-import="${i}">Fill record</button></details>
+      <label>Raw bytes<input type="number" data-bind="${p}.bytes" data-rerender="verify"></label>
+      <label>MIME type<input type="text" data-bind="${p}.mime"></label>
+      <label>HTTP status<input type="text" data-bind="${p}.status"></label>
+      <label>Collected at (UTC)<input type="text" data-bind="${p}.collectedAt"></label>
+      <label>Job ID<input type="text" data-bind="${p}.jobId"></label>
+      <label>Capture ID<input type="text" data-bind="${p}.captureId"></label><br>
+      <label>Final URL<input type="text" class="wide" data-bind="${p}.finalUrl"></label>
+      <label>Recorded SHA-256<input type="text" class="wide" data-bind="${p}.sha256" data-rerender="verify"></label><br>
+      <label style="width:48%">Redirect history (one hop per line: STATUS URL)<textarea data-bind="${p}.hops" data-rerender="verify"></textarea></label>
+      <label style="width:48%">Attempt detail / failure text<textarea data-bind="${p}.detail"></textarea></label>
+      <label>Recalculate from bytes<input type="file" data-file="${i}"></label>
+      ${s.format === "pdf" ? `<label>pdfinfo Pages<input type="number" data-bind="sources.${i}.pdfinfoPages" data-rerender="verify"></label>` : ""}
+      <div data-result="${i}">${verifyResult(s)}</div>
+    </div>`;
+  }).join("");
+  bindAll(el);
+  el.querySelectorAll("[data-do-import]").forEach(b => b.addEventListener("click", () => {
+    const i = +b.dataset.doImport;
+    try { importStatus(S.sources[i], $(`[data-import="${i}"]`).value); save(); renderTabs("verify"); }
+    catch (e) { alert("Not a status --json document: " + e.message); }
+  }));
+  el.querySelectorAll("[data-file]").forEach(inp => inp.addEventListener("change", async () => {
+    const f = inp.files[0]; if (!f) return;
+    const r = await analyze(await f.arrayBuffer());
+    const s = S.sources[+inp.dataset.file];
+    if (r.text !== undefined) HTML_TEXT.set(s.id, r.text); else HTML_TEXT.delete(s.id);
+    r.indicatorFor = s.htmlIndicator;
+    r.indicatorFound = r.text !== undefined && !!s.htmlIndicator && r.text.includes(s.htmlIndicator);
+    delete r.text; // bodies stay in memory only, never in localStorage
+    s.pdfinfoPages = ""; // a count read from the previous file must not vouch for this one
+    s.recalc = Object.assign(r, {fileName:f.name});
+    save(); renderTabs("verify");
+  }));
+}
+
+// ---------- 4. Scenarios ----------
+function renderScenarios(){
+  const el = $("#tab-scenarios");
+  const lane = l => l === "live" ? `<span class="pill warn">live external source</span>` : `<span class="pill ok">non-mutating</span>`;
+  el.innerHTML = Object.entries(SCENARIOS).map(([k, sc]) => `
+    <fieldset><legend>${esc(sc.title)}</legend>
+      ${sc.steps.map((st, j) => `<label class="inline"><input type="checkbox" data-check="${k}.${j}" ${S.checks[k + "." + j] ? "checked" : ""}> ${j + 1}. ${esc(st)}</label><br>`).join("")}
+      ${S.cases.map((c, i) => c.scenario !== k ? "" : `
+        <div class="card">${lane(c.lane)} <strong>${esc(c.id)}</strong> ${esc(c.title)}
+          <div class="muted">Steps: ${esc(c.steps)} · Expected: ${esc(c.expected)}</div>
+          <label>Result<select data-bind="cases.${i}.result" data-rerender="scenarios"><option value="">not run</option><option>pass</option><option>fail</option><option>blocked</option></select></label>
+          <label>Run at (UTC)<input type="text" data-bind="cases.${i}.ranAt"></label>
+          ${c.result === "fail" || c.result === "blocked" ? `
+          <label style="width:48%">Failure cause<textarea data-bind="cases.${i}.failure"></textarea></label>
+          <label style="width:48%">Reproduction steps<textarea data-bind="cases.${i}.repro"></textarea></label>` : ""}
+        </div>`).join("")}
+    </fieldset>`).join("") + `
+    <fieldset><legend>Already covered by automated checks (do not repeat here)</legend>
+      <table><tr><th>Check</th><th>Covers</th></tr>${EXISTING_TESTS.map(([a, b]) => `<tr><td class="mono">${esc(a)}</td><td>${esc(b)}</td></tr>`).join("")}</table>
+    </fieldset>`;
+  bindAll(el);
+  el.querySelectorAll("[data-check]").forEach(cb => cb.addEventListener("change", () => { S.checks[cb.dataset.check] = cb.checked; save(); }));
+}
+
+// ---------- 5. Manifest and export ----------
+function buildManifest(){
+  const m = {version:1, report_id:S.report.reportId, selected_sha256:S.report.selectedSha256, sources:S.sources.map(s => {
+    const o = {id:s.id, citation_url:s.citationUrl};
+    if (s.acquireUrl) o.acquire_url = s.acquireUrl;
+    Object.assign(o, {relation:s.relation, citation_count:+s.citationCount, mode:s.mode});
+    return o;
+  })};
+  const text = JSON.stringify(m);
+  const errs = [];
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/.test(m.report_id) || m.report_id.startsWith("cap_")) errs.push("report_id shape");
+  if (!/^sha256:[a-f0-9]{64}$/.test(m.selected_sha256)) errs.push("selected_sha256 must be sha256: plus 64 lowercase hex");
+  if (m.sources.length < 1 || m.sources.length > 5) errs.push("1 to 5 sources");
+  const ids = new Set();
+  m.sources.forEach(s => {
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$/.test(s.id) || ids.has(s.id)) errs.push(`${s.id}: id shape or duplicate`); ids.add(s.id);
+    if (!s.citation_url) errs.push(`${s.id}: citation_url is required`);
+    if (!Number.isInteger(s.citation_count) || s.citation_count < 0 || s.citation_count > 10000) errs.push(`${s.id}: citation_count must be a whole number from 0 to 10000`);
+    if (s.relation === "citation" && s.citation_count === 0) errs.push(`${s.id}: citation needs citation_count >= 1`);
+    if (s.mode === "http" && checkSelectedURL(s.acquire_url || s.citation_url).length) errs.push(`${s.id}: acquire URL fails selected_public_https`);
+  });
+  if (new TextEncoder().encode(text).length > 8192) errs.push("manifest over 8 KiB");
+  return {m, text, errs};
+}
+const CSV_COLS = ["id","format","mode","relation","citation_count","acquire_url","title","publisher","raw_bytes","mime_type","http_status","final_url","redirect_history","sha256","recalculated_sha256","hash_check","expected_pages","pdfinfo_pages","html_indicator","completeness_check","completeness_reasons","collected_at","job_id","capture_id","url_violations"];
+function sourceRows(){
+  return S.sources.map(s => {
+    const h = hashCompare(s), c = completeness(s);
+    const v = s.mode === "http" ? checkSelectedURL(acquireURL(s)).concat(checkRedirects(acquireURL(s), parseHops(s.record.hops), +S.policy.maxRedirects)) : [];
+    return {id:s.id, format:s.format, mode:s.mode, relation:s.relation, citation_count:s.citationCount, acquire_url:acquireURL(s), title:s.title, publisher:s.publisher,
+      raw_bytes:s.record.bytes, mime_type:s.record.mime, http_status:s.record.status, final_url:s.record.finalUrl, redirect_history:parseHops(s.record.hops),
+      sha256:s.record.sha256, recalculated_sha256:s.recalc ? "sha256:" + s.recalc.sha256 : "", hash_check:h.state,
+      expected_pages:s.expectedPages, pdfinfo_pages:s.pdfinfoPages, html_indicator:s.htmlIndicator, completeness_check:c.verdict, completeness_reasons:c.why,
+      collected_at:s.record.collectedAt, job_id:s.record.jobId, capture_id:s.record.captureId, url_violations:v.map(x => x.code)};
+  });
+}
+function csv(rows, cols){
+  const cell = v => { const s = Array.isArray(v) ? v.map(x => typeof x === "object" ? `${x.status} ${x.url}` : x).join(" | ") : String(v ?? ""); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  return [cols.join(","), ...rows.map(r => cols.map(c => cell(r[c])).join(","))].join("\n") + "\n";
+}
+function renderExport(){
+  const el = $("#tab-export");
+  const {text, errs} = buildManifest();
+  el.innerHTML = `
+  <fieldset><legend>Sample selected-source manifest (version 1, for import-manifest / trial_import_manifest)</legend>
+    <div>${errs.length ? `<ul class="v">${errs.map(e => `<li class="bad">${esc(e)}</li>`).join("")}</ul>` : `<span class="ok">valid: ${new TextEncoder().encode(text).length} bytes</span>`}</div>
+    <pre id="manifest">${esc(JSON.stringify(JSON.parse(text), null, 2))}</pre>
+    <button class="act" id="dl-manifest">Download selected-sources.json</button>
+    <p class="muted">Import queues and fetches nothing. The selected hash is a caller assertion, not proof of report coverage.</p>
+  </fieldset>
+  <fieldset><legend>Results</legend>
+    <button class="act" id="dl-json">Download results JSON</button>
+    <button class="act" id="dl-csv">Download sources CSV</button>
+    <button class="act" id="dl-cases">Download test cases CSV</button>
+    <button class="act" id="reset">Reset all state</button>
+  </fieldset>`;
+  $("#dl-manifest").addEventListener("click", () => download("selected-sources.json", text, "application/json"));
+  $("#dl-json").addEventListener("click", () => download("trial-verification.json", JSON.stringify({
+    generated_at:new Date().toISOString(), policy:S.policy, policy_findings:policyFindings(), nas:S.nas, manifest:JSON.parse(text), manifest_errors:errs,
+    sources:sourceRows(), checklists:S.checks, test_cases:S.cases}, null, 2), "application/json"));
+  $("#dl-csv").addEventListener("click", () => download("trial-sources.csv", csv(sourceRows(), CSV_COLS), "text/csv"));
+  $("#dl-cases").addEventListener("click", () => download("trial-test-cases.csv", csv(S.cases, ["id","scenario","lane","title","steps","expected","result","ranAt","failure","repro"]), "text/csv"));
+  $("#reset").addEventListener("click", () => { if (confirm("Reset all state?")) { S = defaultState(); save(); renderTabs("policy"); } });
+}
+
+renderTabs(TABS.some(([k]) => k === location.hash.slice(1)) ? location.hash.slice(1) : "policy");
+</script>
+</body>
+</html>
