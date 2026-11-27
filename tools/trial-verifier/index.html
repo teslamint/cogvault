@@ -273,14 +273,20 @@ function bindAll(root){
     let o = S; for (const k of path.slice(0, -1)) o = o[k];
     const k = path[path.length - 1];
     if (el.type === "checkbox") el.checked = !!o[k]; else el.value = o[k] ?? "";
-    // Text fields re-render on change, not input: replacing the tab mid-typing drops focus.
+    // Selects and checkboxes may change the layout, so they redraw the tab. Text fields refresh only
+    // computed result areas: replacing inputs drops focus, pasted text and an in-progress click.
     el.addEventListener(el.tagName === "SELECT" || el.type === "checkbox" ? "change" : "input", () => {
       o[k] = el.type === "checkbox" ? el.checked : el.type === "number" ? (el.value === "" ? "" : +el.value) : el.value;
       save();
-      if (el.dataset.rerender && (el.tagName === "SELECT" || el.type === "checkbox")) renderTabs(el.dataset.rerender);
+      if (!el.dataset.rerender) return;
+      if (el.tagName === "SELECT" || el.type === "checkbox") renderTabs(el.dataset.rerender); else refresh(el.dataset.rerender);
     });
-    if (el.dataset.rerender && el.tagName !== "SELECT" && el.type !== "checkbox") el.addEventListener("change", () => renderTabs(el.dataset.rerender));
   });
+}
+function refresh(tab){
+  if (tab === "policy") $("#nas-verdict").innerHTML = nasVerdict();
+  else if (tab === "sources") S.sources.forEach((s, i) => { $(`[data-cond="${i}"]`).innerHTML = conditionsHTML(s); });
+  else if (tab === "verify") S.sources.forEach((s, i) => { $(`[data-result="${i}"]`).innerHTML = verifyResult(s); });
 }
 
 // ---------- 1. Policy ----------
@@ -329,7 +335,7 @@ function renderPolicy(){
     <label>Listener Created<input type="text" data-bind="nas.listenerCreated"></label>
     <label>Deployed at (UTC)<input type="text" data-bind="nas.deployedAt"></label>
     <label class="inline"><input type="checkbox" data-bind="nas.prodUnchanged"> Production cogvault and cloudflared unchanged</label>
-    <div>${nasVerdict()}</div>
+    <div id="nas-verdict">${nasVerdict()}</div>
   </fieldset>`;
   bindAll(el);
   $("#probe").addEventListener("input", e => { $("#probe-out").innerHTML = vlist(checkSelectedURL(e.target.value)); });
@@ -365,8 +371,10 @@ function renderSources(){
   $("#add-src").addEventListener("click", () => { S.sources.push(blankSource(S.sources.length + 1)); save(); renderTabs("sources"); });
   el.querySelectorAll("[data-del]").forEach(b => b.addEventListener("click", () => { S.sources.splice(+b.dataset.del, 1); save(); renderTabs("sources"); }));
 }
+function conditionsHTML(s){
+  return s.mode === "manual" ? `<span class="muted">manual source: no HTTP submission; use import-original</span>` : vlist(checkSelectedURL(acquireURL(s)));
+}
 function sourceCard(s, i){
-  const v = s.mode === "http" ? checkSelectedURL(acquireURL(s)) : [];
   const p = `sources.${i}`;
   return `<div class="card">
     <strong>${esc(s.id)}</strong> <span class="pill ${s.format}">${s.format.toUpperCase()}</span> <span class="pill">${s.mode}</span>
@@ -384,7 +392,7 @@ function sourceCard(s, i){
     <label>Title<input type="text" class="wide" data-bind="${p}.title"></label>
     <label>Publisher<input type="text" data-bind="${p}.publisher"></label>
     <label>Submit label<input type="text" data-bind="${p}.label"></label>
-    <div>Collection conditions: ${s.mode === "manual" ? `<span class="muted">manual source: no HTTP submission; use import-original</span>` : vlist(v)}</div>
+    <div>Collection conditions: <span data-cond="${i}">${conditionsHTML(s)}</span></div>
   </div>`;
 }
 
@@ -472,13 +480,25 @@ function importStatus(s, raw){
     completeness: cap.completeness || "", detail: at.detail || job.state || "",
   });
 }
+function verifyResult(s){
+  const hv = checkRedirects(acquireURL(s), parseHops(s.record.hops), +S.policy.maxRedirects);
+  const h = hashCompare(s), c = completeness(s), r = s.recalc;
+  const cls = x => ({match:"ok", complete:"ok", mismatch:"bad", rejected:"bad", partial:"warn"}[x] || "muted");
+  return `<div>Redirect rules: ${vlist(hv)}</div>
+      <table><tr><th>Check</th><th>Recorded</th><th>Recalculated</th><th>Result</th></tr>
+        <tr><td>SHA-256</td><td class="mono">${esc(s.record.sha256)}</td><td class="mono">${r ? "sha256:" + r.sha256 : ""}</td><td class="${cls(h.state)}">${h.state} ${esc(h.why)}</td></tr>
+        <tr><td>Bytes</td><td>${esc(s.record.bytes)}</td><td>${r ? r.bytes : ""}</td><td></td></tr>
+        <tr><td>Format</td><td>${esc(s.record.mime)}</td><td>${r ? r.format : ""}</td><td></td></tr>
+        <tr><td>${s.format === "pdf" ? "Pages (expected / pdfinfo / page objects)" : "HTML (end tag / access page / title)"}</td>
+          <td>${s.format === "pdf" ? esc(s.expectedPages) : esc(s.htmlIndicator)}</td>
+          <td>${!r ? "" : s.format === "pdf" ? `${esc(s.pdfinfoPages)} / ${r.pageObjects ?? ""} · EOF ${r.eof ?? ""}` : `${r.endTag ?? ""} / ${r.accessPage ?? ""} / ${esc(r.title ?? "")}`}</td>
+          <td class="${cls(c.verdict)}">${c.verdict} ${esc(c.why.join("; "))}</td></tr>
+      </table>`;
+}
 function renderVerify(){
   const el = $("#tab-verify");
   el.innerHTML = S.sources.map((s, i) => {
     const p = `sources.${i}.record`;
-    const hv = checkRedirects(acquireURL(s), parseHops(s.record.hops), +S.policy.maxRedirects);
-    const h = hashCompare(s), c = completeness(s), r = s.recalc;
-    const cls = x => ({match:"ok", complete:"ok", mismatch:"bad", rejected:"bad", partial:"warn"}[x] || "muted");
     return `<div class="card">
       <strong>${esc(s.id)}</strong> <span class="pill ${s.format}">${s.format.toUpperCase()}</span> <span class="mono">${esc(acquireURL(s))}</span>
       <details><summary>Import <code>cogvault-trial status JOB_ID --json</code></summary>
@@ -494,18 +514,9 @@ function renderVerify(){
       <label>Recorded SHA-256<input type="text" class="wide" data-bind="${p}.sha256" data-rerender="verify"></label><br>
       <label style="width:48%">Redirect history (one hop per line: STATUS URL)<textarea data-bind="${p}.hops" data-rerender="verify"></textarea></label>
       <label style="width:48%">Attempt detail / failure text<textarea data-bind="${p}.detail"></textarea></label>
-      <div>Redirect rules: ${vlist(hv)}</div>
       <label>Recalculate from bytes<input type="file" data-file="${i}"></label>
       ${s.format === "pdf" ? `<label>pdfinfo Pages<input type="number" data-bind="sources.${i}.pdfinfoPages" data-rerender="verify"></label>` : ""}
-      <table><tr><th>Check</th><th>Recorded</th><th>Recalculated</th><th>Result</th></tr>
-        <tr><td>SHA-256</td><td class="mono">${esc(s.record.sha256)}</td><td class="mono">${r ? "sha256:" + r.sha256 : ""}</td><td class="${cls(h.state)}">${h.state} ${esc(h.why)}</td></tr>
-        <tr><td>Bytes</td><td>${esc(s.record.bytes)}</td><td>${r ? r.bytes : ""}</td><td></td></tr>
-        <tr><td>Format</td><td>${esc(s.record.mime)}</td><td>${r ? r.format : ""}</td><td></td></tr>
-        <tr><td>${s.format === "pdf" ? "Pages (expected / pdfinfo / page objects)" : "HTML (end tag / access page / title)"}</td>
-          <td>${s.format === "pdf" ? esc(s.expectedPages) : esc(s.htmlIndicator)}</td>
-          <td>${!r ? "" : s.format === "pdf" ? `${esc(s.pdfinfoPages)} / ${r.pageObjects ?? ""} · EOF ${r.eof ?? ""}` : `${r.endTag ?? ""} / ${r.accessPage ?? ""} / ${esc(r.title ?? "")}`}</td>
-          <td class="${cls(c.verdict)}">${c.verdict} ${esc(c.why.join("; "))}</td></tr>
-      </table>
+      <div data-result="${i}">${verifyResult(s)}</div>
     </div>`;
   }).join("");
   bindAll(el);
@@ -568,6 +579,8 @@ function buildManifest(){
   const ids = new Set();
   m.sources.forEach(s => {
     if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$/.test(s.id) || ids.has(s.id)) errs.push(`${s.id}: id shape or duplicate`); ids.add(s.id);
+    if (!s.citation_url) errs.push(`${s.id}: citation_url is required`);
+    if (!Number.isInteger(s.citation_count) || s.citation_count < 0 || s.citation_count > 10000) errs.push(`${s.id}: citation_count must be a whole number from 0 to 10000`);
     if (s.relation === "citation" && s.citation_count === 0) errs.push(`${s.id}: citation needs citation_count >= 1`);
     if (s.mode === "http" && checkSelectedURL(s.acquire_url || s.citation_url).length) errs.push(`${s.id}: acquire URL fails selected_public_https`);
   });
