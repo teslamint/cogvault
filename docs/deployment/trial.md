@@ -378,6 +378,15 @@ explicitly approved public copy. Optional `external_original` has `sha256`,
 reference claim. No report title/body, transcript, activity log or local path is
 accepted by the remote schema. Do not paste a raw Deep Research JSON export.
 
+To prepare and check such a manifest offline, open
+`tools/trial-verifier/index.html` in a browser. This static page sends no
+request and changes nothing. It checks URLs against the `selected_public_https`
+rules, generates a manifest, and compares recorded and recalculated hashes
+against PDF page counts or HTML completeness. It also tracks the scenario
+checklists, including policy restoration on both containers and NAS
+confirmation. Results export as CSV or JSON. Its URL rules copy
+`selectedPublicHTTPS`, so update the page when that function changes.
+
 ## First selected-report import record
 
 The approved first real-report trial replaced only the trial MCP listener with
