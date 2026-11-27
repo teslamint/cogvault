@@ -273,11 +273,13 @@ function bindAll(root){
     let o = S; for (const k of path.slice(0, -1)) o = o[k];
     const k = path[path.length - 1];
     if (el.type === "checkbox") el.checked = !!o[k]; else el.value = o[k] ?? "";
+    // Text fields re-render on change, not input: replacing the tab mid-typing drops focus.
     el.addEventListener(el.tagName === "SELECT" || el.type === "checkbox" ? "change" : "input", () => {
       o[k] = el.type === "checkbox" ? el.checked : el.type === "number" ? (el.value === "" ? "" : +el.value) : el.value;
       save();
-      if (el.dataset.rerender) renderTabs(el.dataset.rerender);
+      if (el.dataset.rerender && (el.tagName === "SELECT" || el.type === "checkbox")) renderTabs(el.dataset.rerender);
     });
+    if (el.dataset.rerender && el.tagName !== "SELECT" && el.type !== "checkbox") el.addEventListener("change", () => renderTabs(el.dataset.rerender));
   });
 }
 
@@ -520,6 +522,7 @@ function renderVerify(){
     r.indicatorFor = s.htmlIndicator;
     r.indicatorFound = r.text !== undefined && !!s.htmlIndicator && r.text.includes(s.htmlIndicator);
     delete r.text; // bodies stay in memory only, never in localStorage
+    s.pdfinfoPages = ""; // a count read from the previous file must not vouch for this one
     s.recalc = Object.assign(r, {fileName:f.name});
     save(); renderTabs("verify");
   }));
