@@ -456,7 +456,8 @@ conditional caller; `wiki_delete`'s call is unconditional and predates 0024.
 wikilink warnings. `handleWikiSearch` adds a bounded `evidence.Summary` to each
 result, using `UnavailableSummary` when the page read fails. Both use the shared
 `internal/evidence` contract; search does not resolve refs. `server.go` appends
-server-owned evidence guidance after the schema instructions.
+server-owned evidence and conflict/provenance guidance (two constants) after the
+schema instructions; neither is part of the ingest digestion prompt.
 Instructions/`mapError`/write-then-index otherwise unchanged.
 
 ### 2.10 cmd/cogvault
